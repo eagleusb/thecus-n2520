@@ -1,0 +1,30 @@
+{
+    "name": "NasDaemon",
+    "version": "0.0.1",
+    "private": true,
+    "main": "nasd",
+    "scripts": {
+        "tarball": "node tarball",
+        "rebuild": "npm rebuild",
+        "yuidoc": "yuidoc -c yuidoc.json"
+    },
+    "dependencies": {
+        "express": "3.0.1",
+        "socket.io": "0.9.10",
+        "shelljs": "0.0.8",
+        "sqlite3": "2.1.5",
+        "quartz": "0.0.1",
+        "jade": "0.27.6",
+        "commander": "0.6.1",
+        "connect": "2.6.2",
+        "cookie": "0.0.4",
+        "cookie-signature": "0.0.1",
+        "crc": "0.2.0",
+        "debug": "*",
+        "fresh": "0.1.0",
+        "methods": "0.0.1",
+        "range-parser": "0.0.4",
+        "send": "0.1.0",
+        "mkdirp": "0.3.3"
+    }
+}

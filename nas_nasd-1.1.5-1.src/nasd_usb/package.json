@@ -1,0 +1,8 @@
+{
+    "main": "index",
+    "name": "USB",
+    "dependencies": {
+        "Rsync": "*"
+    },
+    "rpc": true
+}

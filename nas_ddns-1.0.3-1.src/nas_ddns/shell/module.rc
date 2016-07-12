@@ -1,0 +1,91 @@
+#!/bin/sh
+PATH="$PATH:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+crond_conf="/etc/cfg/crond.conf"
+tmp_crond_conf="/tmp/tmp_crond_conf"
+rc_ddns="/opt/ddns_client/shell/module.rc"
+ddns_client="/usr/bin/ddns_client"
+sql_excuter="/usr/bin/sqlite /etc/cfg/conf.db "
+
+init_env(){
+    thecus_ddns=`${sql_excuter} "select v from conf where k='thecus_ddns'"`
+}
+
+check_ip(){
+    echo "`/usr/bin/wget -T 10 -t 5 http://checkip.dyndns.org/ -q -O - |sed -e 's/.*Current IP Address: //' -e 's/<.*$//'`"
+}
+
+add_crond()
+{
+	on_crontab=`cat ${crond_conf} | awk '{print $6}' | grep "${rc_ddns}" | wc -l`
+	if [ "${on_crontab}" -eq 0 ]; then
+		echo "*/10 * * * * ${rc_ddns} crond > /dev/null 2>&1" >> ${crond_conf}
+		cat ${crond_conf} | crontab - -u root
+	fi
+}
+
+del_crond(){
+        local ddns_path=`echo ${rc_ddns} | sed "s:/:.:g"`
+        local conf_tmp=`cat ${crond_conf}`
+        if [ "`echo "$conf_tmp" | grep ${ddns_path}`" ];then
+                echo "$conf_tmp" | grep -v ${ddns_path} > ${crond_conf}
+                cat ${crond_conf} | crontab - -u root
+        fi
+}
+
+ddns_crond()
+{
+	## ddns enable
+	if [ "$thecus_ddns" = "1" ]; then
+        external_ip=`check_ip`
+        
+        if [ "${external_ip}" == "" ];then
+            exit        
+        fi
+        
+        if [ ! -f "/tmp/external_ip" ] || [ "`cat /tmp/external_ip`" != "${external_ip}" ] ;then
+            echo ${external_ip} > /tmp/external_ip
+        else
+            exit
+        fi
+    
+		thecus_id=`${sql_excuter} "select v from conf where k='thecus_id'"`
+		thecus_pwd=`${sql_excuter} "select v from conf where k='thecus_pwd'"`
+		mac=`ifconfig | awk '/eth0/{print $NF}'`
+		cmd="$ddns_client 3 $thecus_id '$thecus_pwd' $mac"
+		eval $cmd
+	fi
+}
+
+start(){
+    del_crond
+    ## ddns enable
+    if [ "$thecus_ddns" == "1" ]; then
+        add_crond
+        ddns_crond
+    fi
+}
+
+init_env
+
+case "$1" in
+    'boot'|'start')
+        start
+        ;;
+    'stop')
+        del_crond
+        ;;
+    'crond')
+        ddns_crond
+        ;;
+    'remove')
+        del_crond
+        ;;
+    'check_ip')
+        check_ip
+        ;;
+    *)
+        echo $"Usage: module.rc { boot | start | stop | crond | remove | check_ip | check_port}"
+        exit 1
+esac
+
+exit 0

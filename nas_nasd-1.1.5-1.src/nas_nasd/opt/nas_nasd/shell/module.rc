@@ -1,0 +1,108 @@
+#!/bin/bash
+
+NAME=NASD
+SOURCE_DIR=/opt/nas_nasd
+SOURCE_FILE=nasd.js
+
+PIDFILE=/var/run/$NAME.pid
+LOGFILE=/var/log/$NAME.log
+
+RETVAL=0
+
+start() {
+    if [ "$foreverid" == "" ]; then
+        touch $LOGFILE
+        touch $PIDFILE
+        
+        echo "Starting $NAME node instance: $SOURCE_FILE"
+        
+        PORT=3000 forever start \
+            -a -s \
+            -l $LOGFILE \
+            --pidFile $PIDFILE \
+            --sourceDir $SOURCE_DIR \
+            $SOURCE_FILE > /dev/null
+        
+        RETVAL=$?
+    else
+        echo -n "Starting $NAME node instance: "
+        echo "Instance already running"
+        RETVAL=0
+    fi
+}
+ 
+stop() {
+    echo -n "Shutting down $NAME node instance: "
+    if [ "$foreverid" != "" ]; then
+        echo ""
+        forever stop $foreverid | grep -E "($LOGFILE)|(uptime)"
+    else
+        echo "Instance is not running";
+    fi
+    RETVAL=$?
+}
+
+restart() {
+    if [ "$foreverid" != "" ]; then
+        echo "Restart $NAME node instance: "
+        forever restart $foreverid > /dev/null
+        status
+    else
+        start
+        status
+    fi
+    RETVAL=$?
+}
+
+status() {
+    forever list | grep -E "($LOGFILE)|(uptime)"
+}
+
+read_pid() {
+    if [ -f $PIDFILE ]; then
+        read pid < $PIDFILE
+    else
+        pid=""
+    fi
+    
+    if [ "$pid" != "" ]; then
+        sed="s/.*\[\([0-9]\+\)\].*/\1/g"
+        foreverid=`forever list | grep $LOGFILE | sed $sed`
+    else
+        foreverid=""
+    fi
+}
+ 
+case "$1" in
+    boot|start)
+        read_pid
+        start
+        status
+        ;;
+    stop)
+        case "$SYS_ACTION" in
+            SHUTDOWN|REBOOT|FORCE)
+                read_pid
+                stop
+                ;;
+            *)
+                ;;
+         esac
+        ;;
+    forcestop)
+        read_pid
+        stop
+        ;;
+    restart)
+        read_pid
+        restart
+        ;;
+    status)
+        status
+        ;;
+    *)
+        echo "Usage:  {boot|start|stop|forcestop|restart|status}"
+        exit 1
+        ;;
+esac
+exit $RETVAL

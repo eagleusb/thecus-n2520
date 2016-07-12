@@ -1,0 +1,20 @@
+{
+    "name": "Thecus NAS Develop Reference",
+    "description": "Document is generated from service and application automatically",
+    "version": "0.0.1",
+    "options": {
+        "linkNatives": "true",
+        "attributesEmit": "true",
+        "selleck": "true",
+        "exclude": "public,node_modules",
+        "ignorePaths": [
+            "public",
+            "node_modules"
+        ],
+        "paths": [
+            "./",
+            "./service"
+        ]
+    }
+}
+

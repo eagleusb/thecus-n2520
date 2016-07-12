@@ -1,0 +1,36 @@
+doctype 5
+html
+    head
+        title= title
+        meta(http-equiv="X-UA-Compatible",content="IE=edge,chrome=1")
+        link(rel="shortcut icon", type="image/ico", href="/favicon.ico")
+        link(rel="stylesheet", type="text/css", href="/nas/css")
+        script(type="text/javascript", src="/nas/extjs")
+        script(type="text/javascript", src="/nas/rpc")
+
+script(type="text/javascript")
+    Ext.onReady(inittail);
+    
+    function inittail() {
+        var tpl = new Ext.XTemplate('{[this.render()]}');
+        var i = 0;
+        tpl.render = function () {
+            return [
+                '<div style="display: table-cell; vertical-align: middle;">',
+                    '<div style="display: inline-block; text-align: middle; width: 640px; height: 480px; border: 1px solid red;">',
+                        'Healthy',
+                    '</div>',
+                '</div>'
+            ].join('');
+        }
+        
+        new Ext.container.Viewport({
+            layout: 'fit',
+            items: {
+                id: 'status',
+                style: 'display: table; text-align: center;',
+                xtype: 'dataview',
+                tpl: tpl
+            }
+        });
+    }
