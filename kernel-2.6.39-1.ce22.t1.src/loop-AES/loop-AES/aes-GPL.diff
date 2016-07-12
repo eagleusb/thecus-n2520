@@ -1,0 +1,44 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+
+This patch updates licenses of assembler implementations of AES derived from
+Brian Gladman's implementation as published in December 2001. This license
+change may also be applied to older aes-i586.S file.
+
+To apply this patch, type:  patch -p0 <aes-GPL.diff
+
+- --- aes-amd64.S.old	Sat Jun 12 17:31:41 2004
++++ aes-amd64.S	Sat Aug  7 12:42:53 2004
+@@ -18,6 +18,10 @@
+ //     any products derived from this software without his specific prior
+ //     written permission.
+ //
++//  ALTERNATIVELY, provided that this notice is retained in full, this product
++//  may be distributed under the terms of the GNU General Public License (GPL),
++//  in which case the provisions of the GPL apply INSTEAD OF those given above.
++//
+ //  This software is provided 'as is' with no express or implied warranties
+ //  of correctness or fitness for purpose.
+ 
+- --- aes-x86.S.old	Sat Jun 12 17:31:41 2004
++++ aes-x86.S	Sat Aug  7 12:42:53 2004
+@@ -18,6 +18,10 @@
+ //     any products derived from this software without his specific prior
+ //     written permission.
+ //
++//  ALTERNATIVELY, provided that this notice is retained in full, this product
++//  may be distributed under the terms of the GNU General Public License (GPL),
++//  in which case the provisions of the GPL apply INSTEAD OF those given above.
++//
+ //  This software is provided 'as is' with no express or implied warranties
+ //  of correctness or fitness for purpose.
+ 
+-----BEGIN PGP SIGNATURE-----
+Version: GnuPG v1.2.5 (GNU/Linux)
+Comment: http://loop-aes.sourceforge.net/PGP-public-key.asc
+
+iQCVAwUBQRSmnzMKg0M6Ig9RAQGlqwQAuo+IKkZG6YR9UOOYyOt3B9rmFJOEaasY
+rrDH5CJHl2ycYmsI+pBX4nZiuqj1GIsXdTOS4da6xEXnPi7YQB+JOkxRB4h3GonR
+UDCsAKz/JtycRXLq0tiExBJunQR3/HPrRm4pGq5FjdlqQIuudgYmrHpgJ+b3Qh8b
+XHDFQ+KZ/I4=
+=5g8K
+-----END PGP SIGNATURE-----

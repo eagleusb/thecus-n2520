@@ -1,0 +1,651 @@
+loop-AES-v1.0c    April 11 2001
+    - First release to public.
+
+loop-AES-v1.1b    April 16 2001
+    - SHA-256, SHA-384 and SHA-512 hashes added.
+
+loop-AES-v1.2d    May 7 2001
+    - Newer AES cipher implementation from Dr Brian Gladman, with
+      precomputed lookup tables and little speed improvement.
+    - Support for old 2.0 kernels.
+    - Makefile now runs "depmod -a" instead of "depmod" after installing
+      loop.o driver.
+
+loop-AES-v1.3b    June 27 2001
+    - Mount and losetup programs now understand -p option to read password
+      from file descriptor instead of terminal.
+    - Cipher tests now integrated into Makefile.
+    - Optional kernel 2.4 patch version included for those people who prefer
+      not to use modules.
+    - Data corrupting bug with LVM has been fixed (kernel 2.4 only). Thanks
+      to David Dodge for this bugfix.
+
+loop-AES-v1.3c    July 5 2001
+    - loop.c-2.4.original updated to Linus' 2.4.6 version, and Makefile
+      updated to compile that version on older kernels as well.
+
+loop-AES-v1.3d    August 4 2001
+    - loop.c-2.4.original updated to Alan Cox's 2.4.7-ac5 version (ext3
+      changes), and Makefile updated to compile that version on older
+      kernels as well.
+
+loop-AES-v1.4d    September 3 2001
+    - Little speed optimization in aes-glue.c
+    - External encryption module locking bug is fixed (kernel 2.4 only).
+      This bug did not affect loop-AES operation at all. This fix is from
+      Ingo Rohloff.
+    - On 2.4 kernels, device backed loop maintains private pre-allocated
+      pool of RAM pages that are used when kernel is totally out of free
+      RAM. This change also fixes stock loop.c sin of sleeping in
+      make_request_fn().
+
+loop-AES-v1.4e    September 29 2001
+    - Execute depmod only if target was currently running kernel.
+    - loop.c-2.4.original updated to Linus' 2.4.10 + fixes from 2.4.9-ac16,
+      with ifdefs so it compiles on older kernels as well.
+    - Rest of AES finalist cipher names added to util-linux patch.
+    - External encryption module locking bug is fixed (kernel 2.2 only,
+      backported kernel 2.4 fix). This bug did not affect loop-AES operation
+      at all.
+    - Password seeds can be used to slow down dictionary attacks. "-S XXX"
+      option added to losetup, and "-o pseed=XXX" option added to mount.
+    - For device backed loops, allocate pages only from private pool during
+      run time (kernel 2.4 only). This eases stress on the VM as some of
+      them can't handle stress too well.
+
+loop-AES-v1.4f    October 27 2001
+    - Use newly added KERNELRELEASE in kernel 2.0 modules install path.
+    - build-initrd.sh shell script included to build /boot/initrd.gz that
+      can be used when root partition is encrypted.
+    - Default blocksize computation of file backed loop now shrinks
+      blocksize only if necessary. Previous default was hardcoded 1024.
+    - Add a workaround for 5 parameter do_generic_file_read()
+    - loop.c-2.4.original updated to Alan Cox's 2.4.13-ac2, with ifdefs so
+      it compiles on older kernels as well.
+
+loop-AES-v1.4g    November 7 2001
+    - Fix ancient loop bug that prevented rw losetuping/mounting device
+      backed loop if looped to device node resided on ro mounted filesystem.
+    - Remove old wrong loop.o automatically on 2.4 kernels.
+    - Makefile now prints currently running kernel version and what kernel
+      version module was compiled for.
+    - Add a workaround for deactivate_page() that vanished in 2.4.14.
+    - loop.c-2.4.original updated with fixes from 2.4.14.
+
+loop-AES-v1.4h    November 24 2001
+    - Ugly macros cleaned from kernel-2.4.diff
+    - Add conditional reschedule to NONE and XOR transfers.
+    - build-initrd.sh modified to work with non-modular kernel.
+    - Fixed kernel 2.4 file backed loop page alloc error handling bug.
+
+loop-AES-v1.5b    December 25 2001
+    - Added second util-linux patch from Michael K. Johnson that adds -O
+      option to mount and umount programs.
+    - Added build-initrd.sh enhancements from Hauke Johannknecht.
+    - Fixed ancient loop.c off-by-one bug in offset computation (2.2 and 2.0
+      kernels only).
+    - loop.c-2.4.original updated with fixes from 2.4.17.
+    - Added optimized assembler implementation of AES cipher for Pentium or
+      better x86 processors.
+
+loop-AES-v1.5c    March 5 2002
+    - build-initrd.sh now works with devfs and can setup national keyboard
+      layout before asking password.
+    - Added losetup -d and losetup -e to "make tests" between writing test
+      file and reading test file. This is to prevent kernel from caching
+      test data.
+    - Added RIPE-MD160 hash, and "-H rmd160", "-I 123" options to losetup,
+      and "-o phash=rmd160,loinit=123" options to mount.
+    - loop.c-2.4.original updated with fixes from 2.4.19-pre2
+    - Added workaround for missing current->nice in recent -ac kernels.
+
+loop-AES-v1.6b    April 14 2002
+    - Fixed xgetpass() realloc error case handling bug.
+    - Fixed silly bug that enforced minimum password length if "-H rmd160"
+      and "-S xxx" options were both used simultaneously.
+    - Added -T option to losetup. -T asks password twice.
+    - Added NONE, XOR and unhashed AES tests to "make tests" script.
+    - Fixed NONE transfer remap optimization bug (2.4 and 2.5 kernels).
+    - Changed loop_make_request() so that it may sleep (partially reverts
+      loop-AES-v1.4d change to non-sleeping code).
+    - Added support for 2.5 kernels. Large part of 2.4 buffer_head to 2.5
+      bio porting work was done by Ben Slusky.
+    - "swapon -a" and "swapoff -a" now understand loop=/dev/loop? and
+      encryption=AES128 options in /etc/fstab for easier encrypted swap
+      setup.
+    - Make runs depmod with -F and -b options and kernel-version if they are
+      needed and depmod understands them.
+    - Merged build-initrd.sh additional loop module parameter and chdir("/")
+      fixes from Andreas Voegele.
+    - Added Dr Brian Gladman's copyright and terms to resulting object code
+      so that binary distributions can avoid legal trouble.
+    - Makefile updated to be compatible with Keith Owens' new kbuild.
+
+loop-AES-v1.6c    May 9 2002
+    - Fixed genuine loop bug that always exports loop sector size as 512
+      bytes regardless of sector size of underlying device (2.4, 2.2 and 2.0
+      kernels). Thanks to Peter Niemayer for reporting and testing this bug.
+    - Merged build-initrd.sh /boot/grub/menu.lst comments and kernel halt
+      changes from Jani Averbach.
+    - Modified build-initrd.sh to ask password again if mount failed. Also
+      added workarounds for misconfigured/buggy bootloaders.
+    - Added -a option to losetup that shows status of all configured loop
+      devices. Also fixed cosmetic bug that showed xor encryption as
+      unknown.
+    - Merged reparent_to_init() and set_current_state() fixes from
+      2.4.19-pre7-ac3
+    - Added workaround for 2.5 kernel block device module locking bug.
+    - loop.c-2.5.original updated with fixes from 2.5.14
+    - Fixed genuine loop bug that sometimes didn't sync all buffers before
+      releasing device (2.2 kernels).
+
+loop-AES-v1.6d    May 30 2002
+    - Fixed file backed loop bug that occasionally caused spurious I/O
+      errors. Fix is based on Andrew Morton's idea. (2.4 and 2.5 kernels)
+    - loop.c-2.5.original updated with fixes from 2.5.19
+    - Makefile updated to work with 2.5.19 and later kernels.
+
+loop-AES-v1.6e    June 17 2002
+    - Added "-K xxx", "-G yyy" options to losetup and "-o gpgkey=xxx", "-o
+      gpghome=yyy" options to mount that can be used to setup and mount loop
+      devices with GnuPG encrypted loop key.
+    - Removed build-gpgmount.sh because its functionality is now in mount
+      and losetup programs.
+    - Fixed file backed loop read error handling bug that only occured in
+      hurt-me-plenty case where looped to file was truncated while it was
+      being used (2.4 and 2.5 kernels).
+    - Makefile updated to work with 2.5.22 and later kernels.
+    - loop.c-2.5.original updated with fixes from 2.5.22
+
+loop-AES-v1.6f    August 14 2002
+    - Makefile updated to use CFLAGS_NOSTDINC with new kbuild.
+    - swapon now adds -v1 option to mkswap execv()'s on 2.5 kernels.
+    - Cosmetic fixups to some error case printk's in the loop driver.
+    - Added /dev/hd[efgh] and /dev/sd[efgh] support to build-initrd.sh
+    - Made build-initrd.sh work with GnuPG-key encrypted root partition.
+    - "swapoff -a" of encrypted partitions now writes some collected random
+      entropy to the partitions to be used on next "swapon -a"
+    - loop.c-2.5.original updated with fixes from 2.5.30
+    - Removed workaround for 2.5 kernel block device module locking bug.
+    - Fixed loop.o to work correctly with CONFIG_SOFTWARE_SUSPEND (2.4
+      kernels).
+    - loop.c-2.4.original updated with fixes from 2.4.20-pre2
+
+loop-AES-v1.6g    September 28 2002
+    - Removed unnecessary memcpy from file backed unencrypted loops (2.4 and
+      2.5 kernels).
+    - Dropped loop thread O(1) scheduler nice from -20 to -9 (2.4 and 2.5
+      kernels). No change for kernels using old scheduler.
+    - Fixed genuine loop bug that always exported loop sector size as 512
+      bytes regardless of sector size of underlying device (bug affected
+      only 2.5 kernels because other kernel versions were fixed earlier).
+      Fix was copied from Adam J. Richter's loop fixes.
+    - Fixed one file-backed-loop-on-tmpfs bug (2.5 kernels only). Fix from
+      Adam J. Richter's loop fixes.
+    - Fixed default soft block size computation with non-zero loop offset
+      (2.4 and 2.5 kernels).
+    - Merged two driver init time out-of-mem-handling bugfixes from
+      2.4.20-pre7-ac1 (2.4 and 2.5 kernels)
+    - loop.c-2.2.original updated with fixes from 2.2.22
+    - Added support for CONFIG_LBD (2.5 kernels)
+    - loop.c-2.5.original updated with fixes from 2.5.39
+
+loop-AES-v1.6h    October 3 2002
+    - Fixed file backed loop bug where loop thread incorrectly inherited
+      maximum file size resource limit from mount process. This bug can
+      cause data loss if user mounting file backed loop has maximum file
+      size limit (ulimit -f) set smaller than size of loop file (2.4 and 2.5
+      kernels).
+    - loop.c-2.5.original updated with fixes from 2.5.40
+    - Added workaround for loop.h breakage in 2.5.40
+
+loop-AES-v1.6i    December 1 2002
+    - Removed support for Keith Owens' unmaintained kbuild-2.5
+    - Added loop device number to some error case printk's in the loop
+      driver (2.4 and 2.5 kernels).
+    - Makefile no longer attempts to use i586 assembler code on x86-64
+    - Makefile now uses pre-patched loop code on 2.4 and later kernels.
+    - loop.c-2.5.patched updated with fixes from 2.5.50
+    - Makefile updated to work with 2.5.50
+    - Added -F command line option to losetup. -F reads and uses loop
+      related mount options from /etc/fstab
+    - Module locking rewritten to support 2.5.48 and later kernels.
+    - Second util-linux patch dropped because mainline mount/umount now
+      understand -O option.
+    - Fixed bug where running 'swapoff -a' twice returned error status. Bug
+      fix from andras@chello.se
+
+loop-AES-v1.7a    December 26 2002
+    - Fixed bug where running 'swapon -a' in some encrypted swap error cases
+      didn't correctly return error status.
+    - Added "-C nnn" option to losetup and "-o itercountk=nnn" option to
+      mount that iterate encryption key nnn thousand times through AES-256.
+      Based on code from Sami Farin.
+    - build-initrd.sh updated to understand losetup "-C nnn" option.
+    - loop.c-2.5.patched updated with fixes from 2.5.53
+    - Added workaround for signal locking changes in RedHat 8.1 beta kernel.
+
+loop-AES-v1.7b    January 30 2003
+    - Removed struct loop_device delayed allocation optimization from
+      loop.c-2.5.patched because 2.5.58 needs a queue at add_disk() time.
+    - Modified Makefile to link with init/vermagic.o on 2.5 kernels.
+    - Added twofish160 encryption identifier to util-linux patch.
+    - Fixed bug that caused processes to be stuck in 'D' state in some rare
+      circumstances (2.4 and 2.5 kernels). This bug is present in loop-AES
+      versions v1.6b to v1.7a. Special thanks to Zygo Blaxell for bug
+      hunting and testing.
+
+loop-AES-v1.7c    March 25 2003
+    - Modified Makefile to link with new style version magic on 2.5 kernels.
+    - Added workaround for signal locking changes in RedHat 9.0 beta kernel.
+    - Updated GFP_* mask setting to modify inode->i_mapping->gfp_mask only
+      for file backed loops (2.4 and 2.5 kernels).
+    - loop.c-2.5.patched updated with fixes from 2.5.66
+
+loop-AES-v1.7d    June 13 2003
+    - Added kernel side support for struct loop_info64 (2.5 kernels).
+    - loop.c-2.5.patched updated with fixes from 2.5.70-bk
+    - Modified Makefile to use /sbin/ absolute path for depmod and losetup.
+    - build-initrd.sh now supports /dev/md* and /dev/fd[01] devices
+    - build-initrd.sh now supports GnuPG files on removable device
+    - Added warning about unsupported devices to build-initrd.sh
+    - Dropped loop thread O(1) scheduler nice from -9 to -1 (2.4 and 2.5
+      kernels). No change for kernels using old scheduler.
+    - Added lo_nice= module parameter for easier scheduler nice tuning (2.4
+      and 2.5 kernels).
+    - Added 'AES-unhashed' encryption type which can be used to access
+      ancient loop-AES-v1.0c disk images. Unhashed encryption type 'AES'
+      (without numbers) may eventually vanish because it conflicts with
+      kerneli.org syntax.
+    - Removed unused code from 'losetup -C' processing so that losetup and
+      mount programs are now little bit smaller.
+
+loop-AES-v1.7e    August 26 2003
+    - Removed now unnecessary module locking hacks on 2.6 kernels.
+    - loop.c-2.6.patched updated with fixes from 2.6.0-test4
+    - loop.c-2.4.patched updated with ioctl fixes from 2.4.22 and
+      2.4.20-SuSE-86 kernel.
+    - Removed SEPARATEMODULEDIR setting from build-initrd.sh. Now /linuxrc
+      loads modules from /boot/modules-KERNELRELEASE/ directory.
+    - Swapon now skips first page of swap partitions when setting up
+      encrypted swaps. This leaves unencrypted swap signature page
+      untouched. Based on code from Yoav Weiss.
+
+loop-AES-v2.0b    November 29 2003
+    - Added workaround for module naming breakage in recent
+      module-init-tools (2.6 kernels).
+    - loop.c-2.6.patched updated with fixes from 2.6.0-test11
+    - Added INITIALDELAY setting to build-initrd.sh. This delays /linuxrc
+      mounts to be more compatible with slowly initializing devices. Code
+      from Andreas Voegele.
+    - Added support for struct loop_info64 (2.4 kernels).
+    - Added support for removing offset from IV computations (2.4 and 2.6
+      kernels).
+    - Added -r option to losetup for read-only mode.
+    - 64 bit loop device/file offset can now be used on 2.4 and later
+      kernels.
+    - Added 64 bit "-s nnn" option to losetup and "-o sizelimit=nnn" option
+      to mount to limit size of loop device. This option works only on 2.4
+      and later kernels.
+    - Added support for MD5 IV computation and multi-key operation that
+      reduce chances of identical ciphertexts and triggers change to all
+      cipher blocks in 512 byte CBC chain if any bit is changed in the 512
+      byte CBC chain. MD5 IV is only used in multi-key mode, read losetup -K
+      man page for more details.
+    - Unhashed encryption type, created using ancient loop-AES-v1.0c, now
+      needs 'mount -o phash=unhashed1' or 'losetup -H unhashed1'.
+    - Added support for separate object dir on 2.6.x kernels.
+    - Eliminated highmem io buffer bouncing (2.4 and 2.6 kernels).
+    - Added proper error handling to kernel_thread() error cases (2.4 and
+      2.6 kernels).
+
+loop-AES-v2.0c    December 18 2003
+    - Fixed util-linux patch so it compiles on boxes where C library is
+      compiled against 2.6 kernel headers.
+    - Fixed SMP race that could corrupt data if all following conditions are
+      met: (1) loop device is in multi-key mode, (2) SMP or UP+PREEMPT box,
+      (3) shared writable mappings to a file, (4) memory mapped file data
+      modified at same time as that same data is being encrypted inside loop
+      transfer function, and (5) unclean shutdown so that re-dirtied page
+      won't get written again.
+
+loop-AES-v2.0d    December 19 2003
+    - v2.0c SMP race fix created new race with small security hole on 2.2
+      and 2.0 kernels when loop is in multi-key mode. That security hole is
+      now fixed. No change at all for 2.4 and later kernels because they
+      were not affected.
+
+loop-AES-v2.0e    January 21 2004
+    - Modified build-initrd.sh to make it work with Debian version of
+      module-init-tools. Patch from Martin Godisch.
+    - build-initrd.sh can now be configured to build linuxrc using dietlibc.
+      Patch originally from Martin Godisch. Patch cleaned up by Jari Ruusu.
+    - Tiny speed optimization in MD5 IV computation.
+    - Added workaround for Makefile breakage in 2.6.1-mm5
+    - Added workaround for CONFIG_REGPARM=y breakage.
+
+loop-AES-v2.0f    February 9 2004
+    - Modified build-initrd.sh so that initrd loads loop module using .ko
+      extension on 2.6 kernels. Previous version always used .o extension.
+    - Removed 2.6.1-mm5 Makefile breakage workaround.
+    - Modified Pentium assembler implementation detection to work with new
+      style CPU selection code that is present in some 2.6 kernels.
+    - Changed some build-initrd.sh defaults. New defaults are: USEGPGKEY=1,
+      USEPIVOT=1, and USEDIETLIBC=1
+    - Updated loop code to be compatible with Pavel Machek's software
+      suspend code (2.4 and 2.6 kernels).
+
+loop-AES-v2.0g    March 15 2004
+    - Fixed build-initrd.sh compile time incompatibility with Fedora Core1.
+    - Added support for Axboe's per-backing dev unplugging (2.6 kernels).
+    - Added kernel patch version for 2.6.4 kernel.
+
+loop-AES-v2.1a    May 8 2004
+    - Makefile updated to work with 2.6.6-rc3 kernel.
+    - build-initrd.sh changed to consume 40 KB less kernel RAM when used
+      with gpg encrypted key files. This change may break really old gpg
+      versions that choke with read-only mounted keyrings.
+    - Kernel patch versions now require removal of drivers/block/loop.c and
+      include/linux/loop.h source files before patch can be applied.
+    - Added back aes.c code that avoids byte swaps on big endian boxes. This
+      change improves performance on all non-x86 computers.
+    - Security fix: restrict length of passphrase to max 4094 bytes when it
+      is read from file descriptor using "mount -p 0" option.
+    - Added ioctl32 compatibility that is needed on 64bit boxes running
+      32bit losetup/mount programs (2.4 and 2.6 kernels).
+    - Fixed build-initrd.sh incompatibility with distros that have system
+      libraries in /lib64 instead of /lib
+
+loop-AES-v2.1b    May 27 2004
+    - Makefile and loop updated to work with 2.6.7-rc1-mm1 kernel.
+    - Fixed bio vec merge bug that only affected loop on top of md-raid0 or
+      md-linear (2.6 kernels only).
+    - Enabled support for 2.6 kernel bio write barriers using
+      QUEUE_FLAG_ORDERED flag.
+
+loop-AES-v2.1c    July 28 2004
+    - Adapted and merged Russell King's loop.c flush_dcache_page() fix. Most
+      sane processors were not affected, but some processors with goofy
+      aliasing caches were indeed affected (2.4 and 2.6 kernels).
+    - Added optimized assembler implementations of AES and MD5 functions for
+      AMD64 and compatible processors.
+    - Pentium-2 optimized assembler implementations of AES and MD5 are
+      really i386 compatible, so now those assembler implementations are
+      enabled for all x86 processors.
+    - Fixed Makefile to be compatible with distros that include ""
+      characters in KERNELRELEASE string.
+    - Added dkms.conf configuration file for Dynamic Kernel Module Support.
+      Charles Duffy wrote original version.
+    - Added support for /lib/modules/`uname -r`/source symlink.
+    - Converted MODULE_PARM macros to module_param (2.6 kernels only).
+    - Added workaround for scripts/modpost breakage (2.6 kernels only).
+
+loop-AES-v2.2a    September 8 2004
+    - Fixed multi-key ioctl incompatibility with sparc64 boxes running 64
+      bit kernel and 32 bit userland. Fix enabled for 2.4.26 and later 2.4
+      kernels. 2.6 kernels were not affected.
+    - Added key scrubbing support for AES loop cipher. This feature is not
+      enabled by default because it doubles storage space requirement for
+      loop encryption keys. To enable, add KEYSCRUB=y parameter to loop
+      module make command. (2.4 and 2.6 kernels only).
+    - Added multi-key compatibility to losetup and mount -p option handling.
+    - Fixed incompatibility with 2.6.8.1 kernel struct bio handling.
+    - Small optimization to bio I/O barrier support. Also added support for
+      queue->issue_flush_fn() I/O barrier calls. (2.6 kernels only).
+    - Added workaround for kernel bug that causes I/O errors on -EWOULDBLOCK
+      I/O elevator failures (2.6 kernels only).
+
+loop-AES-v2.2b    September 9 2004
+    - Fixed queue->issue_flush_fn() bug that slipped to loop-AES-v2.2a and
+      only affected barrier mounts on 2.6.9-rc and later kernels.
+
+loop-AES-v2.2c    October 24 2004
+    - Added compile time autodetection and workaround for per-thread vs.
+      per-process rlimits (2.6 kernels).
+    - Added Gentoo compatible binary key setup option to mount and losetup
+      'mount -p 0 -o phash=unhashed3' or 'losetup -p 0 -H unhashed3'.
+    - Added random key setup option to mount and losetup. This can be used
+      to encrypt /tmp with random keys.
+    - Added workaround for module_param_array() breakage in 2.6.10-rc
+
+loop-AES-v2.2d    October 26 2004
+    - Fixed mount so that it can set desired initial permissions for loop
+      mounted encrypted file system root directory with random keys. This
+      fix corrects README example 4 unwritable encrypted /tmp problem of
+      loop-AES-v2.2c.
+
+loop-AES-v3.0a    November 27 2004
+    - Added new improved version 3 on-disk format that includes one separate
+      key for MD5 IV computation. This fixes a weakness in IV computation
+      that normally is not exploitable.
+    - Fixed a bug that caused key file decrypt failure when gpg home
+      directory was on read-only mounted file system. This bug affected
+      encrypted root partition usage and is present only in losetup+mount
+      from loop-AES-v2.2c and loop-AES-v2.2d versions.
+
+loop-AES-v3.0b    January 16 2005
+    - Fixed externally compiled module version multi-key-v3 ioctl
+      incompatibility with boxes running 64 bit kernel and 32 bit userland.
+      Kernel patch versions were not affected (2.4 and 2.6 kernels).
+    - Fixed bug that made v3 on-disk format always use file backed code path
+      on some 2.6 kernels that did not have LO_FLAGS_DO_BMAP defined. No
+      data loss, but file backed code path is not journaled file system
+      safe. Same bug also had cosmetic side effect of "losetup -a" status
+      query always displaying file backed v2 on-disk format as v3 on-disk
+      format.
+
+loop-AES-v3.0c    March 18 2005
+    - Changed gpg pipe code in losetup/mount to use '--no-options' instead
+      of '--options /dev/null'. Fix from Lars Packschies.
+    - Changed losetup/mount programs to warn about unknown key data format.
+    - Added workaround for vanished QUEUE_FLAG_ORDERED define in
+      2.6.11-rc3-mm1 kernel.
+    - Changed gcc command line parameter order to be same as in kernel
+      Makefile. Wrong parameter order caused miscompilation with Xen
+      architecture (2.6 kernels).
+
+loop-AES-v3.0d    June 18 2005
+    - Added support for Red Hat installer specific LOOP_CHANGE_FD ioctl.
+      Patch from David Eduardo Gomez Noguera. (2.6 kernels)
+    - Added support for compat_ioctl. (2.6 kernels)
+    - Changed build-initrd.sh script to accept both old and new style ldd
+      program output.
+    - gcc4 cleanups.
+
+loop-AES-v3.1b    September 24 2005
+    - Added block I/O priority support. (2.6 kernels)
+    - Added VIA padlock hardware AES support. (2.4 and 2.6 kernels)
+    - Added losetup -R option which recomputes size of loop device. Useful
+      with loop device on top of LVM volume. Patch from Jim MacBaine. (2.4
+      and 2.6 kernels)
+
+loop-AES-v3.1c    January 18 2006
+    - WBINVD assembler instruction is no longer used on Xen builds.
+    - Makefile changed to probe .h header files instead of .c source files.
+      (2.4 and 2.6 kernels)
+    - compat_ioctl code updated to handle all 32bit/64bit loop ioctl
+      conversions on 2.6 kernels. No longer depends on fs/compat_ioctl.c
+      handling them.
+    - Semaphores are not used/needed anymore on 2.6 kernels.
+    - Makefile changed to work around 2.6.16-rc1 build breakage.
+
+loop-AES-v3.1d    April 10 2006
+    - Fixed Makefile incompatibility with USE_KBUILD=y build option.
+    - Fixed incompatibility with CONFIG_PAX_KERNEXEC=y PAX config option.
+    - Fixed incompatibility with old SuSE 8.0 kernel that caused scheduler
+      interface to be misdetected.
+    - Changed mount to honor offset=N and sizelimit=N mount options when
+      they were used in combination with random keys generating phash=random
+      mount option. Old encrypted data is used in new keys generation, but
+      earlier buggy version always read and erased old data at offset=0.
+    - Added mount patch from Max Vozeler that makes it easier to first fsck
+      and then mount encrypted file systems.
+
+loop-AES-v3.1e    October 28 2006
+    - Changed swapon program to use getpagesize() instead of PAGE_SIZE
+      macro. Fixes build failure on some architectures. Patch form Max
+      Vozeler.
+    - Fixed some confusing bits in README. Fix from Jens Lechtenboerger.
+    - Work around vanished <linux/config.h> in 2.6.19-rc2 kernel. Fixes
+      build failure.
+    - Changed loop code to use kthread_create() instead of kernel_thread()
+      on 2.6.19-rc and newer kernels.
+    - Changed losetup and mount programs to output error message if gpg
+      program does not exist when gpg encrypted key file is used.
+
+loop-AES-v3.1f    February 23 2007
+    - Work around dash /bin/sh shell and make-3.81 incompatibilities.
+    - Work around block layer breakage in 2.6.20-rcX-mmX kernels.
+    - Added "cleartextkey=file" mount option to mount, and "-P file" command
+      line option to losetup. These options help automounters.
+    - Added loop-aes-keygen script from Max Vozeler.
+
+loop-AES-v3.2a    May 15 2007
+    - loop_twofish.c loop_serpent.c loop_blowfish.c modules included. They
+      are not built by default. Add EXTRA_CIPHERS=y make parameter to build
+      them.
+    - Makefile rewritten to always use kbuild method on 2.6 kernels.
+    - Work around invalidate_bdev() changes on recent 2.6 kernels.
+
+loop-AES-v3.2b    October 25 2007
+    - Fixed compatibility detection problem involving separate obj/source
+      trees.
+    - Fixed request size problem on unencrypted device backed USB device.
+    - Added initramfs type initrd build option to build-initrd.sh script.
+      Patch from Fix <pr0gress0r@ngs.ru>.
+    - Added gcc version override option to build-initrd.sh script.
+    - Fixed losetup -P cleartext key option which always failed to work and
+      printed error message saying so.
+    - Added util-linux-ng patch.
+    - Worked around block layer interface breakage on linux-2.6.24-rc1
+      kernel.
+
+loop-AES-v3.2c    March 6 2008
+    - Fixed incompatibility with symlinks in /etc/fstab
+    - Fixed incompatibility with 2.6.25-rc kernels.
+
+loop-AES-v3.2d    October 28 2008
+    - Worked around minix mkfs regression in build-initrd.sh script. Fix
+      from Boris Wesslowski.
+    - Added -f option to losetup. Patch from Max Vozeler.
+    - Worked around block layer interface breakage on linux-2.6.28-rc
+      kernels.
+
+loop-AES-v3.2e    November 5 2008
+    - Fix null pointer dereference when loop was used to mount iso9660
+      CD-ROM image. This new bug was introduced in loop-AES-v3.2d, earlier
+      versions are ok. Thanks to Peter Koek for reporting this issue.
+
+loop-AES-v3.2f    March 25 2009
+    - Work around kernel interface changes in 2.6.29-rc kernels
+    - Maximum prealloc limit increased to 4096 pages.
+
+loop-AES-v3.2g    June 26 2009
+    - Fixed losetup -f bug in ancient util-linux-2.12r patch. This was
+      actually a link goof that linked wrong version of a function. Newer
+      util-linux-ng version was not affected. Bug reported by Phil Grundig.
+    - Worked around block layer interface breakage on linux-2.6.31-rc1
+      kernel.
+
+loop-AES-v3.2h    October 11 2009
+    - Worked around block layer interface breakage on linux-2.6.32-rc
+      kernels.
+
+loop-AES-v3.3a    March 16 2010
+    - Fixed build-initrd.sh so that initramfs type initrd (USEPIVOT=2) works
+      with linux software raid devices (/dev/md0 & co). Default pivot_root
+      type initrd (USEPIVOT=1) was/is ok. Patch from Hauke Johannknecht.
+    - build-initrd.sh now prefers to copy .static version of a program if
+      such version exists. Patch from Hank Leininger.
+    - Worked around block layer interface changes on linux-2.6.34-rc1
+      kernel.
+    - Fixed autodetection of optimized assembler code. autoconf.h file was
+      moved in 2.6.33 kernel, which caused incorrect autodetected default.
+    - Added support for new Intel AES instructions.
+
+loop-AES-v3.4a    June 11 2010
+    - Added faster (single thread) parallelized version Intel AES CBC
+      encrypt, both 32 bit and 64 bit versions.
+    - glue.c transfer functions re-write, better optimizations.
+    - Added faster (single thread) parallelized version of MD5 for 64 bit
+      amd64.
+    - Requests sent to backing device have BIO_RW_NOIDLE bit set if loop
+      driver believes that there won't be more requests anytime soon.
+
+loop-AES-v3.4b    September 23 2010
+    - Worked around block layer interface breakage on linux-2.6.36-rc
+      kernels.
+    - Added workaround for device open/close reference count race. This race
+      caused random loop-AES "make tests" failures with "ioctl: LOOP_CLR_FD:
+      Device or resource busy" error message. The workaround is in
+      util-linux patch (new mount/umount/losetup/swapon binaries). Thanks to
+      Julien Moutinho for reporting/testing this problem.
+
+loop-AES-v3.5a    November 10 2010
+    - Fixed device open/close reference count race, again. The fix in
+      previous version was not complete enough. Thanks to John Fitzgerald
+      for reporting/testing this problem.
+    - Worked around block layer interface breakage on linux-2.6.37-rc
+      kernels (FLUSH/FUA changes).
+    - Cleaned up lots of #ifdef spaghetti code for 2.6.37 and later kernels.
+    - Added "lo_threads" option for 2.6.37 and later kernels. This can be
+      used to configure the number of helper threads for device backed loops.
+
+loop-AES-v3.5b    November 11 2010
+    - Fixed a race that could temporarily occour between two (or more) loop
+      helper threads for same loop device. Two threads could interact with
+      each other an not go to sleep when they should. This race wasted CPU
+      cycles, but had no other ill effects.
+
+loop-AES-v3.6a    January 24 2011
+    - Worked around block layer interface breakage on 2.6.32.x, 2.6.36.x,
+      and 2.6.37-rc kernels.
+    - Queue code removal/rewrite for all 2.6.x kernels. This fixes a SMP
+      race when more than one helper thread (per loop device) was used.
+      Default was/is one helper thread. This race could leave backing device
+      in "plugged" state when it should have been "unplugged". This race was
+      introduced in loop-AES-v3.5a, and affected only 2.6.37 and later
+      kernels.
+    - Merged two loop kernel 2.6.x code bases back into one. This
+      unfortunately re-introduces lots of #ifdef spaghetti.
+
+loop-AES-v3.6b    February 26 2011
+    - Fixed a bug that can cause "NULL pointer dereference" at /dev/md*
+      backing device, and possibly other backing devices that call
+      __bio_clone(). This bug is present in loop-AES-v3.6a (and
+      loop-AES-v3.5 versions with linux-2.6.37 or later kernels).
+    - Fixed a bug that can cause slow operation or even deadlock. This bug
+      is present only in loop-AES-v3.6a version. Older versions are not
+      affected.
+
+loop-AES-v3.6c    April 29 2011
+    - Worked around block layer interface breakage on 2.6.39-rc kernels.
+
+loop-AES-v3.6d    July 8 2011
+    - build-initrd.sh is now able to set up more than one loop device.
+    - Fixed build on 3.x kernels.
+    - Lots of #ifdef spaghetti removed for 3.x kernels.
+    - Fixed build on recent RHEL kernels.
+
+loop-AES-v3.6e    November 29 2011
+    - Worked around block layer interface breakage on 3.2-rc kernels.
+
+loop-AES-v3.6f    November 13 2012
+    - Worked around block layer interface changes on 3.7-rc kernels.
+    - Fixed bug that caused loop device to report un-optimal I/O size on
+      some backing devices. This bug caused bad performance.
+    - Fixed bug that assumed /bin/sh -> bash. For /bin/sh -> dash case some
+      auto-detections failed.
+
+loop-AES-v3.6g    November 25 2012
+    - Fixed bug that could cause hang if backing device is stacking device,
+      for example /dev/md* device. Many thanks to Norbert Warmuth for
+      reporting and chasing this bug.
+
+loop-AES-v3.6h    April 29 2013
+    - Fixed bug that caused compile failure if kernel configuration has
+      CONFIG_UIDGID_STRICT_TYPE_CHECKS=y. Patch from Hank Leininger.
+    - Worked around block layer interface changes on 3.9 kernels.
+
+loop-AES-v3.6i    July 1 2013
+    - Worked around block layer interface changes on 3.10 kernels.

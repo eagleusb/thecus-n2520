@@ -1,0 +1,5 @@
+kernel/drivers/target/target_core_mod.ko
+kernel/drivers/target/target_core_iblock.ko
+kernel/drivers/target/target_core_file.ko
+kernel/drivers/target/target_core_pscsi.ko
+kernel/drivers/target/iscsi/iscsi_target_mod.ko

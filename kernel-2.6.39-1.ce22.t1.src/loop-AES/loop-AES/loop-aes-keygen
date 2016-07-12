@@ -1,0 +1,225 @@
+#!/bin/sh
+#
+# loop-aes-keygen - Create loop-AES encryption keys
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; version 2 dated June, 1991.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program;  if not, write to the Free Software
+# Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111, USA.
+# 
+# Copyright 2005-2006, Max Vozeler <xam@debian.org>
+#
+# $Id: loop-aes-keygen 1333 2006-12-02 15:07:20Z xam $
+#
+
+set -e
+
+umask 077
+
+cipher=
+userids=
+rnd=/dev/random
+version=3
+
+usage()
+{
+	cat << USAGE
+usage: loop-aes-keygen [opts] <keyfile>
+
+  -v <1|2|3>	   Key format (Default: $version)
+  -u userid        Encrypt for GnuPG pubkey <userid>
+  -c cipher        Use GnuPG cipher <cipher>
+
+USAGE
+}
+
+get_options()
+{
+	while getopts 'v:s:c:u:h' f
+	do
+		case $f in
+		v) 
+			version=$OPTARG
+			;;
+
+		c)
+			cipher=$OPTARG
+			;;
+
+		s)
+			rnd=$OPTARG
+			;;
+
+		u)
+			userids="$userids $OPTARG"
+			;;
+			
+		h)
+			usage
+			exit 0
+			;;
+		esac
+	done
+	shift `expr $OPTIND - 1`
+
+	keyfile=$1
+	
+	if [ -z $keyfile ]; then
+		echo No output file. Aborting
+		usage
+		exit 1
+	fi
+
+	if [ $version -lt 1 ] || [ $version -gt 3 ]; then
+		echo Unsupported key format: $version
+		exit 1
+	fi
+}
+
+check_safe_loop()
+{
+	loopdev=$1
+
+	opts=$(/sbin/losetup $loopdev 2>&1)
+	if [ $? -ne 0 ]; then
+		echo "Error: Check for $loopdev failed ($opts)"
+		exit 1
+	fi
+		
+	# If loop entry has an encryption= option assume it's safe
+	if echo "$opts" | grep -q encryption=; then
+		return 0
+	fi
+
+	return 1
+}
+
+check_safe_swap()
+{
+	if [ ! -r /proc/swaps ]; then
+		echo Error: Cannot read /proc/swaps
+		exit 1
+	fi
+
+	unsafe=
+	while read line
+	do
+		set -- $line
+		case $1 in
+		/dev/loop*)
+			if ! check_safe_loop $1; then
+				unsafe=$1
+				break
+			fi
+			;;
+		Filename*)
+			;;
+		*)
+			unsafe=$1
+			break
+			;;
+		esac
+	done < /proc/swaps
+
+	if [ $unsafe ]; then
+		echo Fatal: Unsafe swap detected: $unsafe
+		exit 1
+	fi
+
+	return 0
+}
+
+check_multikey_support ()
+{
+	match=
+	case $1 in
+	1)
+		return 0;;
+	2)
+		match="multi-key";;
+	3)
+		match="multi-key-v3";;
+	*)
+		return 1;;
+	esac
+	grep -q "$match" /sbin/losetup
+}
+
+keygen()
+{
+	version=$1
+	keyfile=$2
+	gpgargs=$3
+
+	# These are the known loop-AES key formats:
+	#  v1.x    1     45 bytes           AES key         
+	#  v2.x   64   2880 bytes(45 * 64)  AES keys       
+	#  v3.x   65   2925 bytes(45 * 65)  #65 is md5 seed
+	case $version in
+	1) 
+		nkeys=1;;
+	2) 
+		nkeys=64;;
+	3) 
+		nkeys=65;;
+	*) 
+		return 1;;
+	esac
+
+	head -c 3705 $rnd | uuencode -m - | head -n $(($nkeys+1)) | tail -n $nkeys | gpg $gpgargs > $keyfile
+}
+
+get_options $*
+
+if ! check_safe_swap; then
+	exit 1
+fi
+
+if ! [ -x /usr/bin/gpg ]; then
+	echo "Error: gpg not found"
+	exit 1
+fi
+
+if ! [ -x /usr/bin/uuencode ]; then
+	echo "Error: uuencode not found - see package sharutils"
+	exit 1
+fi
+
+if ! check_multikey_support $version; then
+	echo "Warning: /sbin/losetup too old for v$version keys."
+fi
+
+if [ -e $keyfile ]; then
+	echo "Keyfile $keyfile exists. Aborting."
+	exit 1
+fi
+
+gpgargs="--armor"
+
+if [ "$userids" ]; then
+	gpgargs="$gpgargs --encrypt"
+	for id in $userids; do
+		gpgargs="$gpgargs --recipient $id"
+	done
+else
+	gpgargs="$gpgargs --symmetric"
+fi
+
+if [ $cipher ]; then
+	gpgargs="$gpgargs --cipher-algo=$cipher"
+fi
+
+if ! keygen $version $keyfile "$gpgargs"; then
+	echo An error occured while creating the key file.
+	exit 1
+fi
+
+exit 0

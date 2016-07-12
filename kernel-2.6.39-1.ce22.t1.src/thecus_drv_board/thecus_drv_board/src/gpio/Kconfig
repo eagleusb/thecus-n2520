@@ -1,0 +1,106 @@
+#
+# Miscellaneous I2C chip drivers configuration
+#
+# *** DEPRECATED! Do not add new entries! See Makefile ***
+#
+
+menu "Miscellaneous Thecus Chip support"
+
+config THECUS_BOARD
+	bool "Thecus Board I/O Device"
+	default y
+	help
+	  If you say yes here you get support for Thecus board device.
+
+config THECUS_PCA9532
+	bool "Thecus PCA9532 GPIO Device"
+	depends on I2C && EXPERIMENTAL
+	help
+	  If you say yes here you get support for Thecus pca9532 device.
+
+config THECUS_N16000_IO
+	tristate "Thecus N16000 MB I/O operation"
+	depends on THECUS_EVENT && THECUS_BOARD
+	select THECUS_PCA9532
+	help
+	  If you say yes here you get support for the
+	  Thecus N16000 MB io operation.
+
+	  This driver can also be built as a module. If so, the module
+	  will be called n16000_io.
+
+config THECUS_N8900_IO
+	tristate "Thecus N8900 MB I/O operation"
+	depends on THECUS_EVENT && THECUS_BOARD
+	select THECUS_PCA9532
+	help
+	  If you say yes here you get support for the
+	  Thecus N8900 MB io operation.
+
+	  This driver can also be built as a module. If so, the module
+	  will be called n8900_io.
+
+config THECUS_N2800_IO
+	tristate "Thecus N2800 MB I/O operation"
+	depends on THECUS_EVENT && THECUS_BOARD
+	select THECUS_PCA9532
+	help
+	  If you say yes here you get support for the
+	  Thecus N2800 MB io operation.
+
+	  This driver can also be built as a module. If so, the module
+	  will be called n2800_io.
+
+config THECUS_N7700PRO_IO
+	tristate "Thecus N7700PRO MB I/O operation"
+	depends on THECUS_EVENT && THECUS_BOARD
+	select THECUS_PCA9532
+	help
+	  If you say yes here you get support for the
+	  Thecus N7700PRO MB io operation.
+
+	  This driver can also be built as a module. If so, the module
+	  will be called n7700pro_io.
+
+config THECUS_N2520_IO
+	tristate "Thecus N2520 MB I/O operation"
+	depends on THECUS_EVENT && THECUS_BOARD && THECUS_PICUART_GPIO && ARCH_GEN3
+	select THECUS_PCA9532
+	help
+	  If you say yes here you get support for the
+	  Thecus N2520 MB io operation.
+
+	  This driver can also be built as a module. If so, the module
+	  will be called n2520_io.
+
+config THECUS_PICUART_GPIO
+	tristate "Thecus PICUART GPIO operation"
+	depends on ARCH_GEN3
+	help
+	  If you say yes here you get support for the
+	  Thecus PICUART GPIO operation.
+
+	  This driver can also be built as a module. If so, the module
+	  will be called picuart_gpio.
+
+config THECUS_PIC24
+	tristate "Thecus PIC24 operation"
+	depends on ARCH_GEN3
+	help
+	  If you say yes here you get support for the
+	  Thecus PICUART GPIO operation.
+
+	  This driver can also be built as a module. If so, the module
+	  will be called picuart_gpio.
+
+config THECUS_N2310_IO
+	tristate "Thecus N2310 MB I/O operation"
+	depends on THECUS_EVENT && THECUS_BOARD
+	help
+	  If you say yes here you get support for the
+	  Thecus N2310 MB io operation.
+
+	  This driver can also be built as a module. If so, the module
+	  will be called n2310_io.
+
+endmenu

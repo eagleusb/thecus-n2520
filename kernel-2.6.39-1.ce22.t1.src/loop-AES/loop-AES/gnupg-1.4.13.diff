@@ -1,0 +1,11 @@
+--- gnupg-1.4.13/g10/gpg.c.old	2012-12-20 19:22:26.000000000 +0200
++++ gnupg-1.4.13/g10/gpg.c	2013-01-09 17:58:51.000000000 +0200
+@@ -1879,7 +1879,7 @@
+     opt.cert_digest_algo = 0;
+     opt.compress_algo = -1; /* defaults to DEFAULT_COMPRESS_ALGO */
+     opt.s2k_mode = 3; /* iterated+salted */
+-    opt.s2k_count = 96; /* 65536 iterations */
++    opt.s2k_count = 208; /* 8388608 byte count */
+ #ifdef USE_CAST5
+     opt.s2k_cipher_algo = CIPHER_ALGO_CAST5;
+ #else

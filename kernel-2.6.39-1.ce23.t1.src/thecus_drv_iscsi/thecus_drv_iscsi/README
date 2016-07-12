@@ -1,0 +1,21 @@
+*****************************************************************************
+                             iSCSI Driver Patch
+                           Thecus Technology Corp.
+                               Copyright 2012
+*****************************************************************************
+1. Introduction
+    This package is used for porting iSCSI to specific Linux kernel source.
+It includes iscsi_target, target_core (for 2.6.32), header (for 2.6.32),
+patch file, and the setup script for patching.
+
+2. Installation
+    Using the setup script to patch these source files to your specific 
+Linux kernel source automatically.
+
+3. Usage
+   # cd thecus_drv_iscsi/
+   # sh setup.sh <path of Linux kernel source>
+
+NOTE:
+* The patch only for kernel 2.6.32 and 2.6.39.
+

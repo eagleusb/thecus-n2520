@@ -1,0 +1,40 @@
+# For building for the current running version of Linux
+TARGET		:= $(shell uname -r)
+# Or specific version
+#TARGET		:= 3.0.25
+#TARGET		:= 2.6.35.14
+#TARGET		:= 2.6.32.57
+
+KERNEL_MODULES	:= /lib/modules/$(TARGET)
+KERNEL_BUILD	:= $(KERNEL_MODULES)/build
+SYSTEM_MAP	:= $(shell if test -r /boot/System.map-$(TARGET) ; then echo /boot/System.map-$(TARGET) ; else echo $(KERNEL_BUILD)/System.map ; fi)
+
+#DRIVER := f71882fg f75387sg2 f75387sg1 it87 w83627ehf w83795
+DRIVER := it87
+
+# Directory below /lib/modules/$(TARGET)/kernel into which to install
+# the module:
+MOD_SUBDIR = drivers/thecus/hwmon
+
+obj-m	:= it87.o
+obj-m	+= f71882fg.o
+obj-m	+= f75387sg2.o
+obj-m	+= f75387sg1.o
+obj-m	+= w83627ehf.o
+obj-m	+= w83795.o
+#obj-m	:= $(DRIVER).o
+
+.PHONY: all install modules modules_install clean
+
+all: modules
+
+# Targets for running make directly in the external module directory:
+modules clean:
+	@$(MAKE) -C $(KERNEL_BUILD) M=$(CURDIR) $@
+
+install: modules_install
+
+modules_install:
+	test -d $(KERNEL_MODULES)/kernel/$(MOD_SUBDIR) || mkdir $(KERNEL_MODULES)/kernel/$(MOD_SUBDIR)
+	cp $(DRIVER).ko $(KERNEL_MODULES)/kernel/$(MOD_SUBDIR)
+	depmod -a -F $(SYSTEM_MAP) $(TARGET)

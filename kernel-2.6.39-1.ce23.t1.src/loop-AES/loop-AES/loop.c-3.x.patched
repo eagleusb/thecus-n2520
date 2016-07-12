@@ -1,0 +1,2118 @@
+/*
+ *  linux/drivers/block/loop.c
+ *
+ *  Written by Theodore Ts'o, 3/29/93
+ *
+ * Copyright 1993 by Theodore Ts'o.  Redistribution of this file is
+ * permitted under the GNU General Public License.
+ *
+ * DES encryption plus some minor changes by Werner Almesberger, 30-MAY-1993
+ * more DES encryption plus IDEA encryption by Nicholas J. Leon, June 20, 1996
+ *
+ * Modularized and updated for 1.1.16 kernel - Mitch Dsouza 28th May 1994
+ * Adapted for 1.3.59 kernel - Andries Brouwer, 1 Feb 1996
+ *
+ * Fixed do_loop_request() re-entrancy - Vincent.Renardias@waw.com Mar 20, 1997
+ *
+ * Added devfs support - Richard Gooch <rgooch@atnf.csiro.au> 16-Jan-1998
+ *
+ * Handle sparse backing files correctly - Kenn Humborg, Jun 28, 1998
+ *
+ * Loadable modules and other fixes by AK, 1998
+ *
+ * Make real block number available to downstream transfer functions, enables
+ * CBC (and relatives) mode encryption requiring unique IVs per data block.
+ * Reed H. Petty, rhp@draper.net
+ *
+ * Maximum number of loop devices now dynamic via max_loop module parameter.
+ * Russell Kroll <rkroll@exploits.org> 19990701
+ *
+ * Maximum number of loop devices when compiled-in now selectable by passing
+ * max_loop=<1-255> to the kernel on boot.
+ * Erik I. Bolsø, <eriki@himolde.no>, Oct 31, 1999
+ *
+ * Completely rewrite request handling to be make_request_fn style and
+ * non blocking, pushing work to a helper thread. Lots of fixes from
+ * Al Viro too.
+ * Jens Axboe <axboe@suse.de>, Nov 2000
+ *
+ * Support up to 256 loop devices
+ * Heinz Mauelshagen <mge@sistina.com>, Feb 2002
+ *
+ * IV is now passed as (512 byte) sector number.
+ * Jari Ruusu, May 18 2001
+ *
+ * External encryption module locking bug fixed.
+ * Ingo Rohloff <rohloff@in.tum.de>, June 21 2001
+ *
+ * Make device backed loop work with swap (pre-allocated buffers + queue rewrite).
+ * Jari Ruusu, September 2 2001
+ *
+ * Ported 'pre-allocated buffers + queue rewrite' to BIO for 2.5 kernels
+ * Ben Slusky <sluskyb@stwing.org>, March 1 2002
+ * Jari Ruusu, March 27 2002
+ *
+ * File backed code now uses file->f_op->read/write. Based on Andrew Morton's idea.
+ * Jari Ruusu, May 23 2002
+ *
+ * Exported hard sector size correctly, fixed file-backed-loop-on-tmpfs bug,
+ * plus many more enhancements and optimizations.
+ * Adam J. Richter <adam@yggdrasil.com>, Aug 2002
+ *
+ * Added support for removing offset from IV computations.
+ * Jari Ruusu, September 21 2003
+ *
+ *
+ * Still To Fix:
+ * - Advisory locking is ignored here.
+ * - Should use an own CAP_* category instead of CAP_SYS_ADMIN
+ */
+
+#include <linux/version.h>
+#include <linux/module.h>
+#include <linux/moduleparam.h>
+#include <linux/sched.h>
+#include <linux/fs.h>
+#include <linux/file.h>
+#include <linux/bio.h>
+#include <linux/stat.h>
+#include <linux/errno.h>
+#include <linux/major.h>
+#include <linux/wait.h>
+#include <linux/blkdev.h>
+#include <linux/blkpg.h>
+#include <linux/init.h>
+#ifdef CONFIG_DEVFS_FS
+# include <linux/devfs_fs_kernel.h>
+#endif
+#include <linux/swap.h>
+#include <linux/slab.h>
+#include <linux/loop.h>
+#include <linux/suspend.h>
+#include <linux/writeback.h>
+#include <linux/buffer_head.h>		/* for invalidate_bdev() */
+#include <linux/completion.h>
+#include <linux/kthread.h>
+#if defined(CONFIG_COMPAT) && defined(HAVE_COMPAT_IOCTL)
+# include <linux/compat.h>
+#endif
+#include <linux/mqueue.h>
+#include <linux/delay.h>
+#include <linux/spinlock.h>
+#include <linux/backing-dev.h>
+
+#include <asm/uaccess.h>
+
+#if !defined(LO_FLAGS_DO_BMAP)
+# define LO_FLAGS_DO_BMAP 0x20000
+#endif
+#if !defined(LO_FLAGS_READ_ONLY)
+# define LO_FLAGS_READ_ONLY 0x40000
+#endif
+
+#ifndef LOOP_CHANGE_FD
+# define LOOP_CHANGE_FD 0x4C06
+#endif
+#if !defined(LOOP_MULTI_KEY_SETUP)
+# define LOOP_MULTI_KEY_SETUP 0x4C4D
+#endif
+#if !defined(LOOP_MULTI_KEY_SETUP_V3)
+# define LOOP_MULTI_KEY_SETUP_V3 0x4C4E
+#endif
+#if !defined(LOOP_RECOMPUTE_DEV_SIZE)
+# define LOOP_RECOMPUTE_DEV_SIZE 0x4C52
+#endif
+
+#if defined(CONFIG_COMPAT) && !defined(HAVE_COMPAT_IOCTL)
+# include <linux/ioctl32.h>
+# define IOCTL32_COMPATIBLE_PTR ((void*)0)
+#endif
+
+//#define LOOP_HAVE_CONGESTED_FN  1
+
+#define L_BIO_RW_AHEAD     (REQ_RAHEAD)
+#define L_BIO_RW_NOIDLE    (REQ_NOIDLE)
+#define L_BIO_RW_SYNCIO    (REQ_SYNC)
+
+static int max_loop = 8;
+
+module_param(max_loop, int, 0);
+MODULE_PARM_DESC(max_loop, "Maximum number of loop devices (1-256)");
+
+static struct gendisk **disks;
+
+/*
+ * Transfer functions
+ */
+static int transfer_none(struct loop_device *lo, int cmd, char *raw_buf,
+			 char *loop_buf, int size, sector_t real_block)
+{
+	/* this code is only called from file backed loop  */
+	/* and that code expects this function to be no-op */
+
+	cond_resched();
+	return 0;
+}
+
+static int transfer_xor(struct loop_device *lo, int cmd, char *raw_buf,
+			char *loop_buf, int size, sector_t real_block)
+{
+	char	*in, *out, *key;
+	int	i, keysize;
+
+	if (cmd == READ) {
+		in = raw_buf;
+		out = loop_buf;
+	} else {
+		in = loop_buf;
+		out = raw_buf;
+	}
+
+	key = lo->lo_encrypt_key;
+	keysize = lo->lo_encrypt_key_size;
+	for (i = 0; i < size; i++)
+		*out++ = *in++ ^ key[(i & 511) % keysize];
+	cond_resched();
+	return 0;
+}
+
+static int xor_init(struct loop_device *lo, struct loop_info64 *info)
+{
+	if (info->lo_encrypt_key_size <= 0)
+		return -EINVAL;
+	return 0;
+}
+
+static struct loop_func_table none_funcs = {
+	.number = LO_CRYPT_NONE,
+	.transfer = (void *)transfer_none,
+};
+
+static struct loop_func_table xor_funcs = {
+	.number = LO_CRYPT_XOR,
+	.transfer = (void *)transfer_xor,
+	.init = (void *)xor_init,
+};
+
+/* xfer_funcs[0] is special - its release function is never called */
+static struct loop_func_table *xfer_funcs[MAX_LO_CRYPT] = {
+	&none_funcs,
+	&xor_funcs,
+};
+
+/*
+ *  First number of 'lo_prealloc' is the default number of RAM pages
+ *  to pre-allocate for each device backed loop. Every (configured)
+ *  device backed loop pre-allocates this amount of RAM pages unless
+ *  later 'lo_prealloc' numbers provide an override. 'lo_prealloc'
+ *  overrides are defined in pairs: loop_index,number_of_pages
+ */
+static int lo_prealloc[9] = { 256, -1, 0, -1, 0, -1, 0, -1, 0 };
+#define LO_PREALLOC_MIN 4    /* minimum user defined pre-allocated RAM pages */
+#define LO_PREALLOC_MAX 4096 /* maximum user defined pre-allocated RAM pages */
+
+static int dummy1;
+module_param_array(lo_prealloc, int, &dummy1, 0);
+MODULE_PARM_DESC(lo_prealloc, "Number of pre-allocated pages [,index,pages]...");
+
+/*
+ *  First number of 'lo_threads' is the default number of helper threads to
+ *  create for each device backed loop device. Every (configured) device
+ *  backed loop device has this many threads unless later 'lo_threads'
+ *  numbers provide an override. File backed loops always have 1 helper
+ *  thread. 'lo_threads' overrides are defined in pairs: loop_index,threads
+ *
+ *  This value is ignored on 2.6.18 and older kernels.
+ */
+static int lo_threads[9] = { 1, -1, 0, -1, 0, -1, 0, -1, 0 };
+#define LO_THREADS_MIN 1    /* minimum user defined thread count */
+#define LO_THREADS_MAX 4    /* maximum user defined thread count */
+
+static int dummy2;
+module_param_array(lo_threads, int, &dummy2, 0);
+MODULE_PARM_DESC(lo_threads, "Number of threads per loop [,index,threads]...");
+
+/*
+ * This is loop helper thread nice value in range
+ * from 0 (low priority) to -20 (high priority).
+ */
+static int lo_nice = -1;
+
+module_param(lo_nice, int, 0);
+MODULE_PARM_DESC(lo_nice, "Loop thread scheduler nice (0 ... -20)");
+
+struct loop_bio_extension {
+	struct bio		*bioext_merge;
+	struct loop_device	*bioext_loop;
+	struct bio_vec          *bioext_bi_io_vec_orig;
+	sector_t		bioext_iv;
+	int			bioext_index;
+	int			bioext_size;
+	unsigned int            bioext_bi_max_vecs_orig;
+};	
+
+typedef struct {
+	struct loop_device	lo_orig;
+	atomic_t		lo_pending;
+	struct bio		*lo_bio_que0;
+	struct bio		*lo_bio_free0;
+	struct bio		*lo_bio_free1;
+	int			lo_bio_flshMax;
+	int			lo_bio_flshCnt;
+	wait_queue_head_t	lo_bio_wait;
+	wait_queue_head_t	lo_buf_wait;
+	sector_t		lo_offs_sec;
+	sector_t		lo_iv_remove;
+	struct completion	lo_done;
+	spinlock_t		lo_ioctl_spin;
+	int			lo_ioctl_busy;
+	wait_queue_head_t	lo_ioctl_wait;
+	struct request_queue 	*lo_backingQueue;
+#ifdef CONFIG_BLK_DEV_LOOP_KEYSCRUB
+	void			(*lo_keyscrub_fn)(void *);
+	void			*lo_keyscrub_ptr;
+#endif
+} LoDevExt;
+static struct loop_device **loop_dev_ptr_arr;
+
+#define LDE_lo_pending      (((LoDevExt *)lo)->lo_pending)
+#define LDE_lo_bio_que0     (((LoDevExt *)lo)->lo_bio_que0)
+#define LDE_lo_bio_free0    (((LoDevExt *)lo)->lo_bio_free0)
+#define LDE_lo_bio_free1    (((LoDevExt *)lo)->lo_bio_free1)
+#define LDE_lo_bio_flshMax  (((LoDevExt *)lo)->lo_bio_flshMax)
+#define LDE_lo_bio_flshCnt  (((LoDevExt *)lo)->lo_bio_flshCnt)
+#define LDE_lo_bio_wait     (((LoDevExt *)lo)->lo_bio_wait)
+#define LDE_lo_buf_wait     (((LoDevExt *)lo)->lo_buf_wait)
+#define LDE_lo_offs_sec     (((LoDevExt *)lo)->lo_offs_sec)
+#define LDE_lo_iv_remove    (((LoDevExt *)lo)->lo_iv_remove)
+#define LDE_lo_done         (((LoDevExt *)lo)->lo_done)
+#define LDE_lo_ioctl_spin   (((LoDevExt *)lo)->lo_ioctl_spin)
+#define LDE_lo_ioctl_busy   (((LoDevExt *)lo)->lo_ioctl_busy)
+#define LDE_lo_ioctl_wait   (((LoDevExt *)lo)->lo_ioctl_wait)
+#define LDE_lo_backingQueue (((LoDevExt *)lo)->lo_backingQueue)
+#ifdef CONFIG_BLK_DEV_LOOP_KEYSCRUB
+#define LDE_lo_keyscrub_fn  (((LoDevExt *)lo)->lo_keyscrub_fn)
+#define LDE_lo_keyscrub_ptr (((LoDevExt *)lo)->lo_keyscrub_ptr)
+#endif
+
+static void loop_prealloc_cleanup(struct loop_device *lo)
+{
+	struct bio *bio;
+	struct loop_bio_extension *extension;
+
+	while ((bio = LDE_lo_bio_free0)) {
+		LDE_lo_bio_free0 = bio->bi_next;
+		extension = bio->bi_private;
+		bio->bi_io_vec = extension->bioext_bi_io_vec_orig;
+		bio->bi_max_vecs = extension->bioext_bi_max_vecs_orig;
+		bio->bi_vcnt = 1;
+		__free_page(bio->bi_io_vec[0].bv_page);
+		kfree(extension);
+		bio->bi_next = NULL;
+		bio_put(bio);
+	}
+	while ((bio = LDE_lo_bio_free1)) {
+		LDE_lo_bio_free1 = bio->bi_next;
+		/* bi_flags bit 0 was used for other purpose */
+		clear_bit(0, &bio->bi_flags);
+		/* bi_size was used for other purpose */
+		bio->bi_size = 0;
+		/* bi_cnt was used for other purpose */
+		atomic_set(&bio->bi_cnt, 1);
+		bio->bi_next = NULL;
+		bio_put(bio);
+	}
+}
+
+static int loop_prealloc_init(struct loop_device *lo, int y)
+{
+	struct bio *bio;
+	struct loop_bio_extension *extension;
+	int x;
+
+	if(!y) {
+		y = lo_prealloc[0];
+		for (x = 1; x < (sizeof(lo_prealloc) / sizeof(int)); x += 2) {
+			if (lo_prealloc[x + 1] && (lo->lo_number == lo_prealloc[x])) {
+				y = lo_prealloc[x + 1];
+				break;
+			}
+		}
+	}
+	LDE_lo_bio_flshMax = (y * 3) / 4;
+	LDE_lo_bio_flshCnt = 0;
+
+	for (x = 0; x < y; x++) {
+		bio = bio_alloc(GFP_KERNEL, 1);
+		if (!bio) {
+			fail1:
+			loop_prealloc_cleanup(lo);
+			return 1;
+		}
+		bio->bi_io_vec[0].bv_page = alloc_page(GFP_KERNEL);
+		if (!bio->bi_io_vec[0].bv_page) {
+			fail2:
+			bio->bi_next = NULL;
+			bio_put(bio);
+			goto fail1;
+		}
+		memset(page_address(bio->bi_io_vec[0].bv_page), 0, PAGE_SIZE);
+		bio->bi_vcnt = 1;
+		extension = kmalloc(sizeof(struct loop_bio_extension), GFP_KERNEL);
+		if (!extension) {
+			__free_page(bio->bi_io_vec[0].bv_page);
+			goto fail2;
+		}
+		bio->bi_private = extension;
+		extension->bioext_bi_io_vec_orig = bio->bi_io_vec;
+		extension->bioext_bi_max_vecs_orig = bio->bi_max_vecs;
+		bio->bi_next = LDE_lo_bio_free0;
+		LDE_lo_bio_free0 = bio;
+
+		bio = bio_alloc(GFP_KERNEL, 1);
+		if (!bio)
+			goto fail1;
+		bio->bi_vcnt = 1;
+		bio->bi_next = LDE_lo_bio_free1;
+		LDE_lo_bio_free1 = bio;
+	}
+	return 0;
+}
+
+static void loop_add_queue_last(struct loop_device *lo, struct bio *bio, struct bio **q)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&lo->lo_lock, flags);
+	if (*q) {
+		bio->bi_next = (*q)->bi_next;
+		(*q)->bi_next = bio;
+	} else {
+		bio->bi_next = bio;
+	}
+	*q = bio;
+	spin_unlock_irqrestore(&lo->lo_lock, flags);
+
+	if (waitqueue_active(&LDE_lo_bio_wait))
+		wake_up_interruptible_all(&LDE_lo_bio_wait);
+}
+
+static struct bio *loop_get_bio(struct loop_device *lo)
+{
+	struct bio *bio = NULL, *last;
+
+	spin_lock_irq(&lo->lo_lock);
+	if ((last = LDE_lo_bio_que0)) {
+		bio = last->bi_next;
+		if (bio == last)
+			LDE_lo_bio_que0 = NULL;
+		else
+			last->bi_next = bio->bi_next;
+		bio->bi_next = NULL;
+	}
+	spin_unlock_irq(&lo->lo_lock);
+	return bio;
+}
+
+static void loop_put_buffer(struct loop_device *lo, struct bio *b, int flist)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&lo->lo_lock, flags);
+	if(!flist) {
+		b->bi_next = LDE_lo_bio_free0;
+		LDE_lo_bio_free0 = b;
+	} else {
+		b->bi_next = LDE_lo_bio_free1;
+		LDE_lo_bio_free1 = b;
+	}
+	spin_unlock_irqrestore(&lo->lo_lock, flags);
+
+	if (waitqueue_active(&LDE_lo_buf_wait))
+		wake_up_all(&LDE_lo_buf_wait);
+}
+
+static void loop_end_io_transfer(struct bio *bio, int err)
+{
+	struct loop_bio_extension *extension = bio->bi_private;
+	struct bio *merge = extension->bioext_merge;
+	struct loop_device *lo = extension->bioext_loop;
+	struct bio *origbio = merge->bi_private;
+
+	if (err) {
+		merge->bi_size = err; /* used as error code */
+		if(err == -EIO)
+			clear_bit(0, &merge->bi_flags);
+		printk(KERN_ERR "loop%d: loop_end_io_transfer err=%d bi_rw=0x%lx\n", lo->lo_number, err, bio->bi_rw);
+	}
+	if (bio_rw(bio) == WRITE) {
+		loop_put_buffer(lo, bio, 0);
+		if (!atomic_dec_and_test(&merge->bi_cnt)) {
+			return;
+		}
+		origbio->bi_next = NULL;
+		bio_endio(origbio, test_bit(0, &merge->bi_flags) ? (int)merge->bi_size : -EIO);
+		loop_put_buffer(lo, merge, 1);
+		if (atomic_dec_and_test(&LDE_lo_pending))
+			wake_up_interruptible_all(&LDE_lo_bio_wait);
+	} else {
+		loop_add_queue_last(lo, bio, &LDE_lo_bio_que0);
+	}
+}
+
+static struct bio *loop_get_buffer(struct loop_device *lo, struct bio *orig_bio,
+		struct bio **merge_ptr, int *flushPtr)
+{
+	struct bio *bio = NULL, *merge = *merge_ptr, *fbtst;
+	struct loop_bio_extension *extension;
+	int len, nzCnt, flsh = 0, firstVec, lastVec;
+
+	spin_lock_irq(&lo->lo_lock);
+	if (!merge) {
+		merge = LDE_lo_bio_free1;
+		if (merge) {
+			LDE_lo_bio_free1 = merge->bi_next;
+		}
+	}
+	if (merge) {
+		bio = LDE_lo_bio_free0;
+		if (bio) {
+			LDE_lo_bio_free0 = bio->bi_next;
+		}
+	}
+	fbtst = LDE_lo_bio_free0;
+	if(!fbtst || !fbtst->bi_next) {
+		flsh = 1;
+	}
+	fbtst = LDE_lo_bio_free1;
+	if(!fbtst || !fbtst->bi_next) {
+		flsh = 1;
+	}
+	spin_unlock_irq(&lo->lo_lock);
+
+	*flushPtr = flsh;
+
+	if (!(*merge_ptr) && merge) {
+		/*
+		 * initialize "merge-bio" which is used as
+		 * rendezvous point among multiple vecs
+		 */
+		*merge_ptr = merge;
+		merge->bi_sector = orig_bio->bi_sector + LDE_lo_offs_sec;
+		merge->bi_size = 0; /* used as error code */
+		set_bit(0, &merge->bi_flags);
+		merge->bi_idx = orig_bio->bi_idx;
+		nzCnt = orig_bio->bi_vcnt - orig_bio->bi_idx;
+		if(nzCnt < 1) nzCnt = 1;
+		atomic_set(&merge->bi_cnt, nzCnt);
+		merge->bi_private = orig_bio;
+	}
+
+	if (!bio)
+		return NULL;
+
+	extension = bio->bi_private;
+	firstVec = (!orig_bio->bi_vcnt || (merge->bi_idx == orig_bio->bi_idx)) ? 1 : 0;
+	lastVec = (!orig_bio->bi_vcnt || (merge->bi_idx == (orig_bio->bi_vcnt - 1))) ? 1 : 0;
+
+	/*
+	 * initialize one page "buffer-bio"
+	 */
+#if LINUX_VERSION_CODE >= 0x30700
+	bio_reset(bio);
+	bio->bi_private = extension;
+#else
+#if !defined(BIO_RESET_BITS)
+# define BIO_RESET_BITS BIO_POOL_OFFSET
+#endif
+	bio->bi_flags &= (~0UL << BIO_RESET_BITS);
+	bio->bi_flags |= (1 << BIO_UPTODATE);
+#endif
+	bio->bi_sector = merge->bi_sector;
+	bio->bi_next = NULL;
+	bio->bi_bdev = lo->lo_device;
+
+#if LINUX_VERSION_CODE < 0x30200
+	if(orig_bio->bi_flags & (1 << BIO_CPU_AFFINE)) {
+		bio->bi_comp_cpu = orig_bio->bi_comp_cpu;
+		bio->bi_flags |= (1 << BIO_CPU_AFFINE);
+	}
+#endif
+	/* read-ahead bit needs to be cleared to work around kernel bug */
+	/* that causes I/O errors on -EWOULDBLOCK I/O elevator failures */
+	bio->bi_rw = orig_bio->bi_rw & ~L_BIO_RW_AHEAD;
+
+	if(orig_bio->bi_rw & REQ_FLUSH) {
+		if(!firstVec) {
+			bio->bi_rw &= ~REQ_FLUSH;
+		} else {
+			*flushPtr = 1;
+		}
+	}
+	if(orig_bio->bi_rw & REQ_FUA) {
+		if(!lastVec) {
+			bio->bi_rw &= ~REQ_FUA;
+		} else {
+			*flushPtr = 1;
+		}
+	}
+	if(orig_bio->bi_rw & L_BIO_RW_SYNCIO) {
+		if(!lastVec) {
+			bio->bi_rw &= ~L_BIO_RW_SYNCIO;
+		} else {
+			*flushPtr = 1;
+		}
+	}
+	if(orig_bio->bi_rw & L_BIO_RW_NOIDLE) {
+		if(!lastVec) {
+			bio->bi_rw &= ~L_BIO_RW_NOIDLE;
+		}
+	}
+	if(flsh) {
+		bio->bi_rw |= L_BIO_RW_NOIDLE;
+	}
+
+	bio->bi_idx = 0;
+	bio->bi_phys_segments = 0;
+	if(orig_bio->bi_io_vec && orig_bio->bi_vcnt) {
+		/* original bio has data */
+		bio->bi_io_vec = extension->bioext_bi_io_vec_orig;
+		bio->bi_max_vecs = extension->bioext_bi_max_vecs_orig;
+		bio->bi_vcnt = 1;
+		bio->bi_size = len = orig_bio->bi_io_vec[merge->bi_idx].bv_len;
+		bio->bi_io_vec[0].bv_len = len;
+		bio->bi_io_vec[0].bv_offset = 0;
+	} else {
+		/* original bio does not have data */
+		bio->bi_io_vec = 0;	/* bio_has_data() expects this to be zero */
+		bio->bi_max_vecs = 0;   /* __bio_clone() expects this to be zero */
+		bio->bi_vcnt = 0;
+		bio->bi_size = len = 0;
+	}
+
+	bio->bi_seg_front_size = 0;
+	bio->bi_seg_back_size = 0;
+	bio->bi_end_io = loop_end_io_transfer;
+
+	/*
+	 * initialize "buffer-bio" extension. This extension is
+	 * permanently glued to above "buffer-bio" via bio->bi_private
+	 */
+	extension->bioext_merge = merge;
+	extension->bioext_loop = lo;
+	extension->bioext_iv = merge->bi_sector - LDE_lo_iv_remove;
+	extension->bioext_index = merge->bi_idx;
+	extension->bioext_size = len;
+
+	/*
+	 * prepare "merge-bio" for next vec
+	 */
+	merge->bi_sector += len >> 9;
+	merge->bi_idx++;
+
+	return bio;
+}
+
+static int figure_loop_size(struct loop_device *lo, struct block_device *bdev)
+{
+	loff_t size, offs;
+	sector_t x;
+	int err = 0;
+
+	size = i_size_read(lo->lo_backing_file->f_path.dentry->d_inode->i_mapping->host);
+	offs = lo->lo_offset;
+	if (!(lo->lo_flags & LO_FLAGS_DO_BMAP))
+		offs &= ~((loff_t)511);
+	if ((offs > 0) && (offs < size)) {
+		size -= offs;
+	} else {
+		if (offs)
+			err = -EINVAL;
+		lo->lo_offset = 0;
+		LDE_lo_offs_sec = LDE_lo_iv_remove = 0;
+	}
+	if ((lo->lo_sizelimit > 0) && (lo->lo_sizelimit <= size)) {
+		size = lo->lo_sizelimit;
+	} else {
+		if (lo->lo_sizelimit)
+			err = -EINVAL;
+		lo->lo_sizelimit = 0;
+	}
+	size >>= 9;
+
+	/*
+	 * Unfortunately, if we want to do I/O on the device,
+	 * the number of 512-byte sectors has to fit into a sector_t.
+	 */
+	x = (sector_t)size;
+	if ((loff_t)x != size) {
+		err = -EFBIG;
+		size = 0;
+	}
+
+	set_capacity(disks[lo->lo_number], size);	/* 512 byte units */
+	i_size_write(bdev->bd_inode, size << 9);	/* byte units */
+	return err;
+}
+
+static inline int lo_do_transfer(struct loop_device *lo, int cmd, char *rbuf,
+				 char *lbuf, int size, sector_t rblock)
+{
+	if (!lo->transfer)
+		return 0;
+
+	/* this ugly cast is needed to work around (possible) kmap damage in function prototype */
+	/* should be:  return lo->transfer(lo, cmd, rbuf, lbuf, size, rblock); */
+	return ((int (*)(struct loop_device *, int, char *, char *, int, sector_t))lo->transfer)(lo, cmd, rbuf, lbuf, size, rblock);
+}
+
+static int loop_file_io(struct file *file, char *buf, int size, loff_t *ppos, int w)
+{
+	mm_segment_t fs;
+	int x, y, z;
+
+	y = 0;
+	do {
+		z = size - y;
+		fs = get_fs();
+		set_fs(get_ds());
+		if (w) {
+			x = file->f_op->write(file, buf + y, z, ppos);
+			set_fs(fs);
+		} else {
+			x = file->f_op->read(file, buf + y, z, ppos);
+			set_fs(fs);
+			if (!x)
+				return 1;
+		}
+		if (x < 0) {
+			if ((x == -EAGAIN) || (x == -ENOMEM) || (x == -ERESTART) || (x == -EINTR)) {
+				set_current_state(TASK_INTERRUPTIBLE);
+				schedule_timeout(HZ / 2);
+				continue;
+			}
+			return 1;
+		}
+		y += x;
+	} while (y < size);
+	return 0;
+}
+
+static int do_bio_filebacked(struct loop_device *lo, struct bio *bio)
+{
+	loff_t pos;
+	struct file *file = lo->lo_backing_file;
+	char *data, *buf;
+	unsigned int size, len;
+	sector_t IV;
+	struct page *pg;
+
+	if(!bio->bi_io_vec || !bio->bi_vcnt)
+		return 0;
+
+	pos = ((loff_t) bio->bi_sector << 9) + lo->lo_offset;
+	buf = page_address(LDE_lo_bio_free0->bi_io_vec[0].bv_page);
+	IV = bio->bi_sector;
+	if (!LDE_lo_iv_remove)
+		IV += LDE_lo_offs_sec;
+	do {
+		pg = bio->bi_io_vec[bio->bi_idx].bv_page;
+		len = bio->bi_io_vec[bio->bi_idx].bv_len;
+		data = kmap(pg) + bio->bi_io_vec[bio->bi_idx].bv_offset;
+		while (len > 0) {
+			if (!lo->lo_encryption) {
+				/* this code relies that NONE transfer is a no-op */
+				buf = data;
+			}
+			size = PAGE_CACHE_SIZE;
+			if (size > len)
+				size = len;
+			if (bio_rw(bio) == WRITE) {
+				if (lo_do_transfer(lo, WRITE, buf, data, size, IV)) {
+					printk(KERN_ERR "loop%d: write transfer error, sector %llu\n", lo->lo_number, (unsigned long long)IV);
+					goto kunmap_and_out;
+				}
+				if (loop_file_io(file, buf, size, &pos, 1)) {
+					printk(KERN_ERR "loop%d: write i/o error, sector %llu\n", lo->lo_number, (unsigned long long)IV);
+					goto kunmap_and_out;
+				}
+			} else {
+				if (loop_file_io(file, buf, size, &pos, 0)) {
+					printk(KERN_ERR "loop%d: read i/o error, sector %llu\n", lo->lo_number, (unsigned long long)IV);
+					goto kunmap_and_out;
+				}
+				if (lo_do_transfer(lo, READ, buf, data, size, IV)) {
+					printk(KERN_ERR "loop%d: read transfer error, sector %llu\n", lo->lo_number, (unsigned long long)IV);
+					goto kunmap_and_out;
+				}
+				flush_dcache_page(pg);
+			}
+			data += size;
+			len -= size;
+			IV += size >> 9;
+		}
+		kunmap(pg);
+	} while (++bio->bi_idx < bio->bi_vcnt);
+	return 0;
+
+kunmap_and_out:
+	kunmap(pg);
+	return -EIO;
+}
+
+static void loop_unplug_backingdev(struct request_queue *bq)
+{
+	struct blk_plug *plug = current->plug;
+	if(plug) {
+		/* A thread may sleep and wait for new buffers from previously submitted requests. */
+		/* Make sure requests are actually sent to backing device, and not just queued. */
+		struct bio_list *blistTmp = current->bio_list;
+		current->bio_list = NULL;
+		blk_finish_plug(plug);	/* clears current->plug */
+		current->bio_list = blistTmp;
+		blk_start_plug(plug); 	/* sets current->plug */
+	}
+}
+
+#if LINUX_VERSION_CODE >= 0x30200
+static void loop_make_request_err(struct request_queue *q, struct bio *old_bio)
+#else
+static int loop_make_request_err(struct request_queue *q, struct bio *old_bio)
+#endif
+{
+	old_bio->bi_next = NULL;
+	bio_io_error(old_bio);
+#if LINUX_VERSION_CODE >= 0x30200
+	return;
+#else
+	return 0;
+#endif
+}
+
+#if LINUX_VERSION_CODE >= 0x30200
+static void loop_make_request_real(struct request_queue *q, struct bio *old_bio)
+#else
+static int loop_make_request_real(struct request_queue *q, struct bio *old_bio)
+#endif
+{
+	struct bio *new_bio, *merge;
+	struct loop_device *lo = q->queuedata;
+	struct loop_bio_extension *extension;
+	int rw = bio_rw(old_bio), y, x, flushFlag = 0;
+	char *md;
+	wait_queue_t waitq;
+
+	set_current_state(TASK_RUNNING);
+	if (!lo)
+		goto out;
+	if ((rw == WRITE) && (lo->lo_flags & LO_FLAGS_READ_ONLY))
+		goto out;
+	atomic_inc(&LDE_lo_pending);
+
+	/*
+	 * file backed, queue for loop_thread to handle
+	 */
+	if (lo->lo_flags & LO_FLAGS_DO_BMAP) {
+		loop_add_queue_last(lo, old_bio, &LDE_lo_bio_que0);
+#if LINUX_VERSION_CODE >= 0x30200
+		return;
+#else
+		return 0;
+#endif
+	}
+
+	/*
+	 * device backed, just remap bdev & sector for NONE transfer
+	 */
+	if (!lo->lo_encryption) {
+		old_bio->bi_sector += LDE_lo_offs_sec;
+		old_bio->bi_bdev = lo->lo_device;
+		generic_make_request(old_bio);
+		if (atomic_dec_and_test(&LDE_lo_pending))
+			wake_up_interruptible_all(&LDE_lo_bio_wait);
+#if LINUX_VERSION_CODE >= 0x30200
+		return;
+#else
+		return 0;
+#endif
+	}
+
+	/*
+	 * device backed, start reads and writes now if buffer available
+	 */
+	merge = NULL;
+	init_waitqueue_entry(&waitq, current);
+	try_next_old_bio_vec:
+	new_bio = loop_get_buffer(lo, old_bio, &merge, &flushFlag);
+	if (!new_bio) {
+		/* wait for buffer to be freed, and try again */
+		spin_lock_irq(&lo->lo_lock);
+		LDE_lo_bio_flshCnt = 0;
+		spin_unlock_irq(&lo->lo_lock);
+ 		loop_unplug_backingdev(LDE_lo_backingQueue);
+		add_wait_queue(&LDE_lo_buf_wait, &waitq);
+		for (;;) {
+			set_current_state(TASK_UNINTERRUPTIBLE);
+			x = 0;
+			spin_lock_irq(&lo->lo_lock);
+			if (!merge && LDE_lo_bio_free1) {
+				/* don't sleep if merge bio is available */
+				x = 1;
+			}
+			if (merge && LDE_lo_bio_free0) {
+				/* don't sleep if buffer bio is available */
+				x = 1;
+			}
+			spin_unlock_irq(&lo->lo_lock);
+			if (x)
+				break;
+			schedule();
+		}
+		set_current_state(TASK_RUNNING);
+		remove_wait_queue(&LDE_lo_buf_wait, &waitq);
+		goto try_next_old_bio_vec;
+	}
+	if ((rw == WRITE) && old_bio->bi_io_vec && old_bio->bi_vcnt) {
+		extension = new_bio->bi_private;
+		y = extension->bioext_index;
+		md = kmap(old_bio->bi_io_vec[y].bv_page) + old_bio->bi_io_vec[y].bv_offset;
+		if (lo_do_transfer(lo, WRITE, page_address(new_bio->bi_io_vec[0].bv_page), md, extension->bioext_size, extension->bioext_iv)) {
+			clear_bit(0, &merge->bi_flags);
+		}
+		kunmap(old_bio->bi_io_vec[y].bv_page);
+	}
+
+	/* merge & old_bio may vanish during generic_make_request() */
+	/* if last vec gets processed before function returns   */
+	y = (merge->bi_idx < old_bio->bi_vcnt) ? 1 : 0;
+
+	x = 0;
+	spin_lock_irq(&lo->lo_lock);
+	if((++LDE_lo_bio_flshCnt >= LDE_lo_bio_flshMax) || flushFlag) {
+		x = 1;
+		LDE_lo_bio_flshCnt = 0;
+		new_bio->bi_rw |= L_BIO_RW_NOIDLE;
+	}
+	spin_unlock_irq(&lo->lo_lock);
+
+	/* A thread may sleep and wait for new buffers from previously submitted requests. */
+	/* Make sure requests are actually sent to backing device, and not just queued. */
+	{
+		struct bio_list *blistTmp = current->bio_list;
+		current->bio_list = NULL;
+		generic_make_request(new_bio);
+		current->bio_list = blistTmp;
+	}
+
+	if (x)
+		loop_unplug_backingdev(LDE_lo_backingQueue);
+
+	/* other vecs may need processing too */
+	if (y)
+		goto try_next_old_bio_vec;
+#if LINUX_VERSION_CODE >= 0x30200
+	return;
+#else
+	return 0;
+#endif
+
+out:
+	old_bio->bi_next = NULL;
+	bio_io_error(old_bio);
+#if LINUX_VERSION_CODE >= 0x30200
+	return;
+#else
+	return 0;
+#endif
+}
+
+struct loop_switch_request {
+	struct file *file;
+	struct completion wait;
+};
+
+static void do_loop_switch(struct loop_device *lo, struct loop_switch_request *p)
+{
+	struct file *file = p->file;
+	struct file *old_file=lo->lo_backing_file;
+	struct address_space *mapping = file->f_path.dentry->d_inode->i_mapping;
+	
+	/* This code runs on file backed loop only */
+	/* no need to worry about -1 old_gfp_mask */
+	mapping_set_gfp_mask(old_file->f_path.dentry->d_inode->i_mapping, lo->old_gfp_mask);
+	lo->lo_backing_file = file;
+	memset(lo->lo_file_name, 0, LO_NAME_SIZE);
+	lo->old_gfp_mask = mapping_gfp_mask(mapping);
+	mapping_set_gfp_mask(mapping, (lo->old_gfp_mask & ~(__GFP_IO|__GFP_FS)) | __GFP_HIGH);
+	complete(&p->wait);
+}
+
+/*
+ * worker thread that handles reads/writes to file backed loop devices,
+ * to avoid blocking in our make_request_fn. it also does loop decrypting
+ * on reads for block backed loop, as that is too heavy to do from
+ * b_end_io context where irqs may be disabled.
+ */
+static int loop_thread(void *data)
+{
+	struct loop_device *lo = data;
+	struct bio *bio, *xbio, *merge;
+	struct loop_bio_extension *extension;
+	int x = 0, y;
+	wait_queue_t waitq;
+	char *md;
+	static const struct rlimit loop_rlim_defaults[RLIM_NLIMITS] = INIT_RLIMITS;
+#ifdef CONFIG_BLK_DEV_LOOP_KEYSCRUB
+	void (*keyscrubFn)(void *) = 0;
+#endif
+
+	init_waitqueue_entry(&waitq, current);
+	memcpy(&current->signal->rlim[0], &loop_rlim_defaults[0], sizeof(current->signal->rlim));
+
+	/*
+	 * loop can be used in an encrypted device,
+	 * hence, it mustn't be stopped at all
+	 * because it could be indirectly used during suspension
+	 */
+	current->flags |= PF_NOFREEZE;
+	current->flags |= PF_LESS_THROTTLE;
+
+	if (lo_nice > 0)
+		lo_nice = 0;
+	if (lo_nice < -20)
+		lo_nice = -20;
+	set_user_nice(current, lo_nice);
+
+	atomic_inc(&LDE_lo_pending);
+
+	/*
+	 * up sem, we are running
+	 */
+	complete(&LDE_lo_done);
+
+	for (;;) {
+		add_wait_queue(&LDE_lo_bio_wait, &waitq);
+		for (;;) {
+			set_current_state(TASK_INTERRUPTIBLE);
+			if (!atomic_read(&LDE_lo_pending))
+				break;
+
+			x = 0;
+			spin_lock_irq(&lo->lo_lock);
+#ifdef CONFIG_BLK_DEV_LOOP_KEYSCRUB
+			if((keyscrubFn = LDE_lo_keyscrub_fn) != 0) {
+				LDE_lo_keyscrub_fn = 0;
+				x = 1;
+			}
+#endif
+			if (LDE_lo_bio_que0) {
+				/* don't sleep if device backed READ needs processing */
+				/* don't sleep if file backed READ/WRITE needs processing */
+				x = 1;
+			}
+			spin_unlock_irq(&lo->lo_lock);
+			if (x)
+				break;
+
+			schedule();
+		}
+		set_current_state(TASK_RUNNING);
+		remove_wait_queue(&LDE_lo_bio_wait, &waitq);
+
+#ifdef CONFIG_BLK_DEV_LOOP_KEYSCRUB
+		if(keyscrubFn) {
+			(*keyscrubFn)(LDE_lo_keyscrub_ptr);
+			keyscrubFn = 0;
+		}
+#endif
+		/*
+		 * could be woken because of tear-down, not because of
+		 * pending work
+		 */
+		if (!atomic_read(&LDE_lo_pending))
+			break;
+
+		bio = loop_get_bio(lo);
+		if (!bio)
+			continue;
+
+		if (lo->lo_flags & LO_FLAGS_DO_BMAP) {
+			/* request is for file backed device */
+			if(unlikely(!bio->bi_bdev)) {
+				do_loop_switch(lo, bio->bi_private);
+				bio->bi_next = NULL;
+				bio_put(bio);
+			} else {
+				y = do_bio_filebacked(lo, bio);
+				bio->bi_next = NULL;
+				bio_endio(bio, y);
+			}
+		} else {
+			/* device backed read has completed, do decrypt now */
+			extension = bio->bi_private;
+			merge = extension->bioext_merge;
+			y = extension->bioext_index;
+			xbio = merge->bi_private;
+			if(xbio->bi_io_vec && xbio->bi_vcnt) {
+				md = kmap(xbio->bi_io_vec[y].bv_page) + xbio->bi_io_vec[y].bv_offset;
+				if (lo_do_transfer(lo, READ, page_address(bio->bi_io_vec[0].bv_page), md, extension->bioext_size, extension->bioext_iv)) {
+					clear_bit(0, &merge->bi_flags);
+				}
+				flush_dcache_page(xbio->bi_io_vec[y].bv_page);
+				kunmap(xbio->bi_io_vec[y].bv_page);
+			}
+			loop_put_buffer(lo, bio, 0);
+			if (!atomic_dec_and_test(&merge->bi_cnt))
+				continue;
+			xbio->bi_next = NULL;
+			bio_endio(xbio, test_bit(0, &merge->bi_flags) ? (int)merge->bi_size : -EIO);
+			loop_put_buffer(lo, merge, 1);
+		}
+
+		/*
+		 * woken both for pending work and tear-down, lo_pending
+		 * will hit zero then
+		 */
+		if (atomic_dec_and_test(&LDE_lo_pending))
+			break;
+	}
+
+	complete(&LDE_lo_done);
+	return 0;
+}
+
+static void loop_set_softblksz(struct loop_device *lo, struct block_device *bdev)
+{
+	int	bs, x;
+
+	if (lo->lo_device)
+		bs = block_size(lo->lo_device);
+	else
+		bs = PAGE_SIZE;
+	if (lo->lo_flags & LO_FLAGS_DO_BMAP) {
+		x = (int) bdev->bd_inode->i_size;
+		if ((bs == 8192) && (x & 0x1E00))
+			bs = 4096;
+		if ((bs == 4096) && (x & 0x0E00))
+			bs = 2048;
+		if ((bs == 2048) && (x & 0x0600))
+			bs = 1024;
+		if ((bs == 1024) && (x & 0x0200))
+			bs = 512;
+	}
+	set_blocksize(bdev, bs);
+}
+
+/* 
+ * loop_change_fd switches the backing store of a loopback device to a 
+ * new file. This is useful for operating system installers to free up the
+ * original file and in High Availability environments to switch to an 
+ * alternative location for the content in case of server meltdown.
+ * This can only work if the loop device is used read-only, file backed,
+ * and if the new backing store is the same size and type as the old
+ * backing store.
+ */
+static int loop_change_fd(struct loop_device *lo, unsigned int arg)
+{
+	struct file *file, *old_file;
+	struct inode *inode;
+	struct loop_switch_request w;
+	struct bio *bio;
+	int error;
+
+	error = -EINVAL;
+	/* loop must be read-only */
+	if (!(lo->lo_flags & LO_FLAGS_READ_ONLY))
+		goto out;
+
+	/* loop must be file backed */
+	if (!(lo->lo_flags & LO_FLAGS_DO_BMAP))
+		goto out;
+
+	error = -EBADF;
+	file = fget(arg);
+	if (!file)
+		goto out;
+
+	inode = file->f_path.dentry->d_inode;
+	old_file = lo->lo_backing_file;
+
+	error = -EINVAL;
+	/* new backing store must be file backed */
+	if (!S_ISREG(inode->i_mode))
+		goto out_putf;
+
+	/* new backing store must support reads */
+	if (!file->f_op || !file->f_op->read)
+		goto out_putf;
+
+	/* new backing store must be same size as the old one */
+	if(i_size_read(inode) != i_size_read(old_file->f_path.dentry->d_inode))
+		goto out_putf;
+
+	/* loop must be in properly initialized state */
+	if(lo->lo_queue->make_request_fn != loop_make_request_real)
+		goto out_putf;
+
+	error = -ENOMEM;
+	bio = bio_alloc(GFP_KERNEL, 1);
+	if (!bio)
+		goto out_putf;
+
+	/* wait for loop thread to do the switch */
+	init_completion(&w.wait);
+	w.file = file;
+	bio->bi_private = &w;
+	bio->bi_bdev = NULL;
+	bio->bi_rw = 0;
+	loop_make_request_real(lo->lo_queue, bio);
+	wait_for_completion(&w.wait);
+
+	fput(old_file);
+	return 0;
+	
+out_putf:
+	fput(file);
+out:
+	return error;
+}
+
+static int loop_get_threads_count(struct loop_device *lo)
+{
+	int x, y;
+
+	if (lo->lo_flags & LO_FLAGS_DO_BMAP) {
+		/* file backed has only 1 pre-allocated page, so limit to 1 helper thread */
+		return 1;
+	}
+
+	y = lo_threads[0];
+	for (x = 1; x < (sizeof(lo_threads) / sizeof(int)); x += 2) {
+		if (lo_threads[x + 1] && (lo->lo_number == lo_threads[x])) {
+			y = lo_threads[x + 1];
+			break;
+		}
+	}
+	return y;
+}
+
+#if defined(LOOP_HAVE_CONGESTED_FN)
+static int loop_congested(void *data, int bits)
+{
+	struct loop_device *lo = data;
+	struct bio *bio;
+	int ret = 0;
+	unsigned long flags;
+	const int cong = (1 << BDI_sync_congested) | (1 << BDI_async_congested);
+
+	if(lo && LDE_lo_backingQueue) {
+		/* check if backing device is congested */
+		ret |= bdi_congested(&LDE_lo_backingQueue->backing_dev_info, bits);
+		/* check if loop device is low on resources */
+		spin_lock_irqsave(&lo->lo_lock, flags);
+		bio = LDE_lo_bio_free0;
+		if(!bio || !bio->bi_next) {
+			ret |= cong;
+		}
+		bio = LDE_lo_bio_free1;
+		if(!bio || !bio->bi_next) {
+			ret |= cong;
+		}
+		spin_unlock_irqrestore(&lo->lo_lock, flags);
+	}
+	return (ret & bits);
+}
+#endif
+
+static int loop_set_fd(struct loop_device *lo, unsigned int ldom,
+		       struct block_device *bdev, unsigned int arg)
+{
+	struct file	*file;
+	struct inode	*inode;
+	struct block_device *lo_device = NULL;
+	int		lo_flags = 0;
+	int		error;
+	int		x, y;
+	struct task_struct *t[LO_THREADS_MAX];
+
+	error = -EBADF;
+	file = fget(arg);
+	if (!file)
+		goto out;
+
+	error = -EINVAL;
+	inode = file->f_path.dentry->d_inode;
+
+	if (!(file->f_mode & FMODE_WRITE))
+		lo_flags |= LO_FLAGS_READ_ONLY;
+
+	init_completion(&LDE_lo_done);
+	spin_lock_init(&lo->lo_lock);
+	init_waitqueue_head(&LDE_lo_bio_wait);
+	init_waitqueue_head(&LDE_lo_buf_wait);
+	atomic_set(&LDE_lo_pending, 0);
+#ifdef CONFIG_BLK_DEV_LOOP_KEYSCRUB
+	LDE_lo_keyscrub_fn = 0;
+#endif
+	lo->lo_offset = lo->lo_sizelimit = 0;
+	LDE_lo_offs_sec = LDE_lo_iv_remove = 0;
+	lo->lo_encryption = NULL;
+	lo->lo_encrypt_key_size = 0;
+	lo->transfer = NULL;
+	lo->lo_crypt_name[0] = 0;
+	lo->lo_file_name[0] = 0;
+	lo->lo_init[1] = lo->lo_init[0] = 0;
+#if LINUX_VERSION_CODE >= 0x30600
+	lo->lo_key_owner = GLOBAL_ROOT_UID;
+#else
+	lo->lo_key_owner = 0;
+#endif
+	lo->ioctl = NULL;
+	lo->key_data = NULL;	
+	LDE_lo_bio_que0 = NULL;
+	LDE_lo_bio_free1 = LDE_lo_bio_free0 = NULL;
+	LDE_lo_bio_flshMax = LDE_lo_bio_flshCnt = 0;
+
+	if (S_ISBLK(inode->i_mode)) {
+		lo_device = inode->i_bdev;
+		if (lo_device == bdev) {
+			error = -EBUSY;
+			goto out_putf;
+		}
+		if (loop_prealloc_init(lo, 0)) {
+			error = -ENOMEM;
+			goto out_putf;
+		}
+		if (bdev_read_only(lo_device))
+			lo_flags |= LO_FLAGS_READ_ONLY;
+		else
+			filemap_fdatawrite(inode->i_mapping);
+	} else if (S_ISREG(inode->i_mode)) {
+		/*
+		 * If we can't read - sorry. If we only can't write - well,
+		 * it's going to be read-only.
+		 */
+		if (!file->f_op || !file->f_op->read)
+			goto out_putf;
+
+		if (!file->f_op->write)
+			lo_flags |= LO_FLAGS_READ_ONLY;
+
+		lo_flags |= LO_FLAGS_DO_BMAP;
+		if (loop_prealloc_init(lo, 1)) {
+			error = -ENOMEM;
+			goto out_putf;
+		}
+	} else
+		goto out_putf;
+
+	get_file(file);
+
+	if (!(ldom & FMODE_WRITE))
+		lo_flags |= LO_FLAGS_READ_ONLY;
+
+	set_device_ro(bdev, (lo_flags & LO_FLAGS_READ_ONLY) != 0);
+
+	lo->lo_device = lo_device;
+	lo->lo_flags = lo_flags;
+	if(lo_flags & LO_FLAGS_READ_ONLY)
+		lo->lo_flags |= 0x200000; /* export to user space */
+	lo->lo_backing_file = file;
+	if (figure_loop_size(lo, bdev)) {
+		error = -EFBIG;
+		goto out_cleanup;
+	}
+
+	/*
+	 * set queue make_request_fn, and add limits based on lower level
+	 * device
+	 */
+	blk_queue_make_request(lo->lo_queue, loop_make_request_err);
+	blk_queue_bounce_limit(lo->lo_queue, BLK_BOUNCE_ANY);
+	blk_queue_max_segment_size(lo->lo_queue, PAGE_CACHE_SIZE);
+	blk_queue_segment_boundary(lo->lo_queue, PAGE_CACHE_SIZE - 1);
+	blk_queue_max_segments(lo->lo_queue, BLK_MAX_SEGMENTS);
+	blk_queue_max_hw_sectors(lo->lo_queue, BLK_DEF_MAX_SECTORS);
+	lo->lo_queue->limits.cluster = 0;
+	blk_queue_flush(lo->lo_queue, 0);
+	LDE_lo_backingQueue = 0;
+
+	/*
+	 * we remap to a block device, make sure we correctly stack limits
+	 */
+	if (S_ISBLK(inode->i_mode) && lo_device) {
+		struct request_queue *q = bdev_get_queue(lo_device);
+
+		blk_queue_logical_block_size(lo->lo_queue, queue_logical_block_size(q));
+		blk_queue_flush(lo->lo_queue, q->flush_flags & (REQ_FLUSH | REQ_FUA));
+		lo->lo_queue->limits.io_min = q->limits.io_min;
+		if(lo->lo_queue->limits.io_min > (BLK_MAX_SEGMENTS * PAGE_CACHE_SIZE))
+			lo->lo_queue->limits.io_min = (BLK_MAX_SEGMENTS * PAGE_CACHE_SIZE);
+		lo->lo_queue->limits.io_opt = q->limits.io_opt;
+		if(lo->lo_queue->limits.io_opt > (BLK_MAX_SEGMENTS * PAGE_CACHE_SIZE))
+			lo->lo_queue->limits.io_opt = (BLK_MAX_SEGMENTS * PAGE_CACHE_SIZE);
+		LDE_lo_backingQueue = q;
+	}
+
+	if (lo_flags & LO_FLAGS_DO_BMAP) {
+		lo->old_gfp_mask = mapping_gfp_mask(inode->i_mapping);
+		mapping_set_gfp_mask(inode->i_mapping, (lo->old_gfp_mask & ~(__GFP_IO|__GFP_FS)) | __GFP_HIGH);
+	} else {
+		lo->old_gfp_mask = -1;
+	}
+
+	loop_set_softblksz(lo, bdev);
+
+	y = loop_get_threads_count(lo);
+	for(x = 0; x < y; x++) {
+		if(y > 1) {
+			t[x] = kthread_create(loop_thread, lo, "loop%d%c", lo->lo_number, x + 'a');
+		} else {
+			t[x] = kthread_create(loop_thread, lo, "loop%d", lo->lo_number);
+		}
+		if (IS_ERR(t[x])) {
+			error = PTR_ERR(t[x]);
+			while(--x >= 0) {
+				kthread_stop(t[x]);
+			}
+			goto out_mapping;
+		}
+	}
+	for(x = 0; x < y; x++) {
+		wake_up_process(t[x]);
+		wait_for_completion(&LDE_lo_done);
+	}
+
+	fput(file);
+#if defined(LOOP_HAVE_CONGESTED_FN)
+	lo->lo_queue->backing_dev_info.congested_data = lo;
+	lo->lo_queue->backing_dev_info.congested_fn = loop_congested;
+#endif
+	wmb();
+	lo->lo_queue->queuedata = lo;
+	__module_get(THIS_MODULE);
+	return 0;
+
+ out_mapping:
+	if(lo->old_gfp_mask != -1)
+		mapping_set_gfp_mask(inode->i_mapping, lo->old_gfp_mask);
+ out_cleanup:
+	loop_prealloc_cleanup(lo);
+	fput(file);
+ out_putf:
+	fput(file);
+ out:
+	return error;
+}
+
+static int loop_release_xfer(struct loop_device *lo)
+{
+	int err = 0;
+	struct loop_func_table *xfer = lo->lo_encryption;
+
+	if (xfer) {
+		lo->transfer = NULL;
+		if (xfer->release)
+			err = xfer->release(lo);
+		lo->lo_encryption = NULL;
+		module_put(xfer->owner);
+	}
+	return err;
+}
+
+static int loop_init_xfer(struct loop_device *lo, struct loop_func_table *xfer, struct loop_info64 *i)
+{
+	int err = 0;
+
+	if (xfer) {
+		struct module *owner = xfer->owner;
+
+		if(!try_module_get(owner))
+			return -EINVAL;
+		if (xfer->init) {
+			/* this ugly cast is needed to work around 'const' damage in function prototype */
+			/* should be:  err = xfer->init(lo, i); */
+			err = ((int (*)(struct loop_device *, struct loop_info64 *))xfer->init)(lo, i);
+		}
+		if (err)
+			module_put(owner);
+		else
+			lo->lo_encryption = xfer;
+	}
+	return err;
+}
+
+static int loop_clr_fd(struct loop_device *lo, struct block_device *bdev)
+{
+	struct file *filp = lo->lo_backing_file;
+	int gfp = lo->old_gfp_mask;
+	int bdocnt, x, y;
+
+	/* sync /dev/loop? device */
+	sync_blockdev(bdev);
+	/* sync backing /dev/hda? device */
+	sync_blockdev(lo->lo_device);
+
+	for(x = 0; x < 20; x++) {
+		spin_lock(&LDE_lo_ioctl_spin);
+		bdocnt = lo->lo_refcnt;
+		spin_unlock(&LDE_lo_ioctl_spin);
+		if(bdocnt == 1) break;
+		/* work around reference count race */
+		msleep(50);
+	}
+
+	if (bdocnt != 1)	/* one for this fd being open */
+		return -EBUSY;
+	if (filp==NULL)
+		return -EINVAL;
+
+	lo->lo_queue->queuedata = NULL;
+	lo->lo_queue->make_request_fn = loop_make_request_err;
+	LDE_lo_backingQueue = 0;
+	y = loop_get_threads_count(lo);
+	for(x = 0; x < y; x++) {
+		if (atomic_dec_and_test(&LDE_lo_pending))
+			wake_up_interruptible_all(&LDE_lo_bio_wait);
+	}
+	for(x = 0; x < y; x++) {
+		wait_for_completion(&LDE_lo_done);
+	}
+	blk_queue_flush(lo->lo_queue, 0);
+	loop_prealloc_cleanup(lo);
+	lo->lo_backing_file = NULL;
+	loop_release_xfer(lo);
+	lo->transfer = NULL;
+	lo->ioctl = NULL;
+	lo->lo_device = NULL;
+	lo->lo_encryption = NULL;
+#ifdef CONFIG_BLK_DEV_LOOP_KEYSCRUB
+	LDE_lo_keyscrub_fn = 0;
+#endif
+	lo->lo_offset = lo->lo_sizelimit = 0;
+	LDE_lo_offs_sec = LDE_lo_iv_remove = 0;
+	lo->lo_encrypt_key_size = 0;
+	lo->lo_flags = 0;
+	lo->lo_init[1] = lo->lo_init[0] = 0;
+#if LINUX_VERSION_CODE >= 0x30600
+	lo->lo_key_owner = GLOBAL_ROOT_UID;
+#else
+	lo->lo_key_owner = 0;
+#endif
+	lo->key_data = NULL;
+	memset(lo->lo_encrypt_key, 0, LO_KEY_SIZE);
+	memset(lo->lo_crypt_name, 0, LO_NAME_SIZE);
+	memset(lo->lo_file_name, 0, LO_NAME_SIZE);
+	invalidate_bdev(bdev);
+	set_capacity(disks[lo->lo_number], 0);
+	if (gfp != -1)
+		mapping_set_gfp_mask(filp->f_path.dentry->d_inode->i_mapping, gfp);
+	fput(filp);
+	module_put(THIS_MODULE);
+	return 0;
+}
+
+static int loop_set_status(struct loop_device *lo, struct block_device *bdev, struct loop_info64 *info)
+{
+	int err;
+	struct loop_func_table *xfer = NULL;
+#if LINUX_VERSION_CODE >= 0x30600
+	kuid_t uid = current_uid();
+
+	if (lo->lo_encrypt_key_size && !uid_eq(lo->lo_key_owner, uid) && !capable(CAP_SYS_ADMIN))
+		return -EPERM;
+#else
+	uid_t uid = current_uid();
+
+	if (lo->lo_encrypt_key_size && lo->lo_key_owner != uid && !capable(CAP_SYS_ADMIN))
+		return -EPERM;
+#endif
+	if ((unsigned int) info->lo_encrypt_key_size > LO_KEY_SIZE)
+		return -EINVAL;
+
+	err = loop_release_xfer(lo);
+	if (err)
+		return err;
+
+	if ((loff_t)info->lo_offset < 0) {
+		/* negative offset == remove offset from IV computations */
+		lo->lo_offset = -(info->lo_offset);
+		LDE_lo_iv_remove = lo->lo_offset >> 9;
+	} else {
+		/* positive offset == include offset in IV computations */
+		lo->lo_offset = info->lo_offset;
+		LDE_lo_iv_remove = 0;
+	}
+	LDE_lo_offs_sec = lo->lo_offset >> 9;
+	lo->lo_sizelimit = info->lo_sizelimit;
+	err = figure_loop_size(lo, bdev);
+	if (err)
+		return err;
+	loop_set_softblksz(lo, bdev);
+
+	if (info->lo_encrypt_type) {
+		unsigned int type = info->lo_encrypt_type;
+
+		if (type >= MAX_LO_CRYPT)
+			return -EINVAL;
+		xfer = xfer_funcs[type];
+		if (xfer == NULL)
+			return -EINVAL;
+	} else if(!(lo->lo_flags & LO_FLAGS_DO_BMAP)) {
+		blk_queue_max_hw_sectors(lo->lo_queue, PAGE_CACHE_SIZE >> 9);
+	}
+	err = loop_init_xfer(lo, xfer, info);
+	if (err)
+		return err;
+
+	if (!xfer)
+		xfer = &none_funcs;
+	lo->transfer = xfer->transfer;
+	lo->ioctl = xfer->ioctl;
+	
+	memcpy(lo->lo_file_name, info->lo_file_name, LO_NAME_SIZE);
+	memcpy(lo->lo_crypt_name, info->lo_crypt_name, LO_NAME_SIZE);
+	lo->lo_file_name[LO_NAME_SIZE-1] = 0;
+	lo->lo_crypt_name[LO_NAME_SIZE-1] = 0;
+	lo->lo_encrypt_key_size = info->lo_encrypt_key_size;
+	lo->lo_init[0] = info->lo_init[0];
+	lo->lo_init[1] = info->lo_init[1];
+	if (info->lo_encrypt_key_size) {
+		memcpy(lo->lo_encrypt_key, info->lo_encrypt_key,
+		       info->lo_encrypt_key_size);
+		lo->lo_key_owner = uid;
+	}	
+
+	lo->lo_queue->make_request_fn = loop_make_request_real;
+	return 0;
+}
+
+static int loop_get_status(struct loop_device *lo, struct loop_info64 *info)
+{
+	struct file *file = lo->lo_backing_file;
+	struct kstat stat;
+	int error;
+
+#if LINUX_VERSION_CODE >= 0x30900
+	error = vfs_getattr(&file->f_path, &stat);
+#else
+	error = vfs_getattr(file->f_vfsmnt, file->f_path.dentry, &stat);
+#endif
+	if (error)
+		return error;
+	memset(info, 0, sizeof(*info));
+	info->lo_number = lo->lo_number;
+	info->lo_device = huge_encode_dev(stat.dev);
+	info->lo_inode = stat.ino;
+	info->lo_rdevice = huge_encode_dev(lo->lo_device ? stat.rdev : stat.dev);
+	info->lo_offset = LDE_lo_iv_remove ? -(lo->lo_offset) : lo->lo_offset;
+	info->lo_sizelimit = lo->lo_sizelimit;
+	info->lo_flags = lo->lo_flags;
+	memcpy(info->lo_file_name, lo->lo_file_name, LO_NAME_SIZE);
+	memcpy(info->lo_crypt_name, lo->lo_crypt_name, LO_NAME_SIZE);
+	info->lo_encrypt_type = lo->lo_encryption ? lo->lo_encryption->number : 0;
+	if (lo->lo_encrypt_key_size && capable(CAP_SYS_ADMIN)) {
+		info->lo_encrypt_key_size = lo->lo_encrypt_key_size;
+		memcpy(info->lo_encrypt_key, lo->lo_encrypt_key,
+		       lo->lo_encrypt_key_size);
+		info->lo_init[0] = lo->lo_init[0];
+		info->lo_init[1] = lo->lo_init[1];
+	}
+	return 0;
+}
+
+static void
+loop_info64_from_old(const struct loop_info *info, struct loop_info64 *info64)
+{
+	memset(info64, 0, sizeof(*info64));
+	info64->lo_number = info->lo_number;
+	info64->lo_device = info->lo_device;
+	info64->lo_inode = info->lo_inode;
+	info64->lo_rdevice = info->lo_rdevice;
+	info64->lo_offset = info->lo_offset;
+	info64->lo_encrypt_type = info->lo_encrypt_type;
+	info64->lo_encrypt_key_size = info->lo_encrypt_key_size;
+	info64->lo_flags = info->lo_flags;
+	info64->lo_init[0] = info->lo_init[0];
+	info64->lo_init[1] = info->lo_init[1];
+	if (info->lo_encrypt_type == LO_CRYPT_CRYPTOAPI)
+		memcpy(info64->lo_crypt_name, info->lo_name, LO_NAME_SIZE);
+	else
+		memcpy(info64->lo_file_name, info->lo_name, LO_NAME_SIZE);
+	memcpy(info64->lo_encrypt_key, info->lo_encrypt_key, LO_KEY_SIZE);
+}
+
+static int
+loop_info64_to_old(struct loop_info64 *info64, struct loop_info *info)
+{
+	memset(info, 0, sizeof(*info));
+	info->lo_number = info64->lo_number;
+	info->lo_device = info64->lo_device;
+	info->lo_inode = info64->lo_inode;
+	info->lo_rdevice = info64->lo_rdevice;
+	info->lo_offset = info64->lo_offset;
+	info->lo_encrypt_type = info64->lo_encrypt_type;
+	info->lo_encrypt_key_size = info64->lo_encrypt_key_size;
+	info->lo_flags = info64->lo_flags;
+	info->lo_init[0] = info64->lo_init[0];
+	info->lo_init[1] = info64->lo_init[1];
+	if (info->lo_encrypt_type == LO_CRYPT_CRYPTOAPI)
+		memcpy(info->lo_name, info64->lo_crypt_name, LO_NAME_SIZE);
+	else
+		memcpy(info->lo_name, info64->lo_file_name, LO_NAME_SIZE);
+	memcpy(info->lo_encrypt_key, info64->lo_encrypt_key, LO_KEY_SIZE);
+
+	/* error in case values were truncated */
+	if (info->lo_device != info64->lo_device ||
+	    info->lo_rdevice != info64->lo_rdevice ||
+	    info->lo_inode != info64->lo_inode ||
+	    info->lo_offset != info64->lo_offset ||
+	    info64->lo_sizelimit)
+		return -EOVERFLOW;
+
+	return 0;
+}
+
+static int
+loop_set_status_old(struct loop_device *lo, struct block_device *bdev, const struct loop_info *arg)
+{
+	struct loop_info info;
+	struct loop_info64 info64;
+
+	if (copy_from_user(&info, arg, sizeof (struct loop_info)))
+		return -EFAULT;
+	loop_info64_from_old(&info, &info64);
+	memset(&info.lo_encrypt_key[0], 0, sizeof(info.lo_encrypt_key));
+	return loop_set_status(lo, bdev, &info64);
+}
+
+static int
+loop_set_status64(struct loop_device *lo, struct block_device *bdev, struct loop_info64 *arg)
+{
+	struct loop_info64 info64;
+
+	if (copy_from_user(&info64, arg, sizeof (struct loop_info64)))
+		return -EFAULT;
+	return loop_set_status(lo, bdev, &info64);
+}
+
+static int
+loop_get_status_old(struct loop_device *lo, struct loop_info *arg) {
+	struct loop_info info;
+	struct loop_info64 info64;
+	int err = 0;
+
+	if (!arg)
+		err = -EINVAL;
+	if (!err)
+		err = loop_get_status(lo, &info64);
+	if (!err)
+		err = loop_info64_to_old(&info64, &info);
+	if (!err && copy_to_user(arg, &info, sizeof(info)))
+		err = -EFAULT;
+
+	return err;
+}
+
+static int
+loop_get_status64(struct loop_device *lo, struct loop_info64 *arg) {
+	struct loop_info64 info64;
+	int err = 0;
+
+	if (!arg)
+		err = -EINVAL;
+	if (!err)
+		err = loop_get_status(lo, &info64);
+	if (!err && copy_to_user(arg, &info64, sizeof(info64)))
+		err = -EFAULT;
+
+	return err;
+}
+
+static int lo_ioctl(struct block_device *bdev, fmode_t ldom, unsigned int cmd, unsigned long arg)
+{
+	struct loop_device *lo = bdev->bd_disk->private_data;
+	int err;
+	wait_queue_t waitq;
+
+	/*
+	 * mutual exclusion - lock
+	 */
+	init_waitqueue_entry(&waitq, current);
+	add_wait_queue(&LDE_lo_ioctl_wait, &waitq);
+	for (;;) {
+		set_current_state(TASK_UNINTERRUPTIBLE);
+		spin_lock(&LDE_lo_ioctl_spin);
+		err = LDE_lo_ioctl_busy;
+		if(!err) LDE_lo_ioctl_busy = 1;
+		spin_unlock(&LDE_lo_ioctl_spin);
+		if(!err) break;
+		schedule();
+	}
+	set_current_state(TASK_RUNNING);
+	remove_wait_queue(&LDE_lo_ioctl_wait, &waitq);
+
+	/*
+	 * LOOP_SET_FD can only be called when no device is attached.
+	 * All other ioctls can only be called when a device is attached.
+	 */
+	if (bdev->bd_disk->queue->queuedata != NULL) {
+		if (cmd == LOOP_SET_FD) {
+			err = -EBUSY;
+			goto out_err;
+		}
+	} else {
+		if (cmd != LOOP_SET_FD) {
+			err = -ENXIO;
+			goto out_err;
+		}
+	}
+
+	switch (cmd) {
+	case LOOP_SET_FD:
+		err = loop_set_fd(lo, ldom, bdev, arg);
+		break;
+	case LOOP_CHANGE_FD:
+		err = loop_change_fd(lo, arg);
+		break;
+	case LOOP_CLR_FD:
+		err = loop_clr_fd(lo, bdev);
+		break;
+	case LOOP_SET_STATUS:
+		err = loop_set_status_old(lo, bdev, (struct loop_info *) arg);
+		break;
+	case LOOP_GET_STATUS:
+		err = loop_get_status_old(lo, (struct loop_info *) arg);
+		break;
+	case LOOP_SET_STATUS64:
+		err = loop_set_status64(lo, bdev, (struct loop_info64 *) arg);
+		break;
+	case LOOP_GET_STATUS64:
+		err = loop_get_status64(lo, (struct loop_info64 *) arg);
+		break;
+	case LOOP_RECOMPUTE_DEV_SIZE:
+		err = figure_loop_size(lo, bdev);
+		break;
+	default:
+		err = lo->ioctl ? lo->ioctl(lo, cmd, arg) : -EINVAL;
+	}
+out_err:
+	/*
+	 * mutual exclusion - unlock
+	 */
+	spin_lock(&LDE_lo_ioctl_spin);
+	LDE_lo_ioctl_busy = 0;
+	spin_unlock(&LDE_lo_ioctl_spin);
+	wake_up_all(&LDE_lo_ioctl_wait);
+
+	return err;
+}
+
+#if defined(CONFIG_COMPAT) && defined(HAVE_COMPAT_IOCTL)
+struct loop_info32 {
+	compat_int_t	lo_number;      /* ioctl r/o */
+	compat_dev_t	lo_device;      /* ioctl r/o */
+	compat_ulong_t	lo_inode;       /* ioctl r/o */
+	compat_dev_t	lo_rdevice;     /* ioctl r/o */
+	compat_int_t	lo_offset;
+	compat_int_t	lo_encrypt_type;
+	compat_int_t	lo_encrypt_key_size;    /* ioctl w/o */
+	compat_int_t	lo_flags;       /* ioctl r/o */
+	char		lo_name[LO_NAME_SIZE];
+	unsigned char	lo_encrypt_key[LO_KEY_SIZE]; /* ioctl w/o */
+	compat_ulong_t	lo_init[2];
+	char		reserved[4];
+};
+
+static int lo_compat_ioctl(struct block_device *p1, fmode_t p2, unsigned int cmd, unsigned long arg)
+{
+	mm_segment_t old_fs = get_fs();
+	struct loop_info l;
+	struct loop_info32 *ul = (struct loop_info32 *)arg;
+	int err = -ENOIOCTLCMD;
+
+	switch (cmd) {
+	case LOOP_SET_FD:
+	case LOOP_CLR_FD:
+	case LOOP_SET_STATUS64:
+	case LOOP_GET_STATUS64:
+	case LOOP_CHANGE_FD:
+	case LOOP_MULTI_KEY_SETUP:
+	case LOOP_MULTI_KEY_SETUP_V3:
+	case LOOP_RECOMPUTE_DEV_SIZE:
+		err = lo_ioctl(p1, p2, cmd, arg);
+		break;
+	case LOOP_SET_STATUS:
+		memset(&l, 0, sizeof(l));
+		err = get_user(l.lo_number, &ul->lo_number);
+		err |= get_user(l.lo_device, &ul->lo_device);
+		err |= get_user(l.lo_inode, &ul->lo_inode);
+		err |= get_user(l.lo_rdevice, &ul->lo_rdevice);
+		err |= copy_from_user(&l.lo_offset, &ul->lo_offset,
+		        8 + (unsigned long)l.lo_init - (unsigned long)&l.lo_offset);
+		if (err) {
+			err = -EFAULT;
+		} else {
+			set_fs (KERNEL_DS);
+			err = lo_ioctl(p1, p2, cmd, (unsigned long)&l);
+			set_fs (old_fs);
+		}
+		memset(&l, 0, sizeof(l));
+		break;
+	case LOOP_GET_STATUS:
+		set_fs (KERNEL_DS);
+		err = lo_ioctl(p1, p2, cmd, (unsigned long)&l);
+		set_fs (old_fs);
+		if (!err) {
+			err = put_user(l.lo_number, &ul->lo_number);
+			err |= put_user(l.lo_device, &ul->lo_device);
+			err |= put_user(l.lo_inode, &ul->lo_inode);
+			err |= put_user(l.lo_rdevice, &ul->lo_rdevice);
+			err |= copy_to_user(&ul->lo_offset, &l.lo_offset,
+				(unsigned long)l.lo_init - (unsigned long)&l.lo_offset);
+			if (err)
+				err = -EFAULT;
+		}
+		memset(&l, 0, sizeof(l));
+		break;
+
+	}
+	return err;
+}
+#endif
+
+static int lo_open(struct block_device *bdev, fmode_t mode)
+{
+	struct loop_device *lo = bdev->bd_disk->private_data;
+	
+	spin_lock(&LDE_lo_ioctl_spin);
+	lo->lo_refcnt++;
+	spin_unlock(&LDE_lo_ioctl_spin);
+	return 0;
+}
+
+#if LINUX_VERSION_CODE >= 0x30a00
+static void lo_release(struct gendisk *disk, fmode_t mode)
+#else
+static int lo_release(struct gendisk *disk, fmode_t mode)
+#endif
+{
+	struct loop_device *lo = disk->private_data;
+
+	spin_lock(&LDE_lo_ioctl_spin);
+	lo->lo_refcnt--;
+	spin_unlock(&LDE_lo_ioctl_spin);
+#if LINUX_VERSION_CODE < 0x30a00
+	return 0;
+#endif
+}
+
+static struct block_device_operations lo_fops = {
+	.owner =	THIS_MODULE,
+	.open =         lo_open,
+	.release =      lo_release,
+	.ioctl =	lo_ioctl,
+#if defined(CONFIG_COMPAT) && defined(HAVE_COMPAT_IOCTL)
+	.compat_ioctl = lo_compat_ioctl,
+#endif
+};
+
+/*
+ * And now the modules code and kernel interface.
+ */
+MODULE_LICENSE("GPL");
+MODULE_ALIAS_BLOCKDEV_MAJOR(LOOP_MAJOR);
+
+int loop_register_transfer(struct loop_func_table *funcs)
+{
+	unsigned int n = funcs->number;
+
+	if (n >= MAX_LO_CRYPT || xfer_funcs[n])
+		return -EINVAL;
+	xfer_funcs[n] = funcs;
+	return 0;
+}
+
+int loop_unregister_transfer(int number)
+{
+	unsigned int n = number;
+	struct loop_device *lo;
+	struct loop_func_table *xfer;
+	int x;
+
+	if (n == 0 || n >= MAX_LO_CRYPT || (xfer = xfer_funcs[n]) == NULL)
+		return -EINVAL;
+	xfer_funcs[n] = NULL;
+	for (x = 0; x < max_loop; x++) {
+		lo = loop_dev_ptr_arr[x];
+		if (!lo)
+			continue;
+		if (lo->lo_encryption == xfer)
+			loop_release_xfer(lo);
+	}
+	return 0;
+}
+
+EXPORT_SYMBOL(loop_register_transfer);
+EXPORT_SYMBOL(loop_unregister_transfer);
+
+int __init loop_init(void)
+{
+	int	i;
+
+	if ((max_loop < 1) || (max_loop > 256)) {
+		printk(KERN_WARNING "loop: invalid max_loop (must be between"
+				    " 1 and 256), using default (8)\n");
+		max_loop = 8;
+	}
+
+	if (register_blkdev(LOOP_MAJOR, "loop"))
+		return -EIO;
+
+	loop_dev_ptr_arr = kmalloc(max_loop * sizeof(struct loop_device *), GFP_KERNEL);
+	if (!loop_dev_ptr_arr)
+		goto out_mem1;
+
+	disks = kmalloc(max_loop * sizeof(struct gendisk *), GFP_KERNEL);
+	if (!disks)
+		goto out_mem2;
+
+	for (i = 0; i < max_loop; i++) {
+		loop_dev_ptr_arr[i] = kmalloc(sizeof(LoDevExt), GFP_KERNEL);
+		if (!loop_dev_ptr_arr[i])
+			goto out_mem3;
+	}
+
+	for (i = 0; i < max_loop; i++) {
+		disks[i] = alloc_disk(1);
+		if (!disks[i])
+			goto out_mem4;
+	}
+
+	for (i = 0; i < max_loop; i++) {
+		disks[i]->queue = blk_alloc_queue(GFP_KERNEL);
+		if (!disks[i]->queue)
+			goto out_mem5;
+		disks[i]->queue->queuedata = NULL;
+		blk_queue_make_request(disks[i]->queue, loop_make_request_err);
+	}
+
+	{ extern int init_module_aes(void); init_module_aes(); }
+	for (i = 0; i < (sizeof(lo_prealloc) / sizeof(int)); i += 2) {
+		if (!lo_prealloc[i])
+			continue;
+		if (lo_prealloc[i] < LO_PREALLOC_MIN)
+			lo_prealloc[i] = LO_PREALLOC_MIN;
+		if (lo_prealloc[i] > LO_PREALLOC_MAX)
+			lo_prealloc[i] = LO_PREALLOC_MAX;
+	}
+	for (i = 0; i < (sizeof(lo_threads) / sizeof(int)); i += 2) {
+		if (!lo_threads[i])
+			continue;
+		if (lo_threads[i] < LO_THREADS_MIN)
+			lo_threads[i] = LO_THREADS_MIN;
+		if (lo_threads[i] > LO_THREADS_MAX)
+			lo_threads[i] = LO_THREADS_MAX;
+	}
+
+#if defined(IOCTL32_COMPATIBLE_PTR)
+	register_ioctl32_conversion(LOOP_MULTI_KEY_SETUP, IOCTL32_COMPATIBLE_PTR);
+	register_ioctl32_conversion(LOOP_MULTI_KEY_SETUP_V3, IOCTL32_COMPATIBLE_PTR);
+	register_ioctl32_conversion(LOOP_RECOMPUTE_DEV_SIZE, IOCTL32_COMPATIBLE_PTR);
+#endif
+
+#ifdef CONFIG_DEVFS_FS
+	devfs_mk_dir("loop");
+#endif
+
+	for (i = 0; i < max_loop; i++) {
+		struct loop_device *lo = loop_dev_ptr_arr[i];
+		struct gendisk *disk = disks[i];
+		memset(lo, 0, sizeof(LoDevExt));
+		lo->lo_number = i;
+		lo->lo_queue = disk->queue;
+		spin_lock_init(&LDE_lo_ioctl_spin);
+		init_waitqueue_head(&LDE_lo_ioctl_wait);
+		disk->major = LOOP_MAJOR;
+		disk->first_minor = i;
+		disk->fops = &lo_fops;
+		sprintf(disk->disk_name, "loop%d", i);
+#ifdef CONFIG_DEVFS_FS
+		sprintf(disk->devfs_name, "loop/%d", i);
+#endif
+		disk->private_data = lo;
+		add_disk(disk);
+	}
+
+	printk(KERN_INFO "loop: loaded (max %d devices)\n", max_loop);
+	return 0;
+
+out_mem5:
+	while (i--)
+		blk_cleanup_queue(disks[i]->queue);
+	i = max_loop;
+out_mem4:
+	while (i--)
+		put_disk(disks[i]);
+	i = max_loop;
+out_mem3:
+	while (i--)
+		kfree(loop_dev_ptr_arr[i]);
+	kfree(disks);
+out_mem2:
+	kfree(loop_dev_ptr_arr);
+out_mem1:
+	unregister_blkdev(LOOP_MAJOR, "loop");
+	printk(KERN_ERR "loop: ran out of memory\n");
+	return -ENOMEM;
+}
+
+void loop_exit(void)
+{
+	int i;
+
+	{ extern void cleanup_module_aes(void); cleanup_module_aes(); }
+	for (i = 0; i < max_loop; i++) {
+		del_gendisk(disks[i]);
+		put_disk(disks[i]);
+		blk_cleanup_queue(loop_dev_ptr_arr[i]->lo_queue);
+		kfree(loop_dev_ptr_arr[i]);
+	}
+#ifdef CONFIG_DEVFS_FS
+	devfs_remove("loop");
+#endif
+	unregister_blkdev(LOOP_MAJOR, "loop");
+	kfree(disks);
+	kfree(loop_dev_ptr_arr);
+
+#if defined(IOCTL32_COMPATIBLE_PTR)
+	unregister_ioctl32_conversion(LOOP_MULTI_KEY_SETUP);
+	unregister_ioctl32_conversion(LOOP_MULTI_KEY_SETUP_V3);
+	unregister_ioctl32_conversion(LOOP_RECOMPUTE_DEV_SIZE);
+#endif
+}
+
+module_init(loop_init);
+module_exit(loop_exit);
+
+extern void loop_compute_sector_iv(sector_t, u_int32_t *);
+EXPORT_SYMBOL(loop_compute_sector_iv);
+extern void loop_compute_md5_iv_v3(sector_t, u_int32_t *, u_int32_t *);
+EXPORT_SYMBOL(loop_compute_md5_iv_v3);
+extern void loop_compute_md5_iv(sector_t, u_int32_t *, u_int32_t *);
+EXPORT_SYMBOL(loop_compute_md5_iv);
+extern void md5_transform_CPUbyteorder(u_int32_t *, u_int32_t const *);
+EXPORT_SYMBOL(md5_transform_CPUbyteorder);
+extern void md5_transform_CPUbyteorder_C(u_int32_t *, u_int32_t const *);
+EXPORT_SYMBOL(md5_transform_CPUbyteorder_C);
+
+#ifdef CONFIG_BLK_DEV_LOOP_KEYSCRUB
+void loop_add_keyscrub_fn(struct loop_device *lo, void (*fn)(void *), void *ptr)
+{
+    LDE_lo_keyscrub_ptr = ptr;
+    wmb();
+    LDE_lo_keyscrub_fn = fn;
+    wake_up_interruptible(&LDE_lo_bio_wait);
+}
+EXPORT_SYMBOL(loop_add_keyscrub_fn);
+#endif

@@ -1,0 +1,2114 @@
+diff --git a/src/block/blk-barrier.c b/src/block/blk-barrier.c
+index 8873b9b..0a467a0 100644
+--- a/src/block/blk-barrier.c
++++ b/src/block/blk-barrier.c
+@@ -8,6 +8,25 @@
+ 
+ #include "blk.h"
+ 
++/* FLUSH/FUA sequences */
++enum {
++	REQ_FSEQ_PREFLUSH       = (1 << 0), /* pre-flushing in progress */
++	REQ_FSEQ_DATA           = (1 << 1), /* data write in progress */
++	REQ_FSEQ_POSTFLUSH      = (1 << 2), /* post-flushing in progress */
++	REQ_FSEQ_DONE           = (1 << 3),
++
++	REQ_FSEQ_ACTIONS        = REQ_FSEQ_PREFLUSH | REQ_FSEQ_DATA |
++	                          REQ_FSEQ_POSTFLUSH,
++
++	/*
++	 * If flush has been pending longer than the following timeout,
++	 * it's issued even if flush_data requests are still in flight.
++	 */
++	FLUSH_PENDING_TIMEOUT   = 5 * HZ,
++};
++
++static bool blk_kick_flush(struct request_queue *q);
++
+ /**
+  * blk_queue_ordered - does this queue support ordered writes
+  * @q:        the request queue
+@@ -340,6 +359,370 @@ int blkdev_issue_flush(struct block_device *bdev, sector_t *error_sector)
+ }
+ EXPORT_SYMBOL(blkdev_issue_flush);
+ 
++static unsigned int blk_flush_policy(unsigned int fflags, struct request *rq)
++{
++	unsigned int policy = 0;
++
++	if (blk_rq_sectors(rq))
++		policy |= REQ_FSEQ_DATA;
++
++	if (fflags & REQ_FLUSH) {
++		if (rq->cmd_flags & REQ_FLUSH)
++			policy |= REQ_FSEQ_PREFLUSH;
++		if (!(fflags & REQ_FUA) && (rq->cmd_flags & REQ_FUA))
++			policy |= REQ_FSEQ_POSTFLUSH;
++	}
++	return policy;
++}
++
++static unsigned int blk_flush_cur_seq(struct request *rq)
++{
++	return 1 << ffz(rq->flush.seq);
++}
++
++static void blk_flush_restore_request(struct request *rq)
++{
++	/*
++	 * After flush data completion, @rq->bio is %NULL but we need to
++	 * complete the bio again.  @rq->biotail is guaranteed to equal the
++	 * original @rq->bio.  Restore it.
++	 */
++	rq->bio = rq->biotail;
++
++	/* make @rq a normal request */
++	rq->cmd_flags &= ~REQ_FLUSH_SEQ;
++	rq->end_io = rq->flush.saved_end_io;
++}
++
++/**
++ * blk_flush_complete_seq - complete flush sequence
++ * @rq: FLUSH/FUA request being sequenced
++ * @seq: sequences to complete (mask of %REQ_FSEQ_*, can be zero)
++ * @error: whether an error occurred
++ *
++ * @rq just completed @seq part of its flush sequence, record the
++ * completion and trigger the next step.
++ *
++ * CONTEXT:
++ * spin_lock_irq(q->queue_lock)
++ *
++ * RETURNS:
++ * %true if requests were added to the dispatch queue, %false otherwise.
++ */
++static bool blk_flush_complete_seq(struct request *rq, unsigned int seq,
++                                   int error)
++{
++	struct request_queue *q = rq->q;
++	struct list_head *pending = &q->flush_queue[q->flush_pending_idx];
++	bool queued = false;
++
++	BUG_ON(rq->flush.seq & seq);
++	rq->flush.seq |= seq;
++
++	if (likely(!error))
++		seq = blk_flush_cur_seq(rq);
++	else
++		seq = REQ_FSEQ_DONE;
++
++	switch (seq) {
++	case REQ_FSEQ_PREFLUSH:
++	case REQ_FSEQ_POSTFLUSH:
++		/* queue for flush */
++		if (list_empty(pending))
++			q->flush_pending_since = jiffies;
++		list_move_tail(&rq->flush.list, pending);
++		break;
++
++	case REQ_FSEQ_DATA:
++		list_move_tail(&rq->flush.list, &q->flush_data_in_flight);
++		list_add(&rq->queuelist, &q->queue_head);
++		queued = true;
++		break;
++
++	case REQ_FSEQ_DONE:
++		/*
++		 * @rq was previously adjusted by blk_flush_issue() for
++		 * flush sequencing and may already have gone through the
++		 * flush data request completion path.  Restore @rq for
++		 * normal completion and end it.
++		 */
++		BUG_ON(!list_empty(&rq->queuelist));
++		list_del_init(&rq->flush.list);
++		blk_flush_restore_request(rq);
++		__blk_end_request_all(rq, error);
++		break;
++
++	default:
++		BUG();
++	}
++
++	return blk_kick_flush(q) | queued;
++}
++
++static void flush_end_io(struct request *flush_rq, int error)
++{
++	struct request_queue *q = flush_rq->q;
++	struct list_head *running = &q->flush_queue[q->flush_running_idx];
++	bool queued = false;
++	struct request *rq, *n;
++
++	BUG_ON(q->flush_pending_idx == q->flush_running_idx);
++
++	/* account completion of the flush request */
++	q->flush_running_idx ^= 1;
++	elv_completed_request(q, flush_rq);
++
++	/* and push the waiting requests to the next stage */
++	list_for_each_entry_safe(rq, n, running, flush.list) {
++		unsigned int seq = blk_flush_cur_seq(rq);
++
++		BUG_ON(seq != REQ_FSEQ_PREFLUSH && seq != REQ_FSEQ_POSTFLUSH);
++		queued |= blk_flush_complete_seq(rq, seq, error);
++	}
++
++	/*
++	 * Kick the queue to avoid stall for two cases:
++	 * 1. Moving a request silently to empty queue_head may stall the
++	 * queue.
++	 * 2. When flush request is running in non-queueable queue, the
++	 * queue is hold. Restart the queue after flush request is finished
++	 * to avoid stall.
++	 * This function is called from request completion path and calling
++	 * directly into request_fn may confuse the driver.  Always use
++	 * kblockd.
++	 */
++	if (queued || q->flush_queue_delayed)
++		blk_run_queue_async__2(q);
++	q->flush_queue_delayed = 0;
++}
++
++/**
++ * blk_kick_flush - consider issuing flush request
++ * @q: request_queue being kicked
++ *
++ * Flush related states of @q have changed, consider issuing flush request.
++ * Please read the comment at the top of this file for more info.
++ *
++ * CONTEXT:
++ * spin_lock_irq(q->queue_lock)
++ *
++ * RETURNS:
++ * %true if flush was issued, %false otherwise.
++ */
++static bool blk_kick_flush(struct request_queue *q)
++{
++	struct list_head *pending = &q->flush_queue[q->flush_pending_idx];
++	struct request *first_rq =
++		list_first_entry(pending, struct request, flush.list);
++
++	/* C1 described at the top of this file */
++	if (q->flush_pending_idx != q->flush_running_idx || list_empty(pending))
++		return false;
++
++	/* C2 and C3 */
++	if (!list_empty(&q->flush_data_in_flight) &&
++	    time_before(jiffies,
++			q->flush_pending_since + FLUSH_PENDING_TIMEOUT))
++		return false;
++
++	/*
++	 * Issue flush and toggle pending_idx.  This makes pending_idx
++	 * different from running_idx, which means flush is in flight.
++	 */
++	blk_rq_init(q, &q->flush_rq);
++	q->flush_rq.cmd_type = REQ_TYPE_FS;
++	q->flush_rq.cmd_flags = WRITE_FLUSH | REQ_FLUSH_SEQ;
++	q->flush_rq.rq_disk = first_rq->rq_disk;
++	q->flush_rq.end_io = flush_end_io;
++
++	q->flush_pending_idx ^= 1;
++	list_add_tail(&q->flush_rq.queuelist, &q->queue_head);
++	return true;
++}
++
++static void flush_data_end_io(struct request *rq, int error)
++{
++	struct request_queue *q = rq->q;
++
++	/*
++	 * After populating an empty queue, kick it to avoid stall.  Read
++	 * the comment in flush_end_io().
++	 */
++	if (blk_flush_complete_seq(rq, REQ_FSEQ_DATA, error))
++		blk_run_queue_async__2(q);
++}
++
++/**
++ * blk_insert_flush__2 - insert a new FLUSH/FUA request
++ * @rq: request to insert
++ *
++ * To be called from __elv_add_request() for %ELEVATOR_INSERT_FLUSH insertions.
++ * @rq is being submitted.  Analyze what needs to be done and put it on the
++ * right queue.
++ *
++ * CONTEXT:
++ * spin_lock_irq(q->queue_lock)
++ */
++void blk_insert_flush__2(struct request *rq)
++{
++	struct request_queue *q = rq->q;
++	unsigned int fflags = q->flush_flags;   /* may change, cache */
++	unsigned int policy = blk_flush_policy(fflags, rq);
++
++	/*
++	 * @policy now records what operations need to be done.  Adjust
++	 * REQ_FLUSH and FUA for the driver.
++	 */
++	rq->cmd_flags &= ~REQ_FLUSH;
++	if (!(fflags & REQ_FUA))
++		rq->cmd_flags &= ~REQ_FUA;
++
++	/*
++	 * An empty flush handed down from a stacking driver may
++	 * translate into nothing if the underlying device does not
++	 * advertise a write-back cache.  In this case, simply
++	 * complete the request.
++	 */
++	if (!policy) {
++		__blk_end_bidi_request(rq, 0, 0, 0);
++		return;
++	}
++
++	BUG_ON(!rq->bio || rq->bio != rq->biotail);
++
++	/*
++	 * If there's data but flush is not necessary, the request can be
++	 * processed directly without going through flush machinery.  Queue
++	 * for normal execution.
++	 */
++	if ((policy & REQ_FSEQ_DATA) &&
++	    !(policy & (REQ_FSEQ_PREFLUSH | REQ_FSEQ_POSTFLUSH))) {
++		list_add_tail(&rq->queuelist, &q->queue_head);
++		blk_run_queue_async__2(q);
++		return;
++	}
++
++	/*
++	 * @rq should go through flush machinery.  Mark it part of flush
++	 * sequence and submit for further processing.
++	 */
++	memset(&rq->flush, 0, sizeof(rq->flush));
++	INIT_LIST_HEAD(&rq->flush.list);
++	rq->cmd_flags |= REQ_FLUSH_SEQ;
++	rq->flush.saved_end_io = rq->end_io; /* Usually NULL */
++	rq->end_io = flush_data_end_io;
++
++	blk_flush_complete_seq(rq, REQ_FSEQ_ACTIONS & ~policy, 0);
++}
++
++/**
++ * blk_abort_flushes__2 - @q is being aborted, abort flush requests
++ * @q: request_queue being aborted
++ *
++ * To be called from elv_abort_queue().  @q is being aborted.  Prepare all
++ * FLUSH/FUA requests for abortion.
++ *
++ * CONTEXT:
++ * spin_lock_irq(q->queue_lock)
++ */
++void blk_abort_flushes__2(struct request_queue *q)
++{
++	struct request *rq, *n;
++	int i;
++
++	/*
++	 * Requests in flight for data are already owned by the dispatch
++	 * queue or the device driver.  Just restore for normal completion.
++	 */
++	list_for_each_entry_safe(rq, n, &q->flush_data_in_flight, flush.list) {
++		list_del_init(&rq->flush.list);
++		blk_flush_restore_request(rq);
++	}
++
++	/*
++	 * We need to give away requests on flush queues.  Restore for
++	 * normal completion and put them on the dispatch queue.
++	 */
++	for (i = 0; i < ARRAY_SIZE(q->flush_queue); i++) {
++		list_for_each_entry_safe(rq, n, &q->flush_queue[i],
++					 flush.list) {
++			list_del_init(&rq->flush.list);
++			blk_flush_restore_request(rq);
++			list_add_tail(&rq->queuelist, &q->queue_head);
++		}
++	}
++}
++
++static void bio_end_flush(struct bio *bio, int err)
++{
++	if (err)
++		clear_bit(BIO_UPTODATE, &bio->bi_flags);
++	if (bio->bi_private)
++		complete(bio->bi_private);
++	bio_put(bio);
++}
++
++/**
++ * blkdev_issue_flush__2 - queue a flush
++ * @bdev:       blockdev to issue flush for
++ * @gfp_mask:   memory allocation flags (for bio_alloc)
++ * @error_sector:       error sector
++ *
++ * Description:
++ *    Issue a flush for the block device in question. Caller can supply
++ *    room for storing the error offset in case of a flush error, if they
++ *    wish to. If WAIT flag is not passed then caller may check only what
++ *    request was pushed in some internal queue for later handling.
++ */
++int blkdev_issue_flush__2(struct block_device *bdev, gfp_t gfp_mask,
++                sector_t *error_sector)
++{
++	DECLARE_COMPLETION_ONSTACK(wait);
++	struct request_queue *q;
++	struct bio *bio;
++	int ret = 0;
++
++	if (bdev->bd_disk == NULL)
++		return -ENXIO;
++
++	q = bdev_get_queue(bdev);
++	if (!q)
++		return -ENXIO;
++
++	/*
++	 * some block devices may not have their queue correctly set up here
++	 * (e.g. loop device without a backing file) and so issuing a flush
++	 * here will panic. Ensure there is a request function before issuing
++	 * the flush.
++	 */
++	if (!q->make_request_fn)
++		return -ENXIO;
++
++	bio = bio_alloc(gfp_mask, 0);
++	bio->bi_end_io = bio_end_flush;
++	bio->bi_bdev = bdev;
++	bio->bi_private = &wait;
++
++	bio_get(bio);
++	submit_bio(WRITE_FLUSH, bio);
++	wait_for_completion(&wait);
++
++	/*
++	 * The driver must store the error location in ->bi_sector, if
++	 * it supports it. For non-stacked drivers, this should be
++	 * copied from blk_rq_pos(rq).
++	 */
++	if (error_sector)
++	       *error_sector = bio->bi_sector;
++
++	if (!bio_flagged(bio, BIO_UPTODATE))
++		ret = -EIO;
++
++	bio_put(bio);
++	return ret;
++}
++EXPORT_SYMBOL(blkdev_issue_flush__2);
++
+ static void blkdev_discard_end_io(struct bio *bio, int err)
+ {
+ 	if (err) {
+diff --git a/src/block/blk-core.c b/src/block/blk-core.c
+index 71da511..a679769 100644
+--- a/src/block/blk-core.c
++++ b/src/block/blk-core.c
+@@ -27,6 +27,7 @@
+ #include <linux/writeback.h>
+ #include <linux/task_io_accounting_ops.h>
+ #include <linux/fault-inject.h>
++#include <linux/list_sort.h>
+ 
+ #define CREATE_TRACE_POINTS
+ #include <trace/events/block.h>
+@@ -418,6 +419,23 @@ void __blk_run_queue(struct request_queue *q)
+ EXPORT_SYMBOL(__blk_run_queue);
+ 
+ /**
++ * blk_run_queue_async__2 - run a single device queue in workqueue context
++ * @q:  The queue to run
++ *
++ * Description:
++ *    Tells kblockd to perform the equivalent of @blk_run_queue on behalf
++ *    of us.
++ */
++void blk_run_queue_async__2(struct request_queue *q)
++{
++	if (likely(!blk_queue_stopped(q))) {
++		__cancel_delayed_work(&q->delay_work);
++		queue_delayed_work(kblockd_workqueue, &q->delay_work, 0);
++	}
++}
++EXPORT_SYMBOL(blk_run_queue_async__2);
++
++/**
+  * blk_run_queue - run a single device queue
+  * @q: The queue to run
+  *
+@@ -2173,7 +2191,7 @@ static bool blk_end_bidi_request(struct request *rq, int error,
+  *     %false - we are done with this request
+  *     %true  - still buffers pending for this request
+  **/
+-static bool __blk_end_bidi_request(struct request *rq, int error,
++bool __blk_end_bidi_request(struct request *rq, int error,
+ 				   unsigned int nr_bytes, unsigned int bidi_bytes)
+ {
+ 	if (blk_update_bidi_request(rq, error, nr_bytes, bidi_bytes))
+@@ -2492,6 +2510,163 @@ int kblockd_schedule_work(struct request_queue *q, struct work_struct *work)
+ }
+ EXPORT_SYMBOL(kblockd_schedule_work);
+ 
++#define PLUG_MAGIC      0x91827364
++
++void blk_start_plug__2(struct blk_plug *plug)
++{
++	struct task_struct *tsk = current;
++
++	plug->magic = PLUG_MAGIC;
++	INIT_LIST_HEAD(&plug->list);
++	INIT_LIST_HEAD(&plug->cb_list);
++	plug->should_sort = 0;
++
++	/*
++	 * If this is a nested plug, don't actually assign it. It will be
++	 * flushed on its own.
++	 */
++	if (!tsk->plug) {
++		/*
++		 * Store ordering should not be needed here, since a potential
++		 * preempt will imply a full memory barrier
++		 */
++		tsk->plug = plug;
++	}
++}
++EXPORT_SYMBOL(blk_start_plug__2);
++
++static int plug_rq_cmp(void *priv, struct list_head *a, struct list_head *b)
++{
++	struct request *rqa = container_of(a, struct request, queuelist);
++	struct request *rqb = container_of(b, struct request, queuelist);
++
++	return !(rqa->q <= rqb->q);
++}
++
++/*
++ * If 'from_schedule' is true, then postpone the dispatch of requests
++ * until a safe kblockd context. We due this to avoid accidental big
++ * additional stack usage in driver dispatch, in places where the originally
++ * plugger did not intend it.
++ */
++static void queue_unplugged(struct request_queue *q, unsigned int depth,
++                            bool from_schedule)
++        __releases(q->queue_lock)
++{
++	/*
++	 * trace_block_unplug(q, depth, !from_schedule);
++	 * Ref: kernel/trace/blktrace.c (3.1)
++	 */
++	if (!from_schedule)
++		trace_block_unplug_io(q);
++	else
++		trace_block_unplug_timer(q);
++
++	/*
++	 * If we are punting this to kblockd, then we can safely drop
++	 * the queue_lock before waking kblockd (which needs to take
++	 * this lock).
++	 */
++	if (from_schedule) {
++		spin_unlock(q->queue_lock);
++		blk_run_queue_async__2(q);
++	} else {
++		__blk_run_queue(q);
++		spin_unlock(q->queue_lock);
++	}
++
++}
++
++static void flush_plug_callbacks(struct blk_plug *plug)
++{
++	LIST_HEAD(callbacks);
++
++	if (list_empty(&plug->cb_list))
++		return;
++
++	list_splice_init(&plug->cb_list, &callbacks);
++
++	while (!list_empty(&callbacks)) {
++		struct blk_plug_cb *cb = list_first_entry(&callbacks,
++							  struct blk_plug_cb,
++							  list);
++		list_del(&cb->list);
++		cb->callback(cb);
++	}
++}
++
++void blk_flush_plug_list__2(struct blk_plug *plug, bool from_schedule)
++{
++	struct request_queue *q;
++	unsigned long flags;
++	struct request *rq;
++	LIST_HEAD(list);
++	unsigned int depth;
++
++	BUG_ON(plug->magic != PLUG_MAGIC);
++
++	flush_plug_callbacks(plug);
++	if (list_empty(&plug->list))
++		return;
++
++	list_splice_init(&plug->list, &list);
++
++	if (plug->should_sort) {
++		list_sort__2(NULL, &list, plug_rq_cmp);
++		plug->should_sort = 0;
++	}
++
++	q = NULL;
++	depth = 0;
++
++	/*
++	 * Save and disable interrupts here, to avoid doing it for every
++	 * queue lock we have to take.
++	 */
++	local_irq_save(flags);
++	while (!list_empty(&list)) {
++		rq = list_entry_rq(list.next);
++		list_del_init(&rq->queuelist);
++		BUG_ON(!rq->q);
++		if (rq->q != q) {
++			/*
++			 * This drops the queue lock
++			 */
++			if (q)
++				queue_unplugged(q, depth, from_schedule);
++			q = rq->q;
++			depth = 0;
++			spin_lock(q->queue_lock);
++		}
++		/*
++		 * rq is already accounted, so use raw insert
++		 */
++		if (rq->cmd_flags & (REQ_FLUSH | REQ_FUA))
++			__elv_add_request__2(q, rq, ELEVATOR_INSERT_FLUSH);
++		else
++			__elv_add_request__2(q, rq, ELEVATOR_INSERT_SORT_MERGE);
++
++		depth++;
++	}
++
++	/*
++	 * This drops the queue lock
++	 */
++	if (q)
++		queue_unplugged(q, depth, from_schedule);
++
++	local_irq_restore(flags);
++}
++
++void blk_finish_plug__2(struct blk_plug *plug)
++{
++	blk_flush_plug_list__2(plug, false);
++
++	if (plug == current->plug)
++		current->plug = NULL;
++}
++EXPORT_SYMBOL(blk_finish_plug__2);
++
+ int __init blk_dev_init(void)
+ {
+ 	BUILD_BUG_ON(__REQ_NR_BITS > 8 *
+@@ -2509,4 +2684,3 @@ int __init blk_dev_init(void)
+ 
+ 	return 0;
+ }
+-
+diff --git a/src/block/blk-merge.c b/src/block/blk-merge.c
+index 99cb5cf..aac5a02 100644
+--- a/src/block/blk-merge.c
++++ b/src/block/blk-merge.c
+@@ -452,3 +452,9 @@ int attempt_front_merge(struct request_queue *q, struct request *rq)
+ 
+ 	return 0;
+ }
++
++int blk_attempt_req_merge__2(struct request_queue *q, struct request *rq,
++                             struct request *next)
++{
++	return attempt_merge(q, rq, next);
++}
+diff --git a/src/block/blk.h b/src/block/blk.h
+index 5ee3d7e..7d2e295 100644
+--- a/src/block/blk.h
++++ b/src/block/blk.h
+@@ -17,6 +17,8 @@ int blk_rq_append_bio(struct request_queue *q, struct request *rq,
+ 		      struct bio *bio);
+ void blk_dequeue_request(struct request *rq);
+ void __blk_queue_free_tags(struct request_queue *q);
++bool __blk_end_bidi_request(struct request *rq, int error,
++                            unsigned int nr_bytes, unsigned int bidi_bytes);
+ 
+ void blk_unplug_work(struct work_struct *work);
+ void blk_unplug_timeout(unsigned long data);
+@@ -51,6 +53,9 @@ static inline void blk_clear_rq_complete(struct request *rq)
+  */
+ #define ELV_ON_HASH(rq)		(!hlist_unhashed(&(rq)->hash))
+ 
++void blk_insert_flush__2(struct request *rq);
++void blk_abort_flushes__2(struct request_queue *q);
++
+ static inline struct request *__elv_next_request(struct request_queue *q)
+ {
+ 	struct request *rq;
+@@ -103,6 +108,8 @@ int ll_front_merge_fn(struct request_queue *q, struct request *req,
+ 		      struct bio *bio);
+ int attempt_back_merge(struct request_queue *q, struct request *rq);
+ int attempt_front_merge(struct request_queue *q, struct request *rq);
++int blk_attempt_req_merge__2(struct request_queue *q, struct request *rq,
++                                struct request *next);
+ void blk_recalc_rq_segments(struct request *rq);
+ void blk_rq_set_mixed_merge(struct request *rq);
+ 
+diff --git a/src/block/elevator.c b/src/block/elevator.c
+index a847046..2e9219a 100644
+--- a/src/block/elevator.c
++++ b/src/block/elevator.c
+@@ -508,6 +508,40 @@ int elv_merge(struct request_queue *q, struct request **req, struct bio *bio)
+ 	return ELEVATOR_NO_MERGE;
+ }
+ 
++/*
++ * Attempt to do an insertion back merge. Only check for the case where
++ * we can append 'rq' to an existing request, so we can throw 'rq' away
++ * afterwards.
++ *
++ * Returns true if we merged, false otherwise
++ */
++static bool elv_attempt_insert_merge__2(struct request_queue *q,
++                                        struct request *rq)
++{
++	struct request *__rq;
++
++	if (blk_queue_nomerges(q))
++		return false;
++
++	/*
++	 * First try one-hit cache.
++	 */
++	if (q->last_merge && blk_attempt_req_merge__2(q, q->last_merge, rq))
++		return true;
++
++	if (blk_queue_noxmerges(q))
++		return false;
++
++	/*
++	 * See if our hash lookup can find a potential backmerge.
++	 */
++	__rq = elv_rqhash_find(q, blk_rq_pos(rq));
++	if (__rq && blk_attempt_req_merge__2(q, __rq, rq))
++		return true;
++
++	return false;
++}
++
+ void elv_merged_request(struct request_queue *q, struct request *rq, int type)
+ {
+ 	struct elevator_queue *e = q->elevator;
+@@ -730,6 +764,87 @@ void __elv_add_request(struct request_queue *q, struct request *rq, int where,
+ }
+ EXPORT_SYMBOL(__elv_add_request);
+ 
++void __elv_add_request__2(struct request_queue *q, struct request *rq, int where)
++{
++	trace_block_rq_insert(q, rq);
++
++	rq->q = q;
++
++	if (rq->cmd_flags & REQ_SOFTBARRIER) {
++		/* barriers are scheduling boundary, update end_sector */
++		if (rq->cmd_type == REQ_TYPE_FS ||
++		    (rq->cmd_flags & REQ_DISCARD)) {
++			q->end_sector = rq_end_sector(rq);
++			q->boundary_rq = rq;
++		}
++	} else if (!(rq->cmd_flags & REQ_ELVPRIV) &&
++		    (where == ELEVATOR_INSERT_SORT ||
++		     where == ELEVATOR_INSERT_SORT_MERGE))
++		where = ELEVATOR_INSERT_BACK;
++
++	switch (where) {
++	case ELEVATOR_INSERT_REQUEUE:
++	case ELEVATOR_INSERT_FRONT:
++		rq->cmd_flags |= REQ_SOFTBARRIER;
++		list_add(&rq->queuelist, &q->queue_head);
++		break;
++
++	case ELEVATOR_INSERT_BACK:
++		rq->cmd_flags |= REQ_SOFTBARRIER;
++		elv_drain_elevator(q);
++		list_add_tail(&rq->queuelist, &q->queue_head);
++		/*
++		 * We kick the queue here for the following reasons.
++		 * - The elevator might have returned NULL previously
++		 *   to delay requests and returned them now.  As the
++		 *   queue wasn't empty before this request, ll_rw_blk
++		 *   won't run the queue on return, resulting in hang.
++		 * - Usually, back inserted requests won't be merged
++		 *   with anything.  There's no point in delaying queue
++		 *   processing.
++		 */
++		__blk_run_queue(q);
++		break;
++
++	case ELEVATOR_INSERT_SORT_MERGE:
++		/*
++		 * If we succeed in merging this request with one in the
++		 * queue already, we are done - rq has now been freed,
++		 * so no need to do anything further.
++		 */
++		if (elv_attempt_insert_merge__2(q, rq))
++			break;
++	case ELEVATOR_INSERT_SORT:
++		BUG_ON(rq->cmd_type != REQ_TYPE_FS &&
++		       !(rq->cmd_flags & REQ_DISCARD));
++		rq->cmd_flags |= REQ_SORTED;
++		q->nr_sorted++;
++		if (rq_mergeable(rq)) {
++			elv_rqhash_add(q, rq);
++			if (!q->last_merge)
++				q->last_merge = rq;
++		}
++
++		/*
++		 * Some ioscheds (cfq) run q->request_fn directly, so
++		 * rq cannot be accessed after calling
++		 * elevator_add_req_fn.
++		 */
++		q->elevator->ops->elevator_add_req_fn(q, rq);
++		break;
++
++	case ELEVATOR_INSERT_FLUSH:
++		rq->cmd_flags |= REQ_SOFTBARRIER;
++		blk_insert_flush__2(rq);
++		break;
++	default:
++		printk(KERN_ERR "%s: bad insertion point %d\n",
++		       __func__, where);
++		BUG();
++	}
++}
++EXPORT_SYMBOL(__elv_add_request__2);
++
+ void elv_add_request(struct request_queue *q, struct request *rq, int where,
+ 		     int plug)
+ {
+diff --git a/src/block/genhd.c b/src/block/genhd.c
+index 517e433..9a30852 100644
+--- a/src/block/genhd.c
++++ b/src/block/genhd.c
+@@ -1274,3 +1274,64 @@ int invalidate_partition(struct gendisk *disk, int partno)
+ }
+ 
+ EXPORT_SYMBOL(invalidate_partition);
++
++/*
++* Disk events - monitor disk events like media change and eject request.
++*/
++struct disk_events {
++	struct list_head        node;           /* all disk_event's */
++	struct gendisk          *disk;          /* the associated disk */
++	spinlock_t              lock;
++
++	struct mutex            block_mutex;    /* protects blocking */
++	int                     block;          /* event blocking depth */
++	unsigned int            pending;        /* events already sent out */
++	unsigned int            clearing;       /* events being cleared */
++
++	long                    poll_msecs;     /* interval, -1 for default */
++	struct delayed_work     dwork;
++};
++
++/* list of all disk_events */
++static DEFINE_MUTEX(disk_events_mutex);
++static LIST_HEAD(disk_events);
++
++/**
++ * disk_block_events - block and flush disk event checking
++ * @disk: disk to block events for
++ *
++ * On return from this function, it is guaranteed that event checking
++ * isn't in progress and won't happen until unblocked by
++ * disk_unblock_events().  Events blocking is counted and the actual
++ * unblocking happens after the matching number of unblocks are done.
++ *
++ * Note that this intentionally does not block event checking from
++ * disk_clear_events().
++ *
++ * CONTEXT:
++ * Might sleep.
++ */
++void disk_block_events(struct gendisk *disk)
++{
++	struct disk_events *ev = disk->ev;
++	unsigned long flags;
++	bool cancel;
++
++	if (!ev)
++		return;
++
++	/*
++	 * Outer mutex ensures that the first blocker completes canceling
++	 * the event work before further blockers are allowed to finish.
++	 */
++	mutex_lock(&ev->block_mutex);
++
++	spin_lock_irqsave(&ev->lock, flags);
++	cancel = !ev->block++;
++	spin_unlock_irqrestore(&ev->lock, flags);
++
++	if (cancel)
++		cancel_delayed_work_sync(&disk->ev->dwork);
++
++	mutex_unlock(&ev->block_mutex);
++}
+diff --git a/src/drivers/Kconfig b/src/drivers/Kconfig
+index 5e7b9b0..c418e4b 100644
+--- a/src/drivers/Kconfig
++++ b/src/drivers/Kconfig
+@@ -28,6 +28,8 @@ source "drivers/ata/Kconfig"
+ 
+ source "drivers/md/Kconfig"
+ 
++source "drivers/target/Kconfig"
++
+ source "drivers/message/fusion/Kconfig"
+ 
+ source "drivers/ieee1394/Kconfig"
+diff --git a/src/drivers/Makefile b/src/drivers/Makefile
+index 8ea3582..16a7af2 100644
+--- a/src/drivers/Makefile
++++ b/src/drivers/Makefile
+@@ -44,6 +44,7 @@ obj-y				+= i2c/
+ obj-$(CONFIG_IDE)		+= ide/
+ obj-$(CONFIG_SCSI)		+= scsi/
+ obj-$(CONFIG_ATA)		+= ata/
++obj-$(CONFIG_TARGET_CORE)	+= target/
+ obj-$(CONFIG_MTD)		+= mtd/
+ obj-$(CONFIG_SPI)		+= spi/
+ obj-y				+= net/
+diff --git a/src/drivers/infiniband/ulp/iser/iser_initiator.c b/src/drivers/infiniband/ulp/iser/iser_initiator.c
+index 9de6402..40a9487 100644
+--- a/src/drivers/infiniband/ulp/iser/iser_initiator.c
++++ b/src/drivers/infiniband/ulp/iser/iser_initiator.c
+@@ -353,7 +353,7 @@ int iser_send_command(struct iscsi_conn *conn,
+ 	unsigned long edtl;
+ 	int err = 0;
+ 	struct iser_data_buf *data_buf;
+-	struct iscsi_cmd *hdr =  (struct iscsi_cmd *)task->hdr;
++	struct iscsi_scsi_req *hdr = (struct iscsi_scsi_req *)task->hdr;
+ 	struct scsi_cmnd *sc  =  task->sc;
+ 
+ 	if (!iser_conn_state_comp(iser_conn->ib_conn, ISER_CONN_UP)) {
+diff --git a/src/drivers/scsi/be2iscsi/be_main.h b/src/drivers/scsi/be2iscsi/be_main.h
+index 53c9b70..494c54b 100644
+--- a/src/drivers/scsi/be2iscsi/be_main.h
++++ b/src/drivers/scsi/be2iscsi/be_main.h
+@@ -374,7 +374,7 @@ struct amap_pdu_data_out {
+ };
+ 
+ struct be_cmd_bhs {
+-	struct iscsi_cmd iscsi_hdr;
++	struct iscsi_scsi_req iscsi_hdr;
+ 	unsigned char pad1[16];
+ 	struct pdu_data_out iscsi_data_pdu;
+ 	unsigned char pad2[BE_SENSE_INFO_SIZE -
+@@ -405,7 +405,7 @@ struct be_nonio_bhs {
+ };
+ 
+ struct be_status_bhs {
+-	struct iscsi_cmd iscsi_hdr;
++	struct iscsi_scsi_req iscsi_hdr;
+ 	unsigned char pad1[16];
+ 	/**
+ 	 * The plus 2 below is to hold the sense info length that gets
+diff --git a/src/drivers/scsi/bnx2i/bnx2i_hwi.c b/src/drivers/scsi/bnx2i/bnx2i_hwi.c
+index 5c8d763..e8eae2c 100644
+--- a/src/drivers/scsi/bnx2i/bnx2i_hwi.c
++++ b/src/drivers/scsi/bnx2i/bnx2i_hwi.c
+@@ -306,11 +306,11 @@ int bnx2i_send_iscsi_login(struct bnx2i_conn *bnx2i_conn,
+ {
+ 	struct bnx2i_cmd *bnx2i_cmd;
+ 	struct bnx2i_login_request *login_wqe;
+-	struct iscsi_login *login_hdr;
++	struct iscsi_login_req *login_hdr;
+ 	u32 dword;
+ 
+ 	bnx2i_cmd = (struct bnx2i_cmd *)task->dd_data;
+-	login_hdr = (struct iscsi_login *)task->hdr;
++	login_hdr = (struct iscsi_login_req *)task->hdr;
+ 	login_wqe = (struct bnx2i_login_request *)
+ 						bnx2i_conn->ep->qp.sq_prod_qe;
+ 
+@@ -1239,7 +1239,7 @@ static int bnx2i_process_scsi_cmd_resp(struct iscsi_session *session,
+ 	struct bnx2i_cmd_response *resp_cqe;
+ 	struct bnx2i_cmd *bnx2i_cmd;
+ 	struct iscsi_task *task;
+-	struct iscsi_cmd_rsp *hdr;
++	struct iscsi_scsi_rsp *hdr;
+ 	u32 datalen = 0;
+ 
+ 	resp_cqe = (struct bnx2i_cmd_response *)cqe;
+@@ -1266,7 +1266,7 @@ static int bnx2i_process_scsi_cmd_resp(struct iscsi_session *session,
+ 	}
+ 	bnx2i_iscsi_unmap_sg_list(bnx2i_cmd);
+ 
+-	hdr = (struct iscsi_cmd_rsp *)task->hdr;
++	hdr = (struct iscsi_scsi_rsp *)task->hdr;
+ 	resp_cqe = (struct bnx2i_cmd_response *)cqe;
+ 	hdr->opcode = resp_cqe->op_code;
+ 	hdr->max_cmdsn = cpu_to_be32(resp_cqe->max_cmd_sn);
+diff --git a/src/drivers/scsi/bnx2i/bnx2i_iscsi.c b/src/drivers/scsi/bnx2i/bnx2i_iscsi.c
+index cafb888..e8648b0 100644
+--- a/src/drivers/scsi/bnx2i/bnx2i_iscsi.c
++++ b/src/drivers/scsi/bnx2i/bnx2i_iscsi.c
+@@ -1159,7 +1159,7 @@ static int bnx2i_task_xmit(struct iscsi_task *task)
+ 	struct bnx2i_conn *bnx2i_conn = conn->dd_data;
+ 	struct scsi_cmnd *sc = task->sc;
+ 	struct bnx2i_cmd *cmd = task->dd_data;
+-	struct iscsi_cmd *hdr = (struct iscsi_cmd *) task->hdr;
++	struct iscsi_scsi_req *hdr = (struct iscsi_scsi_req *)task->hdr;
+ 
+ 	if (!bnx2i_conn->is_bound)
+ 		return -ENOTCONN;
+diff --git a/src/drivers/scsi/libiscsi.c b/src/drivers/scsi/libiscsi.c
+index f1a4246..94ce3fa 100644
+--- a/src/drivers/scsi/libiscsi.c
++++ b/src/drivers/scsi/libiscsi.c
+@@ -83,22 +83,6 @@ MODULE_PARM_DESC(debug_libiscsi_eh,
+ 					     __func__, ##arg);		\
+ 	} while (0);
+ 
+-/* Serial Number Arithmetic, 32 bits, less than, RFC1982 */
+-#define SNA32_CHECK 2147483648UL
+-
+-static int iscsi_sna_lt(u32 n1, u32 n2)
+-{
+-	return n1 != n2 && ((n1 < n2 && (n2 - n1 < SNA32_CHECK)) ||
+-			    (n1 > n2 && (n2 - n1 < SNA32_CHECK)));
+-}
+-
+-/* Serial Number Arithmetic, 32 bits, less than, RFC1982 */
+-static int iscsi_sna_lte(u32 n1, u32 n2)
+-{
+-	return n1 == n2 || ((n1 < n2 && (n2 - n1 < SNA32_CHECK)) ||
+-			    (n1 > n2 && (n2 - n1 < SNA32_CHECK)));
+-}
+-
+ inline void iscsi_conn_queue_work(struct iscsi_conn *conn)
+ {
+ 	struct Scsi_Host *shost = conn->session->host;
+@@ -277,7 +261,7 @@ static int iscsi_prep_scsi_cmd_pdu(struct iscsi_task *task)
+ 	struct iscsi_conn *conn = task->conn;
+ 	struct iscsi_session *session = conn->session;
+ 	struct scsi_cmnd *sc = task->sc;
+-	struct iscsi_cmd *hdr;
++	struct iscsi_scsi_req *hdr;
+ 	unsigned hdrlength, cmd_len;
+ 	itt_t itt;
+ 	int rc;
+@@ -287,7 +271,7 @@ static int iscsi_prep_scsi_cmd_pdu(struct iscsi_task *task)
+ 		if (rc)
+ 			return rc;
+ 	}
+-	hdr = (struct iscsi_cmd *) task->hdr;
++	hdr = (struct iscsi_scsi_req *)task->hdr;
+ 	itt = hdr->itt;
+ 	memset(hdr, 0, sizeof(*hdr));
+ 
+@@ -731,7 +715,7 @@ static void iscsi_scsi_cmd_rsp(struct iscsi_conn *conn, struct iscsi_hdr *hdr,
+ 			       struct iscsi_task *task, char *data,
+ 			       int datalen)
+ {
+-	struct iscsi_cmd_rsp *rhdr = (struct iscsi_cmd_rsp *)hdr;
++	struct iscsi_scsi_rsp *rhdr = (struct iscsi_scsi_rsp *)hdr;
+ 	struct iscsi_session *session = conn->session;
+ 	struct scsi_cmnd *sc = task->sc;
+ 
+diff --git a/src/fs/block_dev.c b/src/fs/block_dev.c
+index 8bed055..2e55ae8 100644
+--- a/src/fs/block_dev.c
++++ b/src/fs/block_dev.c
+@@ -649,6 +649,154 @@ void bd_forget(struct inode *inode)
+ 		iput(bdev->bd_inode);
+ }
+ 
++/**
++ * bd_may_claim - test whether a block device can be claimed
++ * @bdev: block device of interest
++ * @whole: whole block device containing @bdev, may equal @bdev
++ * @holder: holder trying to claim @bdev
++ *
++ * Test whether @bdev can be claimed by @holder.
++ *
++ * CONTEXT:
++ * spin_lock(&bdev_lock).
++ *
++ * RETURNS:
++ * %true if @bdev can be claimed, %false otherwise.
++ */
++static bool bd_may_claim(struct block_device *bdev, struct block_device *whole,
++                         void *holder)
++{
++	if (bdev->bd_holder == holder)
++		return true;     /* already a holder */
++	else if (bdev->bd_holder != NULL)
++		return false;    /* held by someone else */
++	else if (bdev->bd_contains == bdev)
++		return true;     /* is a whole device which isn't held */
++
++	else if (whole->bd_holder == bd_may_claim)
++		return true;     /* is a partition of a device that is being partitioned */
++	else if (whole->bd_holder != NULL)
++		return false;    /* is a partition of a held device */
++	else
++		return true;     /* is a partition of an un-held device */
++}
++
++/**
++ * bd_prepare_to_claim - prepare to claim a block device
++ * @bdev: block device of interest
++ * @whole: the whole device containing @bdev, may equal @bdev
++ * @holder: holder trying to claim @bdev
++ *
++ * Prepare to claim @bdev.  This function fails if @bdev is already
++ * claimed by another holder and waits if another claiming is in
++ * progress.  This function doesn't actually claim.  On successful
++ * return, the caller has ownership of bd_claiming and bd_holder[s].
++ *
++ * CONTEXT:
++ * spin_lock(&bdev_lock).  Might release bdev_lock, sleep and regrab
++ * it multiple times.
++ *
++ * RETURNS:
++ * 0 if @bdev can be claimed, -EBUSY otherwise.
++ */
++static int bd_prepare_to_claim(struct block_device *bdev,
++                               struct block_device *whole, void *holder)
++{
++retry:
++	/* if someone else claimed, fail */
++	if (!bd_may_claim(bdev, whole, holder))
++		return -EBUSY;
++
++	/* if claiming is already in progress, wait for it to finish */
++	if (whole->bd_claiming) {
++		wait_queue_head_t *wq = bit_waitqueue(&whole->bd_claiming, 0);
++		DEFINE_WAIT(wait);
++
++		prepare_to_wait(wq, &wait, TASK_UNINTERRUPTIBLE);
++		spin_unlock(&bdev_lock);
++		schedule();
++		finish_wait(wq, &wait);
++		spin_lock(&bdev_lock);
++		goto retry;
++	}
++
++	/* yay, all mine */
++	return 0;
++}
++
++/**
++ * bd_start_claiming - start claiming a block device
++ * @bdev: block device of interest
++ * @holder: holder trying to claim @bdev
++ *
++ * @bdev is about to be opened exclusively.  Check @bdev can be opened
++ * exclusively and mark that an exclusive open is in progress.  Each
++ * successful call to this function must be matched with a call to
++ * either bd_finish_claiming() or bd_abort_claiming() (which do not
++ * fail).
++ *
++ * This function is used to gain exclusive access to the block device
++ * without actually causing other exclusive open attempts to fail. It
++ * should be used when the open sequence itself requires exclusive
++ * access but may subsequently fail.
++ *
++ * CONTEXT:
++ * Might sleep.
++ *
++ * RETURNS:
++ * Pointer to the block device containing @bdev on success, ERR_PTR()
++ * value on failure.
++ */
++static struct block_device *bd_start_claiming(struct block_device *bdev,
++                                              void *holder)
++{
++	struct gendisk *disk;
++	struct block_device *whole;
++	int partno, err;
++
++	might_sleep();
++
++	/*
++	 * @bdev might not have been initialized properly yet, look up
++	 * and grab the outer block device the hard way.
++	 */
++	disk = get_gendisk(bdev->bd_dev, &partno);
++	if (!disk)
++		return ERR_PTR(-ENXIO);
++
++	/*
++	 * Normally, @bdev should equal what's returned from bdget_disk()
++	 * if partno is 0; however, some drivers (floppy) use multiple
++	 * bdev's for the same physical device and @bdev may be one of the
++	 * aliases.  Keep @bdev if partno is 0.  This means claimer
++	 * tracking is broken for those devices but it has always been that
++	 * way.
++	 */
++	if (partno)
++		whole = bdget_disk(disk, 0);
++	else
++		whole = bdgrab(bdev);
++
++	module_put(disk->fops->owner);
++	put_disk(disk);
++	if (!whole)
++		return ERR_PTR(-ENOMEM);
++
++	/* prepare to claim, if successful, mark claiming in progress */
++	spin_lock(&bdev_lock);
++
++	err = bd_prepare_to_claim(bdev, whole, holder);
++	if (err == 0) {
++		whole->bd_claiming = holder;
++		spin_unlock(&bdev_lock);
++		return whole;
++	} else {
++		spin_unlock(&bdev_lock);
++		bdput(whole);
++		return ERR_PTR(err);
++	}
++}
++
+ int bd_claim(struct block_device *bdev, void *holder)
+ {
+ 	int res;
+@@ -1295,6 +1443,169 @@ int blkdev_get(struct block_device *bdev, fmode_t mode)
+ }
+ EXPORT_SYMBOL(blkdev_get);
+ 
++/**
++ * blkdev_get__2 - open a block device
++ * @bdev: block_device to open
++ * @mode: FMODE_* mask
++ * @holder: exclusive holder identifier
++ *
++ * Open @bdev with @mode.  If @mode includes %FMODE_EXCL, @bdev is
++ * open with exclusive access.  Specifying %FMODE_EXCL with %NULL
++ * @holder is invalid.  Exclusive opens may nest for the same @holder.
++ *
++ * On success, the reference count of @bdev is unchanged.  On failure,
++ * @bdev is put.
++ *
++ * CONTEXT:
++ * Might sleep.
++ *
++ * RETURNS:
++ * 0 on success, -errno on failure.
++ */
++int blkdev_get__2(struct block_device *bdev, fmode_t mode, void *holder)
++{
++	struct block_device *whole = NULL;
++	int res;
++
++	WARN_ON_ONCE((mode & FMODE_EXCL) && !holder);
++
++	if ((mode & FMODE_EXCL) && holder) {
++		whole = bd_start_claiming(bdev, holder);
++		if (IS_ERR(whole)) {
++			bdput(bdev);
++			return PTR_ERR(whole);
++		}
++	}
++
++	res = __blkdev_get(bdev, mode, 0);
++
++	if (whole) {
++		struct gendisk *disk = whole->bd_disk;
++
++		/* finish claiming */
++		mutex_lock(&bdev->bd_mutex);
++		spin_lock(&bdev_lock);
++
++		if (!res) {
++			BUG_ON(!bd_may_claim(bdev, whole, holder));
++			/*
++			 * Note that for a whole device bd_holders
++			 * will be incremented twice, and bd_holder
++			 * will be set to bd_may_claim before being
++			 * set to holder
++			 */
++			whole->bd_holders++;
++			whole->bd_holder = bd_may_claim;
++			bdev->bd_holders++;
++			bdev->bd_holder = holder;
++		}
++
++		/* tell others that we're done */
++		BUG_ON(whole->bd_claiming != holder);
++		whole->bd_claiming = NULL;
++		wake_up_bit(&whole->bd_claiming, 0);
++
++		spin_unlock(&bdev_lock);
++
++		/*
++		 * Block event polling for write claims if requested.  Any
++		 * write holder makes the write_holder state stick until
++		 * all are released.  This is good enough and tracking
++		 * individual writeable reference is too fragile given the
++		 * way @mode is used in blkdev_get/put().
++		 */
++		if (!res && (mode & FMODE_WRITE) && !bdev->bd_write_holder &&
++		    (disk->flags & GENHD_FL_BLOCK_EVENTS_ON_EXCL_WRITE)) {
++			bdev->bd_write_holder = true;
++			disk_block_events(disk);
++		}
++
++		mutex_unlock(&bdev->bd_mutex);
++		bdput(whole);
++	}
++
++	return res;
++}
++
++/**
++ * blkdev_get_by_path__2 - open a block device by name
++ * @path: path to the block device to open
++ * @mode: FMODE_* mask
++ * @holder: exclusive holder identifier
++ *
++ * Open the blockdevice described by the device file at @path.  @mode
++ * and @holder are identical to blkdev_get().
++ *
++ * On success, the returned block_device has reference count of one.
++ *
++ * CONTEXT:
++ * Might sleep.
++ *
++ * RETURNS:
++ * Pointer to block_device on success, ERR_PTR(-errno) on failure.
++ */
++struct block_device *blkdev_get_by_path__2(const char *path, fmode_t mode,
++					void *holder)
++{
++	struct block_device *bdev;
++	int err;
++
++	bdev = lookup_bdev(path);
++	if (IS_ERR(bdev))
++		return bdev;
++
++	err = blkdev_get__2(bdev, mode, holder);
++	if (err)
++		return ERR_PTR(err);
++
++	if ((mode & FMODE_WRITE) && bdev_read_only(bdev)) {
++		blkdev_put(bdev, mode);
++		return ERR_PTR(-EACCES);
++	}
++
++	return bdev;
++}
++EXPORT_SYMBOL(blkdev_get_by_path__2);
++
++/**
++ * blkdev_get_by_dev__2 - open a block device by device number
++ * @dev: device number of block device to open
++ * @mode: FMODE_* mask
++ * @holder: exclusive holder identifier
++ *
++ * Open the blockdevice described by device number @dev.  @mode and
++ * @holder are identical to blkdev_get().
++ *
++ * Use it ONLY if you really do not have anything better - i.e. when
++ * you are behind a truly sucky interface and all you are given is a
++ * device number.  _Never_ to be used for internal purposes.  If you
++ * ever need it - reconsider your API.
++ *
++ * On success, the returned block_device has reference count of one.
++ *
++ * CONTEXT:
++ * Might sleep.
++ *
++ * RETURNS:
++ * Pointer to block_device on success, ERR_PTR(-errno) on failure.
++ */
++struct block_device *blkdev_get_by_dev__2(dev_t dev, fmode_t mode, void *holder)
++{
++	struct block_device *bdev;
++	int err;
++
++	bdev = bdget(dev);
++	if (!bdev)
++		return ERR_PTR(-ENOMEM);
++
++	err = blkdev_get__2(bdev, mode, holder);
++	if (err)
++		return ERR_PTR(err);
++
++	return bdev;
++}
++EXPORT_SYMBOL(blkdev_get_by_dev__2);
++
+ static int blkdev_open(struct inode * inode, struct file * filp)
+ {
+ 	struct block_device *bdev;
+diff --git a/src/include/linux/blkdev.h b/src/include/linux/blkdev.h
+index dcd18be..4f7276b 100644
+--- a/src/include/linux/blkdev.h
++++ b/src/include/linux/blkdev.h
+@@ -98,6 +98,8 @@ enum rq_flag_bits {
+ 	__REQ_SOFTBARRIER,	/* may not be passed by ioscheduler */
+ 	__REQ_HARDBARRIER,	/* may not be passed by drive either */
+ 	__REQ_FUA,		/* forced unit access */
++	__REQ_FLUSH,            /* request for cache flush */
++	__REQ_FLUSH_SEQ,        /* request for flush sequence */
+ 	__REQ_NOMERGE,		/* don't touch this for merging */
+ 	__REQ_STARTED,		/* drive already may have started this one */
+ 	__REQ_DONTPREP,		/* don't call prep for this one */
+@@ -150,6 +152,11 @@ enum rq_flag_bits {
+ 
+ #define BLK_MAX_CDB	16
+ 
++#define REQ_WRITE	(1 << __REQ_RW)
++#define REQ_SYNC	(1 << __REQ_RW_SYNC)
++#define REQ_FLUSH	(1 << __REQ_FLUSH)
++#define REQ_FLUSH_SEQ	(1 << __REQ_FLUSH_SEQ)
++
+ /*
+  * try to put the fields that are referenced together in the same cacheline.
+  * if you modify this structure, be sure to check block/blk-core.c:rq_init()
+@@ -191,6 +198,12 @@ struct request {
+ 	void *elevator_private;
+ 	void *elevator_private2;
+ 
++	struct {
++		unsigned int            seq;
++		struct list_head        list;
++		rq_end_io_fn            *saved_end_io;
++	} flush;
++
+ 	struct gendisk *rq_disk;
+ 	unsigned long start_time;
+ 
+@@ -312,6 +325,9 @@ struct queue_limits {
+ 	unsigned int		io_min;
+ 	unsigned int		io_opt;
+ 	unsigned int		max_discard_sectors;
++	unsigned int		discard_granularity;
++	unsigned int		discard_alignment;
++
+ 
+ 	unsigned short		logical_block_size;
+ 	unsigned short		max_hw_segments;
+@@ -353,6 +369,11 @@ struct request_queue
+ 	struct request		*boundary_rq;
+ 
+ 	/*
++	 * Delayed queue handling
++	 */
++	struct delayed_work     delay_work;
++
++	/*
+ 	 * Auto-unplugging state
+ 	 */
+ 	struct timer_list	unplug_timer;
+@@ -425,6 +446,20 @@ struct request_queue
+ #ifdef CONFIG_BLK_DEV_IO_TRACE
+ 	struct blk_trace	*blk_trace;
+ #endif
++
++	/*
++	 * for flush operations
++	 */
++	unsigned int            flush_flags;
++	unsigned int            flush_not_queueable:1;
++	unsigned int            flush_queue_delayed:1;
++	unsigned int            flush_pending_idx:1;
++	unsigned int            flush_running_idx:1;
++	unsigned long           flush_pending_since;
++	struct list_head        flush_queue[2];
++	struct list_head        flush_data_in_flight;
++	struct request          flush_rq;
++
+ 	/*
+ 	 * reserved for flush operations
+ 	 */
+@@ -460,6 +495,8 @@ struct request_queue
+ #define QUEUE_FLAG_CQ	       16	/* hardware does queuing */
+ #define QUEUE_FLAG_DISCARD     17	/* supports DISCARD */
+ 
++#define QUEUE_FLAG_NOXMERGES   15       /* No extended merges */
++
+ #if defined(CONFIG_APM86xxx) && defined(CONFIG_SMP)
+ #define QUEUE_FLAG_DEFAULT	((1 << QUEUE_FLAG_IO_STAT) |		\
+ 				 (1 << QUEUE_FLAG_CLUSTER) |		\
+@@ -592,6 +629,8 @@ enum {
+ #define blk_queue_queuing(q)	test_bit(QUEUE_FLAG_CQ, &(q)->queue_flags)
+ #define blk_queue_stopped(q)	test_bit(QUEUE_FLAG_STOPPED, &(q)->queue_flags)
+ #define blk_queue_nomerges(q)	test_bit(QUEUE_FLAG_NOMERGES, &(q)->queue_flags)
++#define blk_queue_noxmerges(q)  \
++        test_bit(QUEUE_FLAG_NOXMERGES, &(q)->queue_flags)
+ #define blk_queue_nonrot(q)	test_bit(QUEUE_FLAG_NONROT, &(q)->queue_flags)
+ #define blk_queue_io_stat(q)	test_bit(QUEUE_FLAG_IO_STAT, &(q)->queue_flags)
+ #define blk_queue_flushing(q)	((q)->ordseq)
+@@ -811,6 +850,7 @@ extern void blk_sync_queue(struct request_queue *q);
+ extern void __blk_stop_queue(struct request_queue *q);
+ extern void __blk_run_queue(struct request_queue *);
+ extern void blk_run_queue(struct request_queue *);
++extern void blk_run_queue_async__2(struct request_queue *q);
+ extern int blk_rq_map_user(struct request_queue *, struct request *,
+ 			   struct rq_map_data *, void __user *, unsigned long,
+ 			   gfp_t);
+@@ -984,6 +1024,52 @@ struct request_queue *blk_alloc_queue_node(gfp_t, int);
+ extern void blk_put_queue(struct request_queue *);
+ 
+ /*
++ * Note: Code in between changing the blk_plug list/cb_list or element of such
++ * lists is preemptable, but such code can't do sleep (or be very careful),
++ * otherwise data is corrupted. For details, please check schedule() where
++ * blk_schedule_flush_plug() is called.
++ */
++struct blk_plug {
++        unsigned long magic;
++        struct list_head list;
++        struct list_head cb_list;
++        unsigned int should_sort;
++};
++#define BLK_MAX_REQUEST_COUNT 16
++
++struct blk_plug_cb {
++        struct list_head list;
++        void (*callback)(struct blk_plug_cb *);
++};
++
++extern void blk_start_plug__2(struct blk_plug *);
++extern void blk_finish_plug__2(struct blk_plug *);
++extern void blk_flush_plug_list__2(struct blk_plug *, bool);
++
++static inline void blk_flush_plug(struct task_struct *tsk)
++{
++        struct blk_plug *plug = tsk->plug;
++
++        if (plug)
++                blk_flush_plug_list__2(plug, false);
++}
++
++static inline void blk_schedule_flush_plug(struct task_struct *tsk)
++{
++        struct blk_plug *plug = tsk->plug;
++
++        if (plug)
++                blk_flush_plug_list__2(plug, true);
++}
++
++static inline bool blk_needs_flush_plug(struct task_struct *tsk)
++{
++        struct blk_plug *plug = tsk->plug;
++
++        return plug && (!list_empty(&plug->list) || !list_empty(&plug->cb_list));
++}
++
++/*
+  * tag stuff
+  */
+ #define blk_rq_tagged(rq)		((rq)->cmd_flags & REQ_QUEUED)
+@@ -1006,6 +1092,7 @@ static inline struct request *blk_map_queue_find_tag(struct blk_queue_tag *bqt,
+ }
+ 
+ extern int blkdev_issue_flush(struct block_device *, sector_t *);
++extern int blkdev_issue_flush__2(struct block_device *, gfp_t, sector_t *);
+ #define DISCARD_FL_WAIT		0x01	/* wait for completion */
+ #define DISCARD_FL_BARRIER	0x02	/* issue DISCARD_BARRIER request */
+ extern int blkdev_issue_discard(struct block_device *, sector_t sector,
+diff --git a/src/include/linux/elevator.h b/src/include/linux/elevator.h
+index 1cb3372..fa545b6 100644
+--- a/src/include/linux/elevator.h
++++ b/src/include/linux/elevator.h
+@@ -98,6 +98,7 @@ extern void elv_dispatch_sort(struct request_queue *, struct request *);
+ extern void elv_dispatch_add_tail(struct request_queue *, struct request *);
+ extern void elv_add_request(struct request_queue *, struct request *, int, int);
+ extern void __elv_add_request(struct request_queue *, struct request *, int, int);
++extern void __elv_add_request__2(struct request_queue *, struct request *, int);
+ extern void elv_insert(struct request_queue *, struct request *, int);
+ extern int elv_merge(struct request_queue *, struct request **, struct bio *);
+ extern void elv_merge_requests(struct request_queue *, struct request *,
+@@ -159,6 +160,8 @@ extern struct request *elv_rb_find(struct rb_root *, sector_t);
+ #define ELEVATOR_INSERT_BACK	2
+ #define ELEVATOR_INSERT_SORT	3
+ #define ELEVATOR_INSERT_REQUEUE	4
++#define ELEVATOR_INSERT_FLUSH   5
++#define ELEVATOR_INSERT_SORT_MERGE      6
+ 
+ /*
+  * return values from elevator_may_queue_fn
+diff --git a/src/include/linux/fs.h b/src/include/linux/fs.h
+index 7f82e57..652ae34 100644
+--- a/src/include/linux/fs.h
++++ b/src/include/linux/fs.h
+@@ -152,6 +152,10 @@ struct inodes_stat_t {
+ #define WRITE_SYNC_PLUG	(WRITE | (1 << BIO_RW_SYNCIO) | (1 << BIO_RW_NOIDLE))
+ #define WRITE_SYNC	(WRITE_SYNC_PLUG | (1 << BIO_RW_UNPLUG))
+ #define WRITE_ODIRECT	(WRITE | (1 << BIO_RW_SYNCIO) | (1 << BIO_RW_UNPLUG))
++
++#define WRITE_FLUSH             (WRITE | REQ_SYNC | REQ_NOIDLE | REQ_FLUSH)
++#define WRITE_FUA               (WRITE | REQ_SYNC | REQ_NOIDLE | REQ_FUA)
++
+ #define SWRITE_SYNC_PLUG	\
+ 			(SWRITE | (1 << BIO_RW_SYNCIO) | (1 << BIO_RW_NOIDLE))
+ #define SWRITE_SYNC	(SWRITE_SYNC_PLUG | (1 << BIO_RW_UNPLUG))
+@@ -646,8 +650,10 @@ struct block_device {
+ 	int			bd_openers;
+ 	struct mutex		bd_mutex;	/* open/close mutex */
+ 	struct list_head	bd_inodes;
++	void *		bd_claiming;
+ 	void *			bd_holder;
+ 	int			bd_holders;
++	bool		bd_write_holder;
+ #ifdef CONFIG_SYSFS
+ 	struct list_head	bd_holder_list;
+ #endif
+@@ -1981,6 +1987,10 @@ extern int ioctl_by_bdev(struct block_device *, unsigned, unsigned long);
+ extern int blkdev_ioctl(struct block_device *, fmode_t, unsigned, unsigned long);
+ extern long compat_blkdev_ioctl(struct file *, unsigned, unsigned long);
+ extern int blkdev_get(struct block_device *, fmode_t);
++extern struct block_device *blkdev_get_by_path__2(const char *path, fmode_t mode,
++                                                  void *holder);
++extern struct block_device *blkdev_get_by_dev__2(dev_t dev, fmode_t mode,
++                                                 void *holder);
+ extern int blkdev_put(struct block_device *, fmode_t);
+ extern int bd_claim(struct block_device *, void *);
+ extern void bd_release(struct block_device *);
+@@ -2100,6 +2110,8 @@ extern int filemap_fdatawrite_range(struct address_space *mapping,
+ 
+ extern int vfs_fsync_range(struct file *file, struct dentry *dentry,
+ 			   loff_t start, loff_t end, int datasync);
++extern int vfs_fsync_range__2(struct file *file, loff_t start, loff_t end,
++                           int datasync);
+ extern int vfs_fsync(struct file *file, struct dentry *dentry, int datasync);
+ extern int generic_write_sync(struct file *file, loff_t pos, loff_t count);
+ extern void sync_supers(void);
+diff --git a/src/include/linux/genhd.h b/src/include/linux/genhd.h
+index 297df45..f070363 100644
+--- a/src/include/linux/genhd.h
++++ b/src/include/linux/genhd.h
+@@ -115,6 +115,12 @@ struct hd_struct {
+ #define GENHD_FL_SUPPRESS_PARTITION_INFO	32
+ #define GENHD_FL_EXT_DEVT			64 /* allow extended devt */
+ #define GENHD_FL_NATIVE_CAPACITY		128
++#define GENHD_FL_BLOCK_EVENTS_ON_EXCL_WRITE		256
++
++enum {
++	DISK_EVENT_MEDIA_CHANGE                 = 1 << 0, /* media changed */
++	DISK_EVENT_EJECT_REQUEST                = 1 << 1, /* eject requested */
++};
+ 
+ #define BLK_SCSI_MAX_CMDS	(256)
+ #define BLK_SCSI_CMD_PER_LONG	(BLK_SCSI_MAX_CMDS / (sizeof(long) * 8))
+@@ -143,6 +149,10 @@ struct gendisk {
+ 
+ 	char disk_name[DISK_NAME_LEN];	/* name of major driver */
+ 	char *(*devnode)(struct gendisk *gd, mode_t *mode);
++
++	unsigned int events;            /* supported events */
++	unsigned int async_events;      /* async events, subset of all */
++
+ 	/* Array of pointers to partitions indexed by partno.
+ 	 * Protected with matching bdev lock but stat and other
+ 	 * non-critical accesses use RCU.  Always access through
+@@ -162,6 +172,7 @@ struct gendisk {
+ 	struct timer_rand_state *random;
+ 
+ 	atomic_t sync_io;		/* RAID */
++	struct disk_events *ev;
+ 	struct work_struct async_notify;
+ #ifdef  CONFIG_BLK_DEV_INTEGRITY
+ 	struct blk_integrity *integrity;
+@@ -359,6 +370,8 @@ static inline int get_disk_ro(struct gendisk *disk)
+ 	return disk->part0.policy;
+ }
+ 
++extern void disk_block_events(struct gendisk *disk);
++
+ /* drivers/char/random.c */
+ extern void add_disk_randomness(struct gendisk *disk);
+ extern void rand_initialize_disk(struct gendisk *disk);
+diff --git a/src/include/linux/kernel.h b/src/include/linux/kernel.h
+index f4e3184..71fd056 100644
+--- a/src/include/linux/kernel.h
++++ b/src/include/linux/kernel.h
+@@ -47,7 +47,22 @@ extern const char linux_proc_banner[];
+ 
+ #define FIELD_SIZEOF(t, f) (sizeof(((t*)0)->f))
+ #define DIV_ROUND_UP(n,d) (((n) + (d) - 1) / (d))
++#define DIV_ROUND_UP_ULL(ll,d) \
++        ({ unsigned long long _tmp = (ll)+(d)-1; do_div(_tmp, d); _tmp; })
++
++#if BITS_PER_LONG == 32
++# define DIV_ROUND_UP_SECTOR_T(ll,d) DIV_ROUND_UP_ULL(ll, d)
++#else
++# define DIV_ROUND_UP_SECTOR_T(ll,d) DIV_ROUND_UP(ll,d)
++#endif
++
+ #define roundup(x, y) ((((x) + ((y) - 1)) / (y)) * (y))
++#define rounddown(x, y) (                               \
++{                                                       \
++        typeof(x) __x = (x);                            \
++        __x - (__x % (y));                              \
++}                                                       \
++)
+ #define DIV_ROUND_CLOSEST(x, divisor)(			\
+ {							\
+ 	typeof(divisor) __divisor = divisor;		\
+@@ -376,6 +391,7 @@ static inline char *pack_hex_byte(char *buf, u8 byte)
+         printk(KERN_ERR pr_fmt(fmt), ##__VA_ARGS__)
+ #define pr_warning(fmt, ...) \
+         printk(KERN_WARNING pr_fmt(fmt), ##__VA_ARGS__)
++#define pr_warn pr_warning
+ #define pr_notice(fmt, ...) \
+         printk(KERN_NOTICE pr_fmt(fmt), ##__VA_ARGS__)
+ #define pr_info(fmt, ...) \
+@@ -406,6 +422,9 @@ static inline char *pack_hex_byte(char *buf, u8 byte)
+ 	({ if (0) printk(KERN_DEBUG pr_fmt(fmt), ##__VA_ARGS__); 0; })
+ #endif
+ 
++extern int hex_to_bin(char ch);
++extern void hex2bin(u8 *dst, const char *src, size_t count);
++
+ /*
+  * General tracing related utility functions - trace_printk(),
+  * tracing_on/tracing_off and tracing_start()/tracing_stop
+diff --git a/src/include/linux/list_sort.h b/src/include/linux/list_sort.h
+new file mode 100644
+index 0000000..8732a48
+--- /dev/null
++++ b/src/include/linux/list_sort.h
+@@ -0,0 +1,12 @@
++#ifndef _LINUX_LIST_SORT_H
++#define _LINUX_LIST_SORT_H
++
++#include <linux/types.h>
++
++struct list_head;
++
++void list_sort__2(void *priv, struct list_head *head,
++               int (*cmp)(void *priv, struct list_head *a,
++                          struct list_head *b));
++#endif
++
+diff --git a/src/include/linux/sched.h b/src/include/linux/sched.h
+index 0f67914..1f72269 100644
+--- a/src/include/linux/sched.h
++++ b/src/include/linux/sched.h
+@@ -1449,6 +1449,11 @@ struct task_struct {
+ /* stacked block device info */
+ 	struct bio *bio_list, **bio_tail;
+ 
++#ifdef CONFIG_BLOCK
++/* stack plugging */
++	struct blk_plug *plug;
++#endif
++
+ /* VM state */
+ 	struct reclaim_state *reclaim_state;
+ 
+diff --git a/src/include/scsi/iscsi_proto.h b/src/include/scsi/iscsi_proto.h
+index f2a2c11..13d3488 100644
+--- a/src/include/scsi/iscsi_proto.h
++++ b/src/include/scsi/iscsi_proto.h
+@@ -29,10 +29,40 @@
+ /* default iSCSI listen port for incoming connections */
+ #define ISCSI_LISTEN_PORT	3260
+ 
++/* iSCSI header length */
++#define ISCSI_HDR_LEN		48
++
++/* iSCSI CRC32C length */
++#define ISCSI_CRC_LEN		4
++
+ /* Padding word length */
+ #define ISCSI_PAD_LEN		4
+ 
+ /*
++ * Serial Number Arithmetic, 32 bits, RFC1982
++ */
++
++static inline int iscsi_sna_lt(u32 n1, u32 n2)
++{
++	return (s32)(n1 - n2) < 0;
++}
++
++static inline int iscsi_sna_lte(u32 n1, u32 n2)
++{
++	return (s32)(n1 - n2) <= 0;
++}
++
++static inline int iscsi_sna_gt(u32 n1, u32 n2)
++{
++	return (s32)(n1 - n2) > 0;
++}
++
++static inline int iscsi_sna_gte(u32 n1, u32 n2)
++{
++	return (s32)(n1 - n2) >= 0;
++}
++
++/*
+  * useful common(control and data pathes) macro
+  */
+ #define ntoh24(p) (((p)[0] << 16) | ((p)[1] << 8) | ((p)[2]))
+@@ -116,7 +146,7 @@ struct iscsi_ahs_hdr {
+ #define ISCSI_CDB_SIZE			16
+ 
+ /* iSCSI PDU Header */
+-struct iscsi_cmd {
++struct iscsi_scsi_req {
+ 	uint8_t opcode;
+ 	uint8_t flags;
+ 	__be16 rsvd2;
+@@ -161,7 +191,7 @@ struct iscsi_ecdb_ahdr {
+ };
+ 
+ /* SCSI Response Header */
+-struct iscsi_cmd_rsp {
++struct iscsi_scsi_rsp {
+ 	uint8_t opcode;
+ 	uint8_t flags;
+ 	uint8_t response;
+@@ -404,7 +434,7 @@ struct iscsi_text_rsp {
+ };
+ 
+ /* Login Header */
+-struct iscsi_login {
++struct iscsi_login_req {
+ 	uint8_t opcode;
+ 	uint8_t flags;
+ 	uint8_t max_version;	/* Max. version supported */
+@@ -425,7 +455,13 @@ struct iscsi_login {
+ #define ISCSI_FLAG_LOGIN_TRANSIT		0x80
+ #define ISCSI_FLAG_LOGIN_CONTINUE		0x40
+ #define ISCSI_FLAG_LOGIN_CURRENT_STAGE_MASK	0x0C	/* 2 bits */
++#define ISCSI_FLAG_LOGIN_CURRENT_STAGE1	0x04
++#define ISCSI_FLAG_LOGIN_CURRENT_STAGE2	0x08
++#define ISCSI_FLAG_LOGIN_CURRENT_STAGE3	0x0C
+ #define ISCSI_FLAG_LOGIN_NEXT_STAGE_MASK	0x03	/* 2 bits */
++#define ISCSI_FLAG_LOGIN_NEXT_STAGE1	0x01
++#define ISCSI_FLAG_LOGIN_NEXT_STAGE2	0x02
++#define ISCSI_FLAG_LOGIN_NEXT_STAGE3	0x03
+ 
+ #define ISCSI_LOGIN_CURRENT_STAGE(flags) \
+ 	((flags & ISCSI_FLAG_LOGIN_CURRENT_STAGE_MASK) >> 2)
+@@ -548,17 +584,25 @@ struct iscsi_logout_rsp {
+ struct iscsi_snack {
+ 	uint8_t opcode;
+ 	uint8_t flags;
+-	uint8_t rsvd2[14];
++	uint8_t rsvd2[2];
++	uint8_t hlength;
++	uint8_t dlength[3];
++	uint8_t lun[8];
+ 	itt_t	 itt;
++	__be32 ttt;
++	uint8_t rsvd3[4];
++	__be32 exp_statsn;
++	uint8_t rsvd4[8];
+ 	__be32	begrun;
+ 	__be32	runlength;
+-	__be32	exp_statsn;
+-	__be32	rsvd3;
+-	__be32	exp_datasn;
+-	uint8_t rsvd6[8];
+ };
+ 
+ /* SNACK PDU flags */
++#define ISCSI_FLAG_SNACK_TYPE_DATA	0
++#define ISCSI_FLAG_SNACK_TYPE_R2T	0
++#define ISCSI_FLAG_SNACK_TYPE_STATUS	1
++#define ISCSI_FLAG_SNACK_TYPE_DATA_ACK	2
++#define ISCSI_FLAG_SNACK_TYPE_RDATA	3
+ #define ISCSI_FLAG_SNACK_TYPE_MASK	0x0F	/* 4 bits */
+ 
+ /* Reject Message Header */
+diff --git a/src/include/scsi/scsi.h b/src/include/scsi/scsi.h
+index 34c46ab..50badc0 100644
+--- a/src/include/scsi/scsi.h
++++ b/src/include/scsi/scsi.h
+@@ -94,6 +94,7 @@ struct scsi_cmnd;
+ #define WRITE_LONG            0x3f
+ #define CHANGE_DEFINITION     0x40
+ #define WRITE_SAME            0x41
++#define UNMAP                 0x42
+ #define READ_TOC              0x43
+ #define LOG_SELECT            0x4c
+ #define LOG_SENSE             0x4d
+@@ -106,32 +107,51 @@ struct scsi_cmnd;
+ #define PERSISTENT_RESERVE_OUT 0x5f
+ #define VARIABLE_LENGTH_CMD   0x7f
+ #define REPORT_LUNS           0xa0
++#define SECURITY_PROTOCOL_IN  0xa2
+ #define MAINTENANCE_IN        0xa3
+ #define MAINTENANCE_OUT       0xa4
+ #define MOVE_MEDIUM           0xa5
+ #define EXCHANGE_MEDIUM       0xa6
+ #define READ_12               0xa8
+ #define WRITE_12              0xaa
++#define READ_MEDIA_SERIAL_NUMBER 0xab
+ #define WRITE_VERIFY_12       0xae
+ #define SEARCH_HIGH_12        0xb0
+ #define SEARCH_EQUAL_12       0xb1
+ #define SEARCH_LOW_12         0xb2
++#define SECURITY_PROTOCOL_OUT 0xb5
+ #define READ_ELEMENT_STATUS   0xb8
+ #define SEND_VOLUME_TAG       0xb6
+ #define WRITE_LONG_2          0xea
++#define EXTENDED_COPY         0x83
++#define RECEIVE_COPY_RESULTS  0x84
++#define ACCESS_CONTROL_IN     0x86
++#define ACCESS_CONTROL_OUT    0x87
+ #define READ_16               0x88
+ #define WRITE_16              0x8a
++#define READ_ATTRIBUTE        0x8c
++#define WRITE_ATTRIBUTE       0x8d
+ #define VERIFY_16	      0x8f
++#define WRITE_SAME_16         0x93
+ #define SERVICE_ACTION_IN     0x9e
+ /* values for service action in */
+ #define	SAI_READ_CAPACITY_16  0x10
+ /* values for maintenance in */
++#define MI_REPORT_IDENTIFYING_INFORMATION 0x05
+ #define MI_REPORT_TARGET_PGS  0x0a
++#define MI_REPORT_ALIASES     0x0b
++#define MI_REPORT_SUPPORTED_OPERATION_CODES 0x0c
++#define MI_REPORT_SUPPORTED_TASK_MANAGEMENT_FUNCTIONS 0x0d
++#define MI_REPORT_PRIORITY   0x0e
++#define MI_REPORT_TIMESTAMP  0x0f
++#define MI_MANAGEMENT_PROTOCOL_IN 0x10
+ /* values for maintenance out */
+ #define MO_SET_TARGET_PGS     0x0a
+ /* values for variable length command */
++#define XDWRITEREAD_32        0x07
+ #define READ_32		      0x09
+ #define WRITE_32	      0x0b
++#define WRITE_SAME_32         0x0d
+ 
+ /* Values for T10/04-262r7 */
+ #define	ATA_16		      0x85	/* 16-byte pass-thru */
+diff --git a/src/include/scsi/scsi_tcq.h b/src/include/scsi/scsi_tcq.h
+index 1723138..a4687d3 100644
+--- a/src/include/scsi/scsi_tcq.h
++++ b/src/include/scsi/scsi_tcq.h
+@@ -9,6 +9,7 @@
+ #define MSG_SIMPLE_TAG	0x20
+ #define MSG_HEAD_TAG	0x21
+ #define MSG_ORDERED_TAG	0x22
++#define MSG_ACA_TAG		0x24    /* unsupported */
+ 
+ #define SCSI_NO_TAG	(-1)    /* identify no tag in use */
+ 
+diff --git a/src/lib/Makefile b/src/lib/Makefile
+index 5c23371..a5c9f31 100644
+--- a/src/lib/Makefile
++++ b/src/lib/Makefile
+@@ -21,7 +21,7 @@ lib-y	+= kobject.o kref.o klist.o
+ 
+ obj-y += bcd.o div64.o sort.o parser.o halfmd4.o debug_locks.o random32.o \
+ 	 bust_spinlocks.o hexdump.o kasprintf.o bitmap.o scatterlist.o \
+-	 string_helpers.o gcd.o
++	 string_helpers.o gcd.o list_sort.o
+ 
+ ifeq ($(CONFIG_DEBUG_KOBJECT),y)
+ CFLAGS_kobject.o += -DDEBUG
+diff --git a/src/lib/hexdump.c b/src/lib/hexdump.c
+index 39af256..12ae7a8 100644
+--- a/src/lib/hexdump.c
++++ b/src/lib/hexdump.c
+@@ -16,6 +16,40 @@ const char hex_asc[] = "0123456789abcdef";
+ EXPORT_SYMBOL(hex_asc);
+ 
+ /**
++ * hex_to_bin - convert a hex digit to its real value
++ * @ch: ascii character represents hex digit
++ *
++ * hex_to_bin() converts one hex digit to its actual value or -1 in case of bad
++ * input.
++ */
++int hex_to_bin(char ch)
++{
++	if ((ch >= '0') && (ch <= '9'))
++		return ch - '0';
++	ch = tolower(ch);
++	if ((ch >= 'a') && (ch <= 'f'))
++		return ch - 'a' + 10;
++	return -1;
++}
++EXPORT_SYMBOL(hex_to_bin);
++
++/**
++ * hex2bin - convert an ascii hexadecimal string to its binary representation
++ * @dst: binary result
++ * @src: ascii hexadecimal string
++ * @count: result length
++ */
++void hex2bin(u8 *dst, const char *src, size_t count)
++{
++	while (count--) {
++		*dst = hex_to_bin(*src++) << 4;
++		*dst += hex_to_bin(*src++);
++		dst++;
++	}
++}
++EXPORT_SYMBOL(hex2bin);
++
++/**
+  * hex_dump_to_buffer - convert a blob of data to "hex ASCII" in memory
+  * @buf: data blob to dump
+  * @len: number of bytes in the @buf
+diff --git a/src/lib/list_sort.c b/src/lib/list_sort.c
+new file mode 100644
+index 0000000..677c9b3
+--- /dev/null
++++ b/src/lib/list_sort.c
+@@ -0,0 +1,143 @@
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/list_sort.h>
++#include <linux/slab.h>
++#include <linux/list.h>
++
++#define MAX_LIST_LENGTH_BITS 20
++
++/*
++ * Returns a list organized in an intermediate format suited
++ * to chaining of merge() calls: null-terminated, no reserved or
++ * sentinel head node, "prev" links not maintained.
++ */
++static struct list_head *merge(void *priv,
++                                int (*cmp)(void *priv, struct list_head *a,
++                                        struct list_head *b),
++                                struct list_head *a, struct list_head *b)
++{
++	struct list_head head, *tail = &head;
++
++	while (a && b) {
++		/* if equal, take 'a' -- important for sort stability */
++		if ((*cmp)(priv, a, b) <= 0) {
++			tail->next = a;
++			a = a->next;
++		} else {
++			tail->next = b;
++			b = b->next;
++		}
++		tail = tail->next;
++	}
++	tail->next = a?:b;
++	return head.next;
++}
++
++/*
++ * Combine final list merge with restoration of standard doubly-linked
++ * list structure.  This approach duplicates code from merge(), but
++ * runs faster than the tidier alternatives of either a separate final
++ * prev-link restoration pass, or maintaining the prev links
++ * throughout.
++ */
++static void merge_and_restore_back_links(void *priv,
++                                int (*cmp)(void *priv, struct list_head *a,
++                                        struct list_head *b),
++                                struct list_head *head,
++                                struct list_head *a, struct list_head *b)
++{
++	struct list_head *tail = head;
++
++	while (a && b) {
++		/* if equal, take 'a' -- important for sort stability */
++		if ((*cmp)(priv, a, b) <= 0) {
++			tail->next = a;
++			a->prev = tail;
++			a = a->next;
++		} else {
++			tail->next = b;
++			b->prev = tail;
++			b = b->next;
++		}
++		tail = tail->next;
++	}
++	tail->next = a ? : b;
++
++	do {
++		/*
++		 * In worst cases this loop may run many iterations.
++		 * Continue callbacks to the client even though no
++		 * element comparison is needed, so the client's cmp()
++		 * routine can invoke cond_resched() periodically.
++		 */
++		(*cmp)(priv, tail->next, tail->next);
++
++		tail->next->prev = tail;
++		tail = tail->next;
++	} while (tail->next);
++
++	tail->next = head;
++	head->prev = tail;
++}
++
++/**
++ * list_sort__2 - sort a list
++ * @priv: private data, opaque to list_sort(), passed to @cmp
++ * @head: the list to sort
++ * @cmp: the elements comparison function
++ *
++ * This function implements "merge sort", which has O(nlog(n))
++ * complexity.
++ *
++ * The comparison function @cmp must return a negative value if @a
++ * should sort before @b, and a positive value if @a should sort after
++ * @b. If @a and @b are equivalent, and their original relative
++ * ordering is to be preserved, @cmp must return 0.
++ */
++void list_sort__2(void *priv, struct list_head *head,
++                int (*cmp)(void *priv, struct list_head *a,
++                        struct list_head *b))
++{
++	struct list_head *part[MAX_LIST_LENGTH_BITS+1]; /* sorted partial lists
++						-- last slot is a sentinel */
++	int lev;  /* index into part[] */
++	int max_lev = 0;
++	struct list_head *list;
++
++	if (list_empty(head))
++		return;
++
++	memset(part, 0, sizeof(part));
++
++	head->prev->next = NULL;
++	list = head->next;
++
++	while (list) {
++		struct list_head *cur = list;
++		list = list->next;
++		cur->next = NULL;
++
++		for (lev = 0; part[lev]; lev++) {
++			cur = merge(priv, cmp, part[lev], cur);
++			part[lev] = NULL;
++		}
++		if (lev > max_lev) {
++			if (unlikely(lev >= ARRAY_SIZE(part)-1)) {
++				printk_once(KERN_DEBUG "list passed to"
++					" list_sort__2() too long for"
++					" efficiency\n");
++				lev--;
++			}
++			max_lev = lev;
++		}
++		part[lev] = cur;
++	}
++
++	for (lev = 0; lev < max_lev; lev++)
++		if (part[lev])
++			list = merge(priv, cmp, part[lev], list);
++
++	merge_and_restore_back_links(priv, cmp, head, part[max_lev], list);
++}
++EXPORT_SYMBOL(list_sort__2);
++

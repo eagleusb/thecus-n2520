@@ -1,0 +1,21 @@
+*****************************************************************************
+                            Thecus Board Drivers
+                           Thecus Technology Corp.
+                               Copyright 2012
+*****************************************************************************
+1. Introduction
+    This package is used for prepare Thecus kernel. It includes source files 
+for Thecus device drivers, header, and the script for patching.
+
+2. Installation
+    Using the setup script to patch these source files to your specific 
+Linux kernel source automatically.
+
+3. Usage
+   # cd thecus_drv_iscsi/
+   # sh setup.sh <path of Linux kernel source>
+
+NOTE:
+* To prepare a full Thecus kernel source, your kernel source still needs to 
+patch MD drivers which are not included in this package.
+

@@ -1,0 +1,63 @@
+\" $Id: loop-aes-keygen.1 1104 2006-03-17 15:43:11Z max $
+.TH loop-aes-keygen 1 2006-01-19
+.SH NAME
+loop-aes-keygen
+.
+.SH SYNOPSIS
+.B loop-aes-keygen
+[
+.I options
+]
+.I keyfile
+.
+.SH DESCRIPTION
+Creates keys for loop-AES loopback encryption. 
+.
+.SH OPTIONS
+.
+.TP
+.B \-v <1|2|3>
+Key format (Default: 3).
+.
+.TP
+.B \-c cipher
+Encrypt using GnuPG cipher
+.I cipher
+.
+.TP
+.B \-u id
+Encrypt using GnuPG pubkey
+.I id
+\&. Can be given more than once
+(Default: Encrypt symmetrically with passphrase)
+.
+.TP
+.B \-s device
+Override random source (Default: /dev/random). 
+.B Don't use this option unless you know what you are doing.
+A bad source can silently create useless and trivially crackable keys. 
+On the other hand, a known good source faster than /dev/random (eg. good
+hardware RNG) can significantly speed up the key creation.
+.
+.SH EXAMPLES
+.TP
+Create key
+$
+.B loop-aes-keygen key.gpg
+.TP
+Create key for multiple users
+$
+.B loop-aes-keygen -u user1@$HOSTNAME -u \(dqUser 2\(dq key.gpg
+.TP
+Create blowfish encrypted key in loop-AES v2.x format
+$
+.B loop-aes-keygen -c BLOWFISH -v2 key.gpg
+.
+.SH AUTHOR
+.TP
+Max Vozeler <xam@debian.org>
+.
+.SH SEE ALSO
+.BR losetup (8),
+.BR /usr/share/doc/loop-aes-utils/README,
+.BR /usr/share/doc/loop-aes-source/README*

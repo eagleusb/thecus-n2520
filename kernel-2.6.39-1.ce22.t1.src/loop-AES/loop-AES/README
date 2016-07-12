@@ -1,0 +1,1863 @@
+Written by Jari Ruusu <jariruusu@users.sourceforge.net>, July 1 2013
+
+Copyright 2001-2013 by Jari Ruusu.
+Redistribution of this file is permitted under the GNU Public License.
+
+
+Table of Contents
+~~~~~~~~~~~~~~~~~
+1.    Loop device primer
+2.    General information
+2.1.  Key setup and IV modes
+2.2.  Use of journaling file systems on loop device
+2.3.  Use of offsets and sizelimits
+2.4.  Use of software suspend
+2.5.  File system soft block sizes
+2.6.  Compatibility with earlier versions
+2.7.  Other loop ciphers - twofish, serpent, and blowfish
+2.8.  Compatibility with other loop encryption implementations
+2.9.  Passphrase character encodings
+2.10. The udev problem
+3.    Instructions for building loop.o driver
+4.    Instructions for building new mount, umount, losetup, swapon and swapoff
+5.    Instructions for building new gpg
+6.    Testing the loop.o driver and losetup program
+7.    Examples
+7.1.  Example 1 - Encrypting swap on 2.4 and newer kernels
+7.2.  Example 2 - Partition backed loop with gpg encrypted key file
+7.3.  Example 3 - Encrypted partition that multiple users can mount
+7.4.  Example 4 - Encrypting /tmp partition with random keys
+7.5.  Example 5 - Encrypting root partition
+7.6.  Example 6 - Boot from CD-ROM + encrypted root partition
+7.7.  Example 7 - Boot from USB-stick + encrypted root partition
+7.8.  Example 8 - Encrypted partition using serpent cipher
+8.    Security levels
+9.    Performance tuning for 2.4 and newer kernels
+10.   Files
+11.   Credits
+
+
+1. Loop device primer
+~~~~~~~~~~~~~~~~~~~~~
+Loop devices are block devices that do not store any data directly but loop
+all reads and writes to underlying block device or file, possibly encrypting
+and decrypting data in the process. Normally you don't write to a loop
+device directly, but set up a file system on it. The file system will then
+read from and write to loop device.
+
+By default, 8 loop devices are available: /dev/loop0, /dev/loop1 ...
+/dev/loop7 (on devfs /dev/loop/0 ... /dev/loop/7). All devices are
+identical, and each can be tied to one real block device or one file on some
+file system. You have to decide and allocate which loop to use for which
+purpose.
+
+losetup(8) program is used to make and tear down the connection between a
+loop device and underlying device or file. You don't have to specify type of
+underlying device as loop driver detects that automatically. mount(8),
+umount(8), swapon(8) and swapoff(8) programs can also set up and tear down
+loop devices.
+
+File backed loops may deadlock under some kernel + file system combinations.
+So, if you can choose between device backed and file backed, choose device
+backed even if it means that you have to re-partition your disks.
+
+
+2. General information
+~~~~~~~~~~~~~~~~~~~~~~
+This package provides loadable Linux kernel module (loop.o or loop.ko on 2.6
+and later kernels) that has AES cipher built-in. The AES cipher can be used
+to encrypt local file systems and disk partitions.
+
+Loop device encrypts data but does not authenticate ciphertext. In other
+words, it delivers data privacy, but does not guarantee that data has not
+been tampered with. Admins setting up encrypted file systems should ensure
+that neither ciphertext, nor tools used to access ciphertext (kernel +
+kernel modules, mount, losetup, and other utilities) can be trojaned or
+tampered.
+
+This package does *not* modify your kernel in any way, so you are free to
+use kernels of your choice, with or without cool patches. This package works
+with 2.0.x, 2.2.x, 2.4.x (2.4.7 or later), 2.6.x, and 3.x kernels.
+
+Latest version of this package can be found at:
+
+    http://loop-aes.sourceforge.net/
+    http://koti.tnnet.fi/jari.ruusu/linux/
+
+New versions are announced to linux-crypto mailing list at vger.kernel.org:
+
+    http://www.mail-archive.com/linux-crypto@vger.kernel.org/
+    http://marc.info/?l=linux-crypto-vger
+    http://www.spinics.net/lists/linux-crypto/
+
+List-subscribe: mailto:majordomo@vger.kernel.org?body=subscribe linux-crypto
+
+
+2.1. Key setup and IV modes
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The AES cipher is used in CBC (cipher block chaining) mode. Data is
+encrypted and decrypted in 512 byte chains. Three key setup modes are
+supported; single-key, multi-key-v2 and multi-key-v3 modes. Single-key mode
+uses simple sector IV and one AES key to encrypt and decrypt all sectors in
+the loop device. Multi-key-v2 mode uses cryptographically more secure MD5 IV
+and 64 different AES keys to encrypt and decrypt sectors in the loop device.
+In multi-key mode first key is used for first sector, second key for second
+sector, and so on. Multi-key-v3 is same as multi-key-v2 except that it uses
+one extra 65th key as additional input to MD5 IV computation.
+
+Recommended key setup mode is multi-key-v3, which is based on gpg encrypted
+key files. In this mode, the passphrase is protected against optimized
+dictionary attacks via salting and key iteration of gpg. Passphrase length
+should be 20 characters or more.
+
+If encryption type is specified as AES128 or AES, gpg decrypted key strings
+are hashed with SHA-256, and 128 bit AES encryption is used. If encryption
+type is specified as AES192, gpg decrypted key strings are hashed with
+SHA-384, and 192 bit AES encryption is used. If encryption type is specified
+as AES256, gpg decrypted key strings are hashed with SHA-512, and 256 bit
+AES encryption is used.
+
+
+2.2. Use of journaling file systems on loop device
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Don't use a journaling file system on top of file backed loop device. Device
+backed loop device can be used with journaling file systems as device backed
+loops guarantee that writes reach disk platters in order required by
+journaling file system (write caching must be disabled on the disk drive, of
+course). With file backed loop devices, correct write ordering may extend
+only to page cache (which resides in RAM) of underlying file system. VM can
+write such pages to disk in any order it wishes, and thus break write order
+expectation of journaling file system.
+
+
+2.3. Use of offsets and sizelimits
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+losetup and mount programs support using offset to underlying device or
+file. 2.4.x and later kernels also support use of sizelimit that limit size
+of device to some subset of full underlying device or file size. Both offset
+and sizelimit are specified in bytes. If no offset is specified, zero offset
+is used. If no sizelimit is specified, full device/file size is used. If you
+do use nonzero offsets, make sure offset is integer multiple of 512 bytes.
+Nonzero offsets that are not integer multiple of 512 bytes are NOT supported
+as they may be nonportable and/or nonworking.
+
+
+2.4. Use of software suspend
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Encryption keys are kept in kernel RAM while loop is active. Key is
+immediately erased when loop is deactivated. Use of suspend-to-disk while
+there are active encrypted loops should be used with caution: it would be
+really bad security wise because encryption keys are written to disk when
+kernel RAM is saved to disk. Once key is written to disk it may be
+recoverable from that disk pretty much forever. Security of data encrypted
+with such recoverable key is void.
+
+
+2.5. File system soft block sizes
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+If you intend to move encrypted file system to some other device (CD-ROM for
+example), be sure to create file system with soft block size that is integer
+multiple of device hard sector size. CD-ROMs have 2048 byte sectors. File
+system with 1024 byte soft block size is not going to work with all CD-ROM
+drives and/or drivers.
+
+
+2.6. Compatibility with earlier versions
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+This version is compatible with on-disk formats of all previous relased
+versions. This version is compatible with recommended mount, losetup and
+swapon command line syntax and /etc/fstab option syntax since
+loop-AES-v1.1b.
+
+Unhashed encryption type as created using ancient loop-AES-v1.0c, now needs
+'mount -o phash=unhashed1' or 'losetup -H unhashed1' options.
+
+Mount and losetup programs from loop-AES-v2.0g and older accepted unlimited
+long passphrase when passphrase was read from a file descriptor using '-p 0'
+option. To prevent abuse of mlock()ed RAM by non-root users, mount and
+losetup programs from loop-AES-v2.1a and newer limit max passphrase length
+to 4094 bytes.
+
+Loop-AES supports three different on-disk formats: v1, v2 and v3. v1 is from
+old loop-AES-v1.X versions and it uses a single key to encrypt all data
+sectors. v2 is from loop-AES-v2.X versions and it uses 64 keys to encrypt
+data sectors. v3 is from loop-AES-v3.X versions and it uses 65 keys, first
+64 are used to encrypt data sectors and 65th key is used as additional input
+to MD5 IV computation.
+
+So how does loop-AES auto-detect what on-disk format needs to be used? mount
+and losetup programs count the keys in encrypted key file:
+
+ 1 line of key data    ->  1 key    ->  v1 on-disk format
+ 64 lines of key data  ->  64 keys  ->  v2 on-disk format
+ 65 lines of key data  ->  65 keys  ->  v3 on-disk format
+
+Mount and losetup programs from loop-AES-v1.X versions only understand 1 key
+keyfiles. Mount and losetup programs from loop-AES-v2.X versions understand
+1 or 64 key keyfiles. Mount and losetup programs from loop-AES-v3.X versions
+understand 1 or 64 or 65 key keyfiles.
+
+User space tools (losetup/mount/umount/swapon/swapoff) use ioctl() calls to
+set up and tear down loop devices. loop-AES user space to kernel driver
+ioctl() ABI is stable. Over the years, kernel driver's loop device set up
+and tear down ioctl() set has been expanded twice; First time at loop-AES-v1
+to loop-AES-v2 version bump, and second time at loop-AES-v2 to loop-AES-v3
+version bump. In both two cases, new ioctl()s were added to switch loop
+device to use new on-disk format. No ioctl() has ever been removed or
+changed in incompatible way. Old ioctl()s are still there and fully
+functional.
+
+Older user space binaries work with newer kernel drivers. Newer user space
+binaries work with older kernel drivers. However, use of version v2 on-disk
+format requires that user space tools patch and kernel driver are both from
+a loop-AES-v2 version or later, and use of version v3 on-disk format
+requires that user space tools patch and kernel driver are both from a
+loop-AES-v3 version.
+
+
+2.7. Other loop ciphers - twofish, serpent, and blowfish
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+These cipher modules work with linux kernel versions 2.2 or later. Twofish
+and serpent ciphers can be used in either multi-key or single-key mode, but
+blowfish cipher can be used only in single-key mode.
+
+Cipher names that are available to losetup and mount programs:
+
+loop_twofish.o   :  twofish128   twofish160   twofish192   twofish256
+loop_blowfish.o  :  blowfish128  blowfish192  blowfish256
+loop_serpent.o   :  serpent128   serpent192   serpent256
+
+2.6.x and 3.x kernels use .ko extension for kernel modules, so module names
+will be loop_twofish.ko, loop_blowfish.ko and loop_serpent.ko on those
+kernels.
+
+These extra cipher modules are built only if EXTRA_CIPHERS=y parameter
+is present on make command line (see section 3).
+
+
+2.8. Compatibility with other loop encryption implementations
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+To use serpent, AES, twofish, or blowfish disk images encrypted using
+kerneli.org 512-byte-IV version (which uses RIPE-MD160 as password hash),
+use commands like these:
+
+    losetup -e twofish128 -H rmd160 /dev/loop0 /dev/hda9
+      or                  ^^^^^^^^^
+    mount -t ext2 /dev/hda9 /mnt9 -o loop,encryption=twofish128,phash=rmd160
+                                                                ^^^^^^^^^^^^
+Serpent module interprets loinit=2 option as "big-endian" flag. To use
+incorrect big-endian serpent disk images, use commands like these:
+
+    losetup -e serpent128 -I 2 /dev/loop0 /dev/hda9
+      or                  ^^^^
+    mount -t ext2 /dev/hda9 /mnt9 -o loop,encryption=serpent128,loinit=2
+                                                                ^^^^^^^^
+Blowfish module interprets loinit=1 option as "bug-compatible" flag. To use
+mutated-little-endian blowfish disk images encrypted using kerneli.org
+512-byte-IV version, use commands like these:
+
+    losetup -e blowfish128 -H rmd160 -I 1 /dev/loop0 /dev/hda9
+      or                   ^^^^^^^^^ ^^^^
+    mount -t ext2 /dev/hda9 /mnt9 -o loop,encryption=blowfish128,phash=rmd160,loinit=1
+                                                                 ^^^^^^^^^^^^ ^^^^^^^^
+Twofish module interprets loinit=1 option as "SUSE-compatible" flag. To use
+twofish disk images encrypted using SUSE-kernel-twofish version (which uses
+constant IV for each 512 byte sector), use commands like these:
+
+    losetup -e twofish160 -H rmd160 -I 1 /dev/loop0 /dev/hda9
+      or    ^^^^^^^^^^^^^ ^^^^^^^^^ ^^^^
+    mount -t ext2 /dev/hda9 /mnt9 -o loop,encryption=twofish160,phash=rmd160,loinit=1
+                                          ^^^^^^^^^^^^^^^^^^^^^ ^^^^^^^^^^^^ ^^^^^^^^
+
+
+2.9. Passphrase character encodings
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Some characters are encoded differently in different encoding schemes. Such
+characters include accented characters, euro symbol, and almost everything
+else containg byte code values greater than 127. Passphrases that include
+such differently encoded characters, will not work on different kind
+character encoding setup than what was used originally.
+
+Euro symbol encoded in ISO8859-15, hex code: A4
+Euro symbol encoded in UTF-8, hex codes: E2 82 AC
+
+If one setup uses hex code A4 for euro symbol, and other uses hex codes E2
+82 AC, then encryption keys derived from such different input bits will be
+different. Different encryption key means that encrypted file system mount
+will fail.
+
+There is no easy solution for this, maybe: (1) stick to one character
+encoding scheme, or (2) restrict passphrase characters to pure ASCII
+characters that are identically encoded in all characters encoding schemes.
+
+
+2.10. The udev problem
+~~~~~~~~~~~~~~~~~~~~~~
+Many distros use udev to manage device special nodes. udev monitors devices
+that are created by kernel device drivers, and then creates corresponding
+special device nodes on devtmpfs file system mounted at /dev directory. Loop
+driver is different because there is no hardware detection involved to
+initiate loading loop driver to kernel. However, loop driver does get
+auto-loaded to kernel when mount or swapon program opens pre-existing
+/dev/loop0 block special device node. When loop driver gets loaded to
+kernel, loop driver creates and registers loop devices inside the kernel.
+udev will see those registered devices, and create their /dev/loopXX block
+special device nodes.
+
+The problem with udev is that there must be at least one pre-existing
+/dev/loop0 block special device node for loop module auto-loading to work.
+There was a time when udev pre-created /dev/loop0 ... /dev/loop7 block
+special device nodes automatically. Now there are distros that pre-create
+only one (/dev/loop0) and also distros that do not pre-create any loop block
+special device nodes.
+
+Some distros have a configuration file that specifies what kernel modules
+should be loaded to kernel at boot time. But this configuration file based
+loop kernel module loading (and udev creating special device nodes) may
+happen so late in boot process that it is too late for encrypted swap on
+loop device.
+
+Workaround for distros that create one pre-existing loop block special
+device node: configure /etc/fstab so that encrypted swap uses that one
+/dev/loop0 device.
+
+Workaround for distros that do not create any pre-existing loop block
+special device nodes: (1) change init scripts run order so that
+configuration file based loop kernel module loading happens before enabling
+swap, or (2) re-configure udev pre-create at least one /dev/loop0 block
+special device node, or (3) create static loop block special device nodes
+inside /lib/udev/devices/ directory that udev copies to /dev directory.
+
+    mknod -m 660 /lib/udev/devices/loop0 b 7 0
+    mknod -m 660 /lib/udev/devices/loop1 b 7 1
+    mknod -m 660 /lib/udev/devices/loop2 b 7 2
+    mknod -m 660 /lib/udev/devices/loop3 b 7 3
+    mknod -m 660 /lib/udev/devices/loop4 b 7 4
+    mknod -m 660 /lib/udev/devices/loop5 b 7 5
+    mknod -m 660 /lib/udev/devices/loop6 b 7 6
+    mknod -m 660 /lib/udev/devices/loop7 b 7 7
+
+
+3. Instructions for building loop.o driver
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Before you attempt to build loop.o driver (loop.ko on 2.6.x and 3.x
+kernels), you *must* configure, compile and install new kernel so that
+CONFIG_MODULES=y and CONFIG_BLK_DEV_LOOP=n. Also, CONFIG_KMOD=y is
+recommended but not required (kernel 2.0 doesn't have CONFIG_KMOD, set
+CONFIG_KERNELD=y instead). Configuring your kernel so that loop driver is
+built-in (CONFIG_BLK_DEV_LOOP=y) or module (CONFIG_BLK_DEV_LOOP=m) will
+*not* work. After building and installing your new kernel, do not attempt to
+clean kernel tree, or rename path to kernel sources.
+
+(Re)configuring and (re)compiling your kernel are required for following
+reasons: (1) to disable loop driver in your kernel, (2) to get your kernel
+sources to match your running kernel, (3) to get your kernel .config to
+match your running kernel, (4) to set up configure time generated links
+properly, (5) to generate compile time created header files properly to
+match your kernel configuration. Failure to fulfill *all* above requirements
+may cause loop.o driver compilation to fail or generate incorrectly
+operating code. If you are just upgrading existing loop-AES with newer
+version, there is no need to recompile kernel or reboot. Just unmount all
+file systems using old loop driver, and remove loop driver from kernel with
+rmmod command before compiling new loop driver.
+
+This is how loop.o is compiled and installed:
+
+2.2 and older kernels:  Makefile copies your kernel's loop.c to this
+                        directory. Then, Makefile patches that copy with a
+                        kernel version specific patch. If patching a copy of
+                        your kernel's loop.c fails, then a local copy of
+                        known-to-work and patch-able loop.c-2.X.original is
+                        used instead.
+
+2.4 and newer kernels:  Makefile copies pre-patched loop.c-2.X.patched to
+                        file called patched-loop.c.
+
+Resulting patched-loop.c along with other source files is then compiled and
+linked to form a new loop.o driver (loop.ko on 2.6.x and 3.x kernels) that
+is installed in /lib/modules/`uname -r`/block (2.4.x and older kernels) or
+/lib/modules/`uname -r`/extra (2.6.x and 3.x kernels) directory. AES cipher
+is permanently glued to loop.o driver so that when loop.o is loaded it
+automagically has AES support built in. There is no need to define any
+aliases in /etc/modules.conf file.
+
+To compile and install loop.o driver, as root, use commands:
+
+    cd /PATH/TO/LOOP-AES
+    make clean
+    make
+
+Makefile tries to locate running kernel source directory, steal definitions
+from kernel Makefile, and build a version that matches your running kernel.
+Following directories are tried, in this order:
+
+    /lib/modules/`uname -r`/source
+    /lib/modules/`uname -r`/build
+    /usr/src/linux
+    /usr/src/linux-`uname -r`
+    /usr/src/kernel-source-`uname -r`
+
+You can override automatic kernel source directory detection by specifying
+LINUX_SOURCE like this:  make LINUX_SOURCE=/usr/src/linux-2.4.22aa1
+
+Both LINUX_SOURCE and KBUILD_OUTPUT must be specified when compiling for
+2.6.x or 3.x kernel with separate object directory.
+
+You can disable automatic module installation and creation of module
+dependencies by specifying MODINST=n on make command line.
+
+Automatic kernel source directory detection is not foolproof. For best
+results, always specify LINUX_SOURCE, especially if loop.o module appears to
+compile for wrong kernel. Observe last five lines of make output for clues.
+
+If you are upgrading your kernel and you need loop.o module during boot, you
+probably need to build new version of loop.o module that matches your new
+kernel *before* you boot the new kernel. To build loop.o module for other
+kernel than running kernel, you *must* specify LINUX_SOURCE parameter to
+make.
+
+You can override default installation root directory by specifying
+INSTALL_MOD_PATH like this:  make INSTALL_MOD_PATH=/path/to/destination/root
+
+Makefile detects processor type from kernel configuration. If selected
+processor type is x86 processor or AMD64 processor, optimized assembler
+implementations of AES and MD5 are used instead of C implementations. If you
+want to unconditionally disable x86 assembler AES and MD5 implementations,
+specify X86_ASM=n on make command line. If you want to unconditionally
+disable AMD64 assembler AES and MD5 implementations, specify AMD64_ASM=n on
+make command line.
+
+If you want to enable AES encryption key scrubbing, specify KEYSCRUB=y on
+make command line. Loop encryption key scrubbing moves and inverts key bits
+in kernel RAM so that the thin oxide which forms the storage capacitor
+dielectric of DRAM cells is not permitted to develop detectable property.
+For more info, see Peter Gutmann's paper:
+http://www.cypherpunks.to/~peter/usenix01.pdf
+
+Encryption key scrubbing does not protect against cold-boot attacks where
+adversary extracts RAM contents by cutting power of a computer that still
+has mounted encrypted file system, and immediately moving its RAM to another
+computer to extract RAM contents. RAM chips seem to keep their data without
+power for a while. Patrick Simmons has experimental patches/code that claim
+to defend against cold-boot attack, but his code has some limitations.
+Patrick Simmons' patches/code can be found at
+http://linuxrocks123.livejournal.com/93919.html
+
+If you want enable VIA padlock hardware AES xcrypt instructions, specify
+PADLOCK=y on make command line. If enabled, presence of VIA padlock
+instructions is detected at run time, but code still works on non-padlock
+processors too.
+
+If you want enable Intel hardware AES instructions, specify INTELAES=y on
+make command line. If enabled, presence of Intel AES instructions is
+detected at run time, but code still works on older processors too.
+
+Currently, INTELAES=y with 32 bit 2.4.x kernel won't build as a module. That
+is because it needs to call a specific kernel function (kernel_fpu_begin),
+and unmodified 32 bit 2.4.x kernels don't make that function available to
+modules. INTELAES=y with 64 bit 2.4.x kernels and all 2.6.x and all 3.x
+kernels should work ok. This patch for 2.4.x kernels fixes the problem:
+
+--- linux-2.4.37.9/arch/i386/kernel/i386_ksyms.c.old
++++ linux-2.4.37.9/arch/i386/kernel/i386_ksyms.c
+@@ -194,3 +194,5 @@
+ EXPORT_SYMBOL(eddnr);
+ EXPORT_SYMBOL(edd_disk80_sig);
+ #endif
++
++EXPORT_SYMBOL(kernel_fpu_begin);
+
+
+Twofish, serpent, and blowfish loop cipher modules are also available, but
+they are not built by default. Add EXTRA_CIPHERS=y parameter to make command
+line if you want them built and installed. Prior to loop-AES-v3.2a, these
+modules were on separate 'ciphers' package. Due to versioned symbol build
+difficulties on 2.6.x and 3.x kernels involving two separately built kernel
+module packages, these modules are now merged to loop-AES, and are now built
+from one package. If you have applied loop-AES kernel patch to your kernel
+sources and have loop driver built-in to your kernel and want to build only
+twofish serpent and blowfish ciphers without building a new loop driver,
+then you can add BUILD_LOOP=n parameter to make command. Currently, twofish
+serpent and blowfish don't do encryption key scrubbing, so KEYSCRUB=y make
+parameter has no effect on them.
+
+Note: If your patch program is very old, it may not understand the --dry-run
+option, and may puke lengthy error messages. Even if that happens, the build
+process should still produce a working loop driver.
+
+
+4. Instructions for building new mount, umount, losetup, swapon and swapoff
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In order to support AES and other ciphers, mount, umount, losetup, swapon
+and swapoff need to be patched and recompiled. A patch is included. Mount,
+umount, losetup, swapon and swapoff sources are in util-linux package which
+you can get from:
+
+    http://www.kernel.org/pub/linux/utils/util-linux/
+     or
+    ftp://ftp.kernel.org/pub/linux/utils/util-linux/
+
+Do *not* install all the utilities in the util-linux package without
+thinking. You may ruin your system if you do that. Read the INSTALL file
+provided with util-linux tarball.
+
+These commands, as root user, will recompile and install mount, umount,
+losetup, swapon, swapoff and their man pages (choose only one util-linux
+package):
+
+util-linux-2.12r  (for really old systems)
+
+    bzip2 -d -c util-linux-2.12r.tar.bz2 | tar xvf -
+    cd util-linux-2.12r
+    patch -p1 </PATH/TO/LOOP-AES/util-linux-2.12r.diff
+    CFLAGS=-O2 ./configure
+    make SUBDIRS="lib mount"
+    rm -f /usr/share/man/man8/{mount,umount,losetup,swapon,swapoff}.8.gz
+    rm -f /usr/share/man/man5/fstab.5.gz
+    cd mount
+    install -m 4755 -o root mount umount /bin
+    install -m 755 losetup swapon /sbin
+    rm -f /sbin/swapoff && ( cd /sbin && ln -s swapon swapoff )
+    install -m 644 mount.8 umount.8 /usr/share/man/man8
+    install -m 644 losetup.8 swapon.8 swapoff.8 /usr/share/man/man8
+    install -m 644 fstab.5 /usr/share/man/man5
+    mandb
+    cd ../..
+
+util-linux-2.21.2  (libmount disabled)
+
+    bzip2 -d -c util-linux-2.21.2.tar.bz2 | tar xvf -
+    cd util-linux-2.21.2
+    patch -p1 </PATH/TO/LOOP-AES/util-linux-2.21.2.diff
+    CFLAGS="-O2 -Wall" ./configure --disable-libmount
+    make
+    rm -f /usr/share/man/man8/{mount,umount,losetup,swapon,swapoff}.8.gz
+    rm -f /usr/share/man/man5/fstab.5.gz
+    cd mount
+    install -m 4755 -o root mount umount /bin
+    install -m 644 mount.8 umount.8 /usr/share/man/man8
+    install -m 644 fstab.5 /usr/share/man/man5
+    cd ../sys-utils
+    install -m 755 losetup swapon /sbin
+    rm -f /sbin/swapoff && ( cd /sbin && ln -s swapon swapoff )
+    install -m 644 losetup.8 swapon.8 swapoff.8 /usr/share/man/man8
+    mandb
+    cd ../..
+
+util-linux-2.23.1 (libmount enabled)
+
+    bzip2 -d -c util-linux-2.23.1.tar.bz2 | tar xvf -
+    cd util-linux-2.23.1
+    patch -p1 </PATH/TO/LOOP-AES/util-linux-2.23.1.diff
+    ./autogen.sh
+    CFLAGS="-O2 -Wall" ./configure --disable-shared --enable-static
+    make
+    rm -f /usr/share/man/man8/{mount,umount,losetup,swapon,swapoff}.8.gz
+    rm -f /usr/share/man/man5/fstab.5.gz
+    install -m 4755 -o root mount umount /bin
+    install -m 755 losetup swapon swapoff /sbin
+    cd sys-utils
+    install -m 644 mount.8 umount.8 /usr/share/man/man8
+    install -m 644 losetup.8 swapon.8 swapoff.8 /usr/share/man/man8
+    install -m 644 fstab.5 /usr/share/man/man5
+    mandb
+    cd ../..
+
+In some cases it may be necessary to add --disable-shared --enable-static
+parameters to util-linux ./configure command. These parameters are required
+when util-linux build system adds shell script wrappers for compiled program
+binaries. If "file ./swapon" command says "shell script", then you need to
+use these parameters. For libmount based versions (util-linux-2.22 and
+newer) you have to either statically link (--disable-shared --enable-static)
+libmount library to mount/umount/swapon programs or replace system's
+libmount library with new one from patched util-linux package.
+
+Debian users may want to put mount package on hold like this:
+
+    echo mount hold | dpkg --set-selections
+
+
+5. Instructions for building new gpg
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+When gpg encrypts data with symmetric cipher only or when gpg encrypts
+secret keyring keys with secret passphrase, gpg uses seeded (salted) and
+iterated key setup. However, default amount of iteration is tuned for slow
+processors and can be increased for better resistance against dictionary
+attacks. Larger key iteration makes key setup much slower, but also makes
+dictionary attacks much slower too.
+
+Included optional gpg patch makes default gpg password iteration 128 times
+slower. gpg stores new iteration value along with seed bytes into symmetric
+cipher encrypted output file or secret keyring, so unpatched gpg versions
+will read and decrypt the data just fine.
+
+If you are using gpg version 1.4.6 or later you achieve same increased
+password iteration effect without recompiling new gpg binary by setting this
+option in your options file ~/.gnupg/gpg.conf
+
+    s2k-count 8388608
+
+Or alternatively... You can use this gpg command line parameter:
+
+    --s2k-count 8388608
+
+gpg sources are available from:
+
+    ftp://ftp.gnupg.org/gcrypt/gnupg/
+
+These commands, as root user, will recompile and install gpg and gpgv and
+their man pages:
+
+    bzip2 -d -c gnupg-1.4.13.tar.bz2 | tar xvf -
+    cd gnupg-1.4.13
+    patch -p1 </PATH/TO/LOOP-AES/gnupg-1.4.13.diff
+    CFLAGS="-O2" LDFLAGS="-static -s" ./configure --prefix=/usr --enable-static-rnd=linux
+    make
+    rm -f /usr/share/man/man1/{gpg,gpgv}.1.gz
+    make install
+    chown root:root /usr/bin/gpg
+    chmod 4755 /usr/bin/gpg
+    cd ..
+
+Note: Above instructions create statically linked version of gpg. Static
+linking is necessary if you ever decide to encrypt your root partition.
+
+If /usr/bin directory is not on your root partition, then it is necessary to
+move gpg to /bin directory on your root partition:
+
+    cd /usr/bin
+    mv gpg ../../bin
+    ln -s ../../bin/gpg gpg
+
+Debian users may want to put gnupg package on hold like this:
+
+    echo gnupg hold | dpkg --set-selections
+
+
+6. Testing the loop.o driver and losetup program
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Run these commands, as root, and Makefile will run series of tests.
+
+    cd /PATH/TO/LOOP-AES
+    make tests
+
+By default, 'make tests' command uses /dev/loop7 device to test loop driver.
+If that device is not available and/or you want to specify different
+default, you can add TLD=/dev/loop0 parameter to make command.
+
+If you chose to build twofish, serpent, and blowfish ciphers, and want to
+test them in addition to AES cipher, then add EXTRA_CIPHERS=y parameter to
+'make tests' command line. Like this:
+
+    cd /PATH/TO/LOOP-AES
+    make tests EXTRA_CIPHERS=y
+
+Makefile will display "*** Test results ok ***" message if tests are
+completed successfully. If tests fail, do not use the driver as it is
+broken.
+
+If gpg isn't available, then tests that involve decrypting gpg encrypted key
+files will fail. You can skip gpg key file tests by specifying
+TEST_GPG_TYPES=n on make command line.
+
+
+7. Examples
+~~~~~~~~~~~
+Many of following examples depend on gpg encrypted key file. gpg appears to
+prevent its own keys from being leaked to swap, but does not appear to
+prevent data handled by it from being leaked to swap. In gpg encrypted key
+file cases, the data handled by gpg are loop encryption keys, and they may
+leak to swap. Therefore, use of gpg encrypted key file depends on encrypted
+swap.
+
+When using gpg encrypted key file, the password that is used to encrypt the
+key file is the password that losetup and mount programs want. losetup and
+mount programs run gpg to decrypt the key file, and pipe the password to
+gpg. gpg then decrypts the file and pipes the real loop keys back to losetup
+or mount program.
+
+Many of following examples need uuencode program. Not all boxes have it
+installed by default. If you need to install uuencode program, it is usually
+part of sharutils package.
+
+Many of following examples attempt to use loop in multi-key-v3 mode and thus
+*require* losetup/mount programs from loop-AES-v3.0a or later. Setting up
+multi-key-v3 gpg key-file and using that key-file with old single-key or
+multi-key-v2 aware losetup/mount programs is *dangerous*. In multi-key loop
+cases "losetup -a" command run by root user should output "multi-key-v3"
+indicating that loop is really in multi-key-v3 mode. If no "multi-key-v3"
+string shows up, your loop setup is a time bomb. If you later upgrade your
+losetup/mount programs to version that can understand multi-key-v3 mode,
+those new losetup/mount programs will correctly setup loop in multi-key-v3
+mode instead of single-key or multi-key-v2 mode, and you may not be able to
+access your data any more. New losetup/mount programs are compatible with
+old single-key and multi-key-v2 key-files. New losetup/mount programs will
+recognize single-key or multi-key-v2 key-files and set up loop in
+appropriate mode in those cases. Old single-key or multi-key-v2 aware
+losetup/mount programs need old examples. None of the following gpg key-file
+examples are such.
+
+
+7.1. Example 1 - Encrypting swap on 2.4 and newer kernels
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Device backed (partition backed) loop is capable of encrypting swap on 2.4
+and newer kernels. File backed loops can't be used for swap. This example
+assumes that distro init scripts are using "swapon -a" to enable swap. For
+distros that do not use "swapon -a" to enable swap, this example does not
+work.
+
+First, run "swapoff -a" to turn off swap devices in your /etc/fstab file.
+Second, add "loop=/dev/loop?" and "encryption=AES128" options to swap lines
+in your /etc/fstab file. Example:
+
+ /dev/hda666   none   swap   sw,loop=/dev/loop6,encryption=AES128   0   0
+                                ^^^^^^^^^^^^^^^ ^^^^^^^^^^^^^^^^^
+Third, there may be old unencrypted data on your swap devices, in which case
+you can try to overwrite that data with command like this:
+
+    dd if=/dev/zero of=/dev/hda666 bs=64k conv=notrunc
+    mkswap /dev/hda666
+
+Fourth, run "swapon -a" and "rm -rf /var/log/ksymoops" and you are done.
+
+Running "swapon -a" will set up loop devices using random keys, run mkswap
+on them, and enable encrypted swap on specified loop devices. Usually your
+distro's startup scripts will run the "swapon -a" command so you don't need
+to change your startup scripts at all. As expected, "swapoff -a" will tear
+down such loop devices.
+
+Removing /var/log/ksymoops directory is often required because some versions
+of modprobe (part of modutils package) try to log loaded modules to
+/var/log/ksymoops/*.log files. This is bad because swap is often enabled
+(and loop.o modprobe'd to kernel) before any partitions are mounted
+writable. Without /var/log/ksymoops directory on root partition, modprobe
+will not try to log loaded modules, and you won't see annoying error
+messages.
+
+Note: If you are using encrypted swap and you are upgrading your kernel, you
+probably need to build new version of loop.o module that matches your new
+kernel *before* you boot the new kernel. See "Instructions for building
+loop.o driver" section for more details.
+
+
+7.2. Example 2 - Partition backed loop with gpg encrypted key file
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+This example, originally from Michael H. Warfield, shows how to create an
+ext2 file system on encrypted hard disk partition, and creates 65 random
+encryption keys that are encrypted using gpg. Store the key file where ever
+you like, on separate removable media, USB-stick, or on a smart card if you
+like. You have to have both your passphrase and that key file in order to
+mount that file system.
+
+This example uses a fictitious partition /dev/hda666 for storage and
+fictitious directory /mnt666 as mount point. A removable USB-stick is
+assumed to be (auto-)mounted at /a/usbstick directory.
+
+Create 65 random encryption keys and encrypt those keys using gpg. Reading
+from /dev/random may take indefinitely long if kernel's random entropy pool
+is empty. If that happens, do some other work on some other console (use
+keyboard, mouse and disks). Use of gpg encrypted key file depends on
+encrypted swap.
+
+    head -c 3705 /dev/random | uuencode -m - | head -n 66 | tail -n 65 \
+        | gpg --symmetric -a >/a/usbstick/keyfile.gpg
+
+Fill the partition with random looking data. "dd" command may take a while
+to execute if partition is large.
+
+    head -c 15 /dev/urandom | uuencode -m - | head -n 2 | tail -n 1 \
+        | losetup -p 0 -e AES128 /dev/loop3 /dev/hda666
+    dd if=/dev/zero of=/dev/loop3 bs=4k conv=notrunc 2>/dev/null
+    losetup -d /dev/loop3
+
+Add this to your /etc/fstab file:
+
+ /dev/hda666 /mnt666 ext2 defaults,noauto,loop=/dev/loop3,encryption=AES128,gpgkey=/a/usbstick/keyfile.gpg 0 0
+
+The "losetup -F" command asks for passphrase to unlock your key file.
+Losetup -F option reads loop related options from /etc/fstab. Partition name
+/dev/hda666, encryption=AES128 and gpgkey=/a/usbstick/keyfile.gpg come from
+/etc/fstab.
+
+    losetup -F /dev/loop3
+    mkfs -t ext2 /dev/loop3
+    losetup -d /dev/loop3
+    mkdir /mnt666
+
+Now you should be able to mount the file system like this. The "mount"
+command asks for passphrase to unlock your key file.
+    
+    mount /mnt666
+
+Check that loop is really in multi-key-v3 mode. Losetup -a output should
+include string "multi-key-v3" indicating that loop is really in multi-key-v3
+mode. If no "multi-key-v3" string shows up, you somehow managed to mess up
+gpg key file generation part or you are trying to use old losetup/mount
+programs that only understand single-key or multi-key-v2 modes.
+
+    losetup -a
+
+You can unmount partition like this:
+
+    umount /mnt666
+
+Unmounted filesystem can be fsck'ed like this. -F option reads loop related
+options from /etc/fstab. Partition name /dev/hda666, encryption=AES128 and
+gpgkey=/a/usbstick/keyfile.gpg come from /etc/fstab.
+
+    losetup -F /dev/loop3
+    fsck -t ext2 -f -y /dev/loop3
+    losetup -d /dev/loop3
+
+Although mount point directory is not a symbolic link, it should be thought
+of as changing symbolic link, where mounting and unmounting changes target
+of symbolic link. It matters whether mount point path name is referenced
+before or after mount operation. Commands "cd /mnt666 ; mount /mnt666 ; ls"
+will show you contents of unencrypted mount point directory, and commands
+"mount /mnt666 ; cd /mnt666 ; ls" will show you contents of encrypted file
+system directory.
+
+
+7.3. Example 3 - Encrypted partition that multiple users can mount
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+This example shows how to create encrypted partition that multiple non-root
+users can mount, each with their own gpg key. Non-root users don't have
+access to file system keys that are actually used to encrypt data. Root can
+add or remove user's permission to mount encrypted partition at any time.
+This example uses a fictitious partition /dev/hda666 for storage and
+fictitious directory /secret1 as mount point.
+
+Create 65 random file system keys and encrypt those keys using root's gpg
+public key. Reading from /dev/random may take indefinitely long if kernel's
+random entropy pool is empty. If that happens, do some other work on some
+other console (use keyboard, mouse and disks). Use of gpg encrypted key file
+depends on encrypted swap.
+
+    umask 077
+    head -c 3705 /dev/random | uuencode -m - | head -n 66 | tail -n 65 \
+        | gpg -e -a -r "Superuser" > /root/masterkey-secret1.gpg
+
+Fill the partition with random looking data. "dd" command may take a while
+to execute if partition is large.
+
+    head -c 15 /dev/urandom | uuencode -m - | head -n 2 | tail -n 1 \
+        | losetup -p 0 -e AES128 /dev/loop0 /dev/hda666
+    dd if=/dev/zero of=/dev/loop0 bs=4k conv=notrunc 2>/dev/null
+    losetup -d /dev/loop0
+
+Use file system keys to setup /dev/loop0 to partition /dev/hda666 and create
+encrypted ext2 file system. The "losetup -e" command asks for root's gpg
+passphrase to unlock root's secret gpg key.
+
+    losetup -e AES128 -K /root/masterkey-secret1.gpg /dev/loop0 /dev/hda666
+    mkfs -t ext2 /dev/loop0
+    losetup -d /dev/loop0
+    mkdir /secret1
+
+Add mount information to /etc/fstab file. Something like this:
+
+ /dev/hda666 /secret1 ext2 defaults,user,noauto,encryption=AES128,loop=/dev/loop0,gpgkey=/etc/userkey-secret1.gpg 0 0
+                                    ^^^^
+You may want to check non-obvious side effects of above "user" mount option.
+It's all explained in mount man page.
+                                    
+Create root-only-readable /etc/userkey-secret1.gpg file which contains file
+system key encrypted with each user's public key. List all users as
+recipient who should be able to mount /secret1 encrypted partition. Repeat
+this every time you want to add or remove users.
+
+    umask 077
+    gpg --decrypt < /root/masterkey-secret1.gpg | gpg -e -a --always-trust \
+        -r "Superuser" -r "John Doe" -r "Tea Lipton" > /etc/userkey-secret1.gpg
+
+Users can mount encrypted partition like this. mount asks for gpg passphrase
+to unlock user's secret gpg key. Each user can use their own gpg key.
+
+    mount /secret1
+
+Root user can check that loop is really in multi-key-v3 mode. Losetup -a
+output should include string "multi-key-v3" indicating that loop is really
+in multi-key-v3 mode. If no "multi-key-v3" string shows up, you somehow
+managed to mess up gpg key file generation part or you are trying to use old
+losetup/mount programs that only understand single-key or multi-key-v2
+modes.
+
+    losetup -a
+
+You can unmount partition like this:
+
+    umount /secret1
+
+Root user can fsck unmounted filesystem like this. -F option reads loop
+related options from /etc/fstab. Partition name /dev/hda666,
+encryption=AES128 and gpgkey=/etc/userkey-secret1.gpg come from /etc/fstab.
+
+    losetup -F /dev/loop0
+    fsck -t ext2 -f -y /dev/loop0
+    losetup -d /dev/loop0
+
+
+7.4. Example 4 - Encrypting /tmp partition with random keys
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+When mount passphrase hash function is specified as random, mount does not
+ask for password but sets up 65 random keys and attempts to put loop to
+multi-key mode and creates new file system on that encrypted loop device
+before that file system is mounted.
+
+First, unmount your existing /tmp partition by running "umount /tmp". There
+may be open files in there, so you may have to do this from single user
+mode.
+
+Second, add loop= encryption= and phash=random mount options to /etc/fstab
+file. The sixth /etc/fstab field (fs_passno) must be zero so that fcsk will
+not attempt to check this partition.
+
+ /dev/hda555 /tmp ext2 defaults,loop=/dev/loop2,encryption=AES128,phash=random/1777 0 0
+                                ^^^^^^^^^^^^^^^ ^^^^^^^^^^^^^^^^^ ^^^^^^^^^^^^^^^^^   ^
+Third, run "mount /tmp" command and you are done.
+
+Octal digits after phash=random/ mount option specify initial permissions of
+file system root directory that gets created on the loop device. 1777 means
+read+write+search permissions for all and sticky bit set. Type "man 2 stat"
+for more info about what each bit stands for.
+
+Encryption keys and plaintext data on above type mount vanish on unmount or
+power off. Using journaled file system in such case does not make much
+sense, because file system is re-created with different encryption keys on
+each mount, and file system jounal is never used.
+
+
+7.5. Example 5 - Encrypting root partition
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Encrypting root partition requires a small unencrypted /boot partition.
+Everything else (root, swap and other partitions) can be encrypted. Kernels
+and tools required to boot kernels reside in the /boot partition. Included
+build-initrd.sh script builds a small "initrd" ram-disk that works with 2.2
+and later kernels. build-initrd.sh script depends on having minix file
+system support in the kernel and working mkfs.minix program binary.
+Util-linux includes source for mkfs.minix if you don't have it and need to
+build it yourself. You need to temporarily boot from rescue floppy/CD-ROM or
+other partition to do the actual encrypting work. The rescue floppy/CD-ROM
+or other partition kernel doesn't need to support loop crypto, so just about
+anything that boots will work.
+
+1)  build-initrd.sh script needs dietlibc. Dietlibc source is available
+    from:
+
+    http://www.fefe.de/dietlibc/
+    ftp://ftp.kernel.org/pub/linux/libs/dietlibc/
+ 
+    To compile and install dietlibc, follow instructions in the dietlibc
+    README file. For example, on a x86 box, do this:
+
+        make
+        install bin-i386/diet /usr/local/bin
+
+2)  You need to use aespipe program (v2.3a or later) with your rescue
+    floppy/CD-ROM or other partition. aespipe source is available from:
+
+    http://loop-aes.sourceforge.net/
+    http://koti.tnnet.fi/jari.ruusu/linux/
+
+    Download latest version of aespipe-*.tar.bz2
+
+    Dynamically linked aespipe program may have library dependency problems
+    with rescue floppy/CD-ROM or other partition C library. To avoid such
+    trouble, aespipe program needs to be linked statically. Static linking
+    with glibc makes aespipe much bigger (hundreds of kilobytes), and may
+    also create link warning about 'getpwuid'. Big program size and link
+    warning can be ignored here.
+
+    Compile aespipe program like this:
+
+        CFLAGS="-O2" LDFLAGS="-static -s" ./configure
+        make
+        make tests
+            
+    Copy statically linked aespipe program to /boot partition.
+
+        cp -p aespipe /boot
+
+3)  If you followed advise about recompiling and statically linking gpg
+    program, you don't need to do that again. However, if you don't have
+    statically linked gpg, you need to do that now because later steps in
+    root partition encryption depend on it.
+
+4)  Backup all important data before proceeding with root partition
+    encryption.
+
+5)  Recompile your kernel. These are required: CONFIG_BLK_DEV_RAM=y
+    CONFIG_BLK_DEV_RAM_SIZE=4096 CONFIG_BLK_DEV_INITRD=y CONFIG_MINIX_FS=y
+    CONFIG_PROC_FS=y CONFIG_CRAMFS=n (or CONFIG_CRAMFS=m)
+
+    CONFIG_BLK_DEV_{RAM,INITRD}=y are needed because kernel needs to support
+    initial ramdisk. CONFIG_MINIX_FS=y is needed because file system on
+    initrd is minix. CONFIG_CRAMFS=n is needed because cramfs code may
+    incorrectly detect initrd's compressed minix file system as cramfs file
+    system. If cramfs must be built-in, then build-initrd.sh must be
+    configured with USEPIVOT=1, and kernel parameter "rootfstype=minix" must
+    be added to bootloader configuration file. 2.2.x and older kernels have
+    neither CONFIG_CRAMFS nor cramfs, so that kernel configuration setting
+    can be ignored on those kernels.
+
+    All kernel subsystems needed by root and /boot file systems (IDE
+    drivers, ext2/ext3/reiserfs/whatever) must be compiled directly into
+    kernel. They can't be modules.
+
+        cd /usr/src/linux-2.4.22aa1
+        cp .config ../somewhere/somename.config
+        make distclean
+        cp ../somewhere/somename.config .config
+        make config
+        make dep && make clean && make bzImage
+        make modules && make modules_install
+        cat arch/i386/boot/bzImage >/boot/vmlinuz
+        cp System.map /boot/System.map-2.4.22aa1
+
+6)  Compile loop-AES loop.o module for your kernel.
+
+        cd ../loop-AES-*
+        make LINUX_SOURCE=/usr/src/linux-2.4.22aa1
+
+7)  Copy kernel version specific loop.o (2.4 and older kernels) or loop.ko
+    (2.6.x and 3.x kernels) to /boot/modules-KERNELRELEASE/
+
+        mkdir /boot/modules-2.4.22aa1
+                            ^^^^^^^^^
+        cp -p /lib/modules/2.4.22aa1/block/loop.o /boot/modules-2.4.22aa1/
+                           ^^^^^^^^^                            ^^^^^^^^^
+    OR
+        mkdir /boot/modules-2.6.21.1
+                            ^^^^^^^^
+        cp -p /lib/modules/2.6.21.1/extra/loop.ko /boot/modules-2.6.21.1/
+                           ^^^^^^^^                             ^^^^^^^^
+    Note: You need to have a kernel version specific loop.o or loop.ko
+    module in /boot/modules-KERNELRELEASE/ directory for every kernel you
+    intend to use.
+
+8)  If your boot scripts automatically run "umount /initrd" and "blockdev
+    --flushbufs /dev/ram0" commands, you may want to disable those commands.
+    If you don't disable them, you may see annoying error messages when
+    booting to encrypted root partition.
+
+    Root partition loop device node is inside initrd, and that device node
+    will remain busy forever. This means that encrypted root initrd can't be
+    unmounted and RAM used by initrd file system can't be freed. This
+    unable-to-unmount side effect is the reason why initrd is intentionally
+    made as small as possible.
+
+9)  Create 65 random encryption keys and encrypt those keys using gpg.
+    Reading from /dev/random may take indefinitely long if kernel's random
+    entropy pool is empty. If that happens, do some other work on some other
+    console (use keyboard, mouse and disks). Use of gpg encrypted key file
+    depends on encrypted swap.
+
+        umask 077
+        head -c 3705 /dev/random | uuencode -m - | head -n 66 | tail -n 65 \
+            | gpg --symmetric -a >/boot/rootkey.gpg
+
+10) Edit build-initrd.sh to match your setup. Set BOOTDEV, BOOTTYPE,
+    CRYPTROOT and ROOTTYPE variables to correct values. If you are using 2.2
+    or older kernels, set USEPIVOT=0 because 2.2 and older kernels do not
+    have pivot_root functionality. You may also want to set
+    LOADNATIONALKEYB=1 and manually copy your uncompressed national keyboard
+    layout file (in "loadkeys" format) to /boot/default.kmap
+
+    loadkeys configuration files for some popular distros:
+
+    Debian:     /etc/console/boottime.kmap.gz
+    Mandrake:   /usr/lib/kbd/keymaps/i386/qwert[yz]/*.kmap.gz
+    Red Hat:    /lib/kbd/keymaps/i386/qwert[yz]/*.kmap.gz
+    SUSE:       /usr/lib/kbd/keymaps/i386/qwert[yz]/*.map.gz
+    Slackware:  /usr/share/kbd/keymaps/i386/qwert[yz]/*.map.gz
+
+    Or alternatively, you can create keyboard map using your current
+    keyboard layout. Like this:
+
+        dumpkeys >/boot/default.kmap
+    
+    If your distro has set your keyboard to UTF-8 mode, then you may want to
+    set UTF8KEYBMODE=1 in build-initrd.sh configuration. Running 'kbd_mode'
+    command in text console shows current keyboard mode: default (ASCII), or
+    unicode (UTF-8). If it says raw (scancode), then you are running
+    kbd_mode command in X windows, not text console.
+
+    devfs enabled kernel users (CONFIG_DEVFS_FS=y and CONFIG_DEVFS_MOUNT=y
+    in kernel configuration) need to pay special attention to comments above
+    these build-initrd.sh options: USEDEVFS, BOOTDEV, CRYPTROOT and
+    EXTERNALGPGDEV.
+
+11) Edit /etc/lilo.conf (or whatever) and set root= initrd= and append= as
+    explained in comments at beginning of build-initrd.sh script.
+
+12) Build a new /boot/initrd.gz
+
+        ./build-initrd.sh
+
+    Note: /boot/initrd.gz is supposed to be small (2 KB to 3 KB). All other
+    utilities (loop.o module, insmod, losetup, loadkeys, gpg and possibly
+    libraries) are copied to /boot directory. Libraries are not copied if
+    programs are statically linked.
+
+13) Run lilo (or whatever)
+
+        lilo
+
+14) Reboot your computer from rescue floppy/CD-ROM or other partition, so
+    that the partition you are about to encrypt is *not* mounted.
+
+15) Now you should be running a shell from rescue floppy/CD-ROM or other
+    partition. This example assumes that /dev/hda1 is your /boot partition
+    and /dev/hda2 is your root partition. Temporarily mount your root
+    partition under /mnt
+
+        mount -t ext2 /dev/hda2 /mnt
+
+16) Edit root partition entry in /mnt/etc/fstab file. Replace old /dev/hda2
+    with /dev/loop5 or whatever loop you are using for root partition. Loop
+    device number must match ROOTLOOPINDEX= in build-initrd.sh
+    configuration. The default in build-initrd.sh is 5, meaning /dev/loop5.
+
+    Old /etc/fstab line:
+      /dev/hda2    /       ext2   defaults   0   1
+    New /etc/fstab line:
+      /dev/loop5   /       ext2   defaults   0   1
+
+    devfs enabled kernel users (CONFIG_DEVFS_FS=y and CONFIG_DEVFS_MOUNT=y
+    in kernel configuration) need to substitute /dev/loop5 with /dev/loop/5
+
+17) If you are using a distro that uses udev to manage /dev/* devices, you
+    need to check that your root partition has /dev/console /dev/null
+    /dev/zero devices as on-disk nodes.
+
+        ls -l /mnt/dev/console /mnt/dev/null /mnt/dev/zero
+
+    If one or more of above devices are missing, you may need to create them
+    manually.
+
+        mknod -m 600 /mnt/dev/console c 5 1
+        mknod -m 666 /mnt/dev/null c 1 3
+        mknod -m 666 /mnt/dev/zero c 1 5
+
+18) Unmount your root partition (and sync for extra safety).
+
+        umount /mnt
+        sync
+
+19) Mount your normal /boot partition under /mnt so that you can use
+    previously built statically linked aespipe and gpg programs and read gpg
+    encrypted key file 'rootkey.gpg'. Statically linked gpg program was
+    copied there by build-initrd.sh script.
+
+        mount -r -t ext2 /dev/hda1 /mnt
+
+20) Use dd program to read your root partition contents, pipe that data
+    through aespipe program, and finally write encrypted data back to same
+    partition with another dd program. This is going to take a while if
+    partition is large.
+
+        dd if=/dev/hda2 bs=64k \
+            | /mnt/aespipe -e AES128 -K /mnt/rootkey.gpg -G / \
+            | dd of=/dev/hda2 bs=64k conv=notrunc
+
+    aespipe program tries to run gpg from obvious locations on your rescue
+    floppy/CD-ROM file system, but if it can't find gpg from those obvious
+    locations, aespipe finally tries to run gpg from same directory that
+    aespipe was run from (/mnt/) and should find statically linked gpg
+    program there.
+
+21) Clean up and reboot your computer.
+
+        umount /mnt
+        sync
+        reboot
+
+If you are upgrading kernel of a system where root partition is already
+encrypted, only steps 5 to 7 and 13 are needed. /boot/initrd.gz is kernel
+independent and there is no need to re-create it for each kernel. However,
+if you are upgrading from 2.4 kernel to 2.6 kernel, new insmod may need to
+be copied to /boot directory by running step 12 before running step 13.
+
+If you want to fsck and mount partitions automatically and are indeed
+encrypting root partition, it may be easier to just losetup required
+partitions using build-initrd.sh EXTRACOMMANDRUN1 / EXTRACOMMANDSTR1 config
+options. Alternatively, same results can be achieved by using losetup early
+in init scripts (before partitions are fsck'ed and mounted). Don't losetup
+root partition again, as root partition has already been losetup'ed by
+/linuxrc program in the "initrd" ram-disk. Cleartext key file contains 65
+lines of random data that would normally be protected and wrapped by gpg
+encryption, but in this case gpg is not used, so no passphrase is needed to
+use them. Cleartext key files that reside on root partition are protected by
+root partition encryption.
+
+Example build-initrd.sh config that also sets up /dev/loop6 and /dev/loop4:
+
+EXTRACOMMANDRUN1=2
+EXTRACOMMANDSTR1="/sbin/losetup -e AES128 -P /etc/cleartextkey-loop6.txt /dev/loop6 /dev/hda666"
+EXTRACOMMANDRUN2=2
+EXTRACOMMANDSTR2="/sbin/losetup -e AES128 -P /etc/cleartextkey-loop4.txt /dev/loop4 /dev/hdd666"
+
+Here are example lines of /etc/fstab file. It's not necessary to give
+"loop=/dev/loop4,encryption=AES128" mount options as loop devices are
+already losetup'ed and there is no need for mount program to do that again.
+
+    /dev/loop5   /       ext2   defaults   0   1
+    /dev/loop6   none    swap   sw         0   0
+    /dev/loop4   /home   ext2   defaults   0   2
+
+In above example, device /dev/hda666 is used as encrypted swap with fixed
+key. If you set up swap with fixed key like in above example, don't forget
+to initialize swap space by running "mkswap /dev/loop6" once. /dev/hdd666 is
+used as encrypted /home partition. /dev/loop5 is encrypted root partition.
+
+Some distros use udev to manage /dev/* device nodes. Some of those distros
+have init scripts that assume that devtmpfs file system is mounted on /dev
+directory, and that devpts file system is mounted on /dev/pts directory at
+time when initrd code launches init program. By default the initrd code
+created by build-initrd.sh does not do that. But it is easy to configure it
+to do that by adding these lines to your build-initrd.sh config:
+
+EXTRACOMMANDRUN5=2
+EXTRACOMMANDSTR5="/bin/mount -n -t devtmpfs none /dev -o rw,mode=0755"
+EXTRACOMMANDRUN6=2
+EXTRACOMMANDSTR6="/bin/mkdir /dev/pts"
+EXTRACOMMANDRUN7=2
+EXTRACOMMANDSTR7="/bin/mount -n -t devpts none /dev/pts -o rw,noexec,nosuid,gid=5,mode=0620"
+
+Above mentioned EXTRACOMMANDSTR{1,2,3,4,5,6,7,8} commands are run (in that
+numerical order) after encrypted root file system has been set up, and root
+has been switched to that file system, but before init program is launched.
+
+
+7.6. Example 6 - Boot from CD-ROM + encrypted root partition
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Here is slight variation of above 'encrypting root partition' instructions.
+Computer gets booted from read-only CD-ROM and there is no need for any
+unencrypted partitions on the hard disk. Boot CD-ROM is not used after boot
+and can be removed from CD drive. This example uses isolinux bootloader
+(http://www.kernel.org/pub/linux/utils/boot/syslinux/)
+
+1-6) Same as above 'encrypting root partition' steps 1-6.
+
+7)  Copy kernel version specific loop.o or loop.ko module to CD-ROM source
+    directory
+
+        rm -r -f /boot/iso/modules-*
+        mkdir -p /boot/iso/modules-2.4.22aa1
+                                   ^^^^^^^^^
+        cp -p /lib/modules/2.4.22aa1/block/loop.o /boot/iso/modules-2.4.22aa1/
+                           ^^^^^^^^^                                ^^^^^^^^^
+    OR
+        rm -r -f /boot/iso/modules-*
+        mkdir -p /boot/iso/modules-2.6.21.1
+                                   ^^^^^^^^
+        cp -p /lib/modules/2.6.21.1/extra/loop.ko /boot/iso/modules-2.6.21.1/
+                           ^^^^^^^^                                 ^^^^^^^^
+8-9) Same as above 'encrypting root partition' steps 8-9, with exception
+    that in step 9 you must write rootkey.gpg to /boot/iso directory instead
+    of /boot directory.
+
+10a) Contents of /boot/initrd.conf configuration file are below.
+
+    BOOTDEV=/dev/hdc                    # CD-ROM device
+    BOOTTYPE=iso9660
+    CRYPTROOT=/dev/hda2
+    ROOTTYPE=ext2
+    CIPHERTYPE=AES128
+    DESTINATIONPREFIX=/boot/iso
+    INITRDGZNAME=initrd.gz
+    LOADNATIONALKEYB=1
+
+    devfs enabled kernel users (CONFIG_DEVFS_FS=y and CONFIG_DEVFS_MOUNT=y
+    in kernel configuration) need to pay special attention to comments above
+    these build-initrd.sh options: USEDEVFS, BOOTDEV, CRYPTROOT and
+    EXTERNALGPGDEV.
+
+10b) Copy your national keyboard layout to CD-ROM source directory in
+    uncompressed form.
+
+        dumpkeys >/boot/iso/default.kmap
+
+11) Contents of /boot/iso/isolinux.cfg configuration file are below.
+    isolinux.cfg is the configuration file for isolinux. For your
+    convenience you can pass instructions to isolinux via isolinux.cfg
+    instead of typing them when booting.
+
+    default linux
+    timeout 100
+    prompt 1
+    label linux
+    kernel vmlinuz
+    append initrd=initrd.gz root=100 init=/linuxrc rootfstype=minix
+
+12) Build new /boot/iso/initrd.gz
+
+        ./build-initrd.sh /boot/initrd.conf
+
+13a) Copy isolinux bootloader to CD-ROM source directory. This example uses
+    version 3.85 that was extracted to /usr/src directory earlier, but there
+    is no special reason to use that version. Use another version if you
+    prefer.
+
+        cp /usr/src/syslinux-3.85/isolinux.bin /boot/iso
+
+13b) Copy kernel to CD-ROM source directory.
+
+        cp /boot/vmlinuz /boot/iso
+
+13c) Create boot CD-ROM image
+
+        mkisofs -b isolinux.bin -c boot.cat -no-emul-boot -boot-load-size 4 \
+            -r -boot-info-table /boot/iso >/boot/bootcdimage.iso
+
+13d) Burn /boot/bootcdimage.iso to CD-R. Resulting CD-ROM is your boot
+    CD-ROM that you use to boot to encrypted root, not the rescue CD-ROM
+    referred to in above 'encrypting root partition' step 14.
+
+    You may want to burn two copies or at least archive bootcdimage.iso to
+    some unencrypted partition so that you can burn new copy if original
+    CD-ROM gets damaged.
+
+13e) Temporarily disable swap partitions and put a "temporary file system on
+    swap" into one of swap partitions. This example assumes that /dev/hda3
+    is such swap partition. The 'dd' command clears first 64KB of that
+    partition so that dangerously buggy rescue floppies/CD-ROMs don't enable
+    swap on it.
+
+        swapoff -a -v
+        dd if=/dev/zero of=/dev/hda3 bs=64k count=1 conv=notrunc
+        mkfs -t ext2 /dev/hda3
+        mount -t ext2 /dev/hda3 /mnt
+
+13f) Copy statically linked aespipe and gpg programs and rootkey.gpg file to
+    "temporary file system on swap" partition.
+
+        cp -p /boot/aespipe /boot/iso/rootkey.gpg /usr/bin/gpg /mnt
+        umount /mnt
+
+14-20) Same as above 'encrypting root partition' steps 14-20, with exception
+    that in step 19 you must rw mount (no -r option to mount) "temporary
+    file system on swap" /dev/hda3 instead of /boot partition.
+
+21) Clean up and reboot your computer. The 'dd' command attempts to
+    overwrite gpg encrypted root partition key file and 'mkswap' command
+    restores "temporary file system on swap" /dev/hda3 back to swap usage.
+
+        dd if=/dev/zero of=/mnt/rootkey.gpg bs=64k count=1 conv=notrunc
+        umount /mnt
+        sync
+        mkswap /dev/hda3
+        sync
+        reboot
+
+If you are upgrading kernel of a system where root partition is already
+encrypted, only steps 5 to 7 and 13a to 13d are needed. However, if you are
+upgrading from 2.4 kernel to 2.6 kernel, new insmod may need to be copied to
+/boot/iso directory by running step 12 before running step 13a.
+
+
+7.7. Example 7 - Boot from USB-stick + encrypted root partition
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Here is slight variation of above 'encrypting root partition' instructions.
+This example, originally from Peter Land, shows how to prepare an USB-stick
+to boot an encrypted root partition. Kernel, keyfiles and other files needed
+to access encrypted root partition are stored on removable USB-stick. All
+hard disk partitions can be encrypted. This example uses syslinux bootloader
+(http://www.kernel.org/pub/linux/utils/boot/syslinux/) and FAT formatted
+USB-stick.
+
+In this example, many files are written to /boot directory which can be on
+encrypted root partition. In later step, files are copied from /boot to
+USB-stick so that USB-stick can be removed after booting has completed.
+
+0)  Check your mainboard user's manual. Make sure that your BIOS is able to
+    boot from USB-sticks. Make sure that you have a 16 MB or larger
+    USB-stick. Both USB 1.1 and USB 2.0 versions should work. Plug in the
+    stick, turn on the PC and inspect your BIOS. Try to specify your
+    USB-stick as boot device. Turning on "USB device legacy support" in BIOS
+    setup may help to make it work.
+
+1-9) Same as above 'encrypting root partition' steps 1-9, except that on
+    step 5, kernel has to fulfill all prerequisites from normal loop-aes
+    plus those for accessing USB storage devices and FAT filesystems. Kernel
+    config items of interest: CONFIG_BLK_DEV_RAM=y
+    CONFIG_BLK_DEV_RAM_SIZE=4096 CONFIG_BLK_DEV_INITRD=y CONFIG_MINIX_FS=y
+    CONFIG_PROC_FS=y CONFIG_CRAMFS=n (or CONFIG_CRAMFS=m) CONFIG_SCSI=y
+    CONFIG_BLK_DEV_SD=y CONFIG_USB=y CONFIG_USB_STORAGE=y CONFIG_FAT_FS=y
+    CONFIG_MSDOS_FS=y CONFIG_VFAT_FS=y
+
+    Depending on your USB hardware enable one or more of these. If unsure,
+    enable all of them: CONFIG_USB_UHCI=y (or CONFIG_USB_UHCI_HCD=y)
+    CONFIG_USB_OHCI=y (or CONFIG_USB_OHCI_HCD=y) CONFIG_USB_EHCI_HCD=y
+
+    All kernel subsystems needed by root file system (IDE drivers,
+    ext2/ext3/reiserfs/whatever) must be compiled directly into kernel. They
+    can't be modules. FAT file system needs these: CONFIG_NLS_CODEPAGE_437=y
+    CONFIG_NLS_CODEPAGE_850=y CONFIG_NLS_ISO8859_1=y CONFIG_NLS_ISO8859_15=y
+    and these, if available on your kernel: CONFIG_FAT_DEFAULT_CODEPAGE=850
+    CONFIG_FAT_DEFAULT_IOCHARSET=iso8859-15
+
+    Accessing files on USB-stick will fail if correct codepage is not
+    included in the kernel. For kernel and initrd file names, use short
+    MSDOS compliant file names on the USB-stick with no capitals and no
+    special characters. Short MSDOS names is syslinux limitation.
+
+10a) Contents of /boot/initrd.conf configuration file are below.
+
+    BOOTDEV=/dev/sda4           # USB-stick partition 4
+    BOOTTYPE=vfat
+    CRYPTROOT=/dev/hda2
+    ROOTTYPE=ext2
+    CIPHERTYPE=AES128
+    LOADNATIONALKEYB=1
+    INITIALDELAY=3
+
+    devfs enabled kernel users (CONFIG_DEVFS_FS=y and CONFIG_DEVFS_MOUNT=y
+    in kernel configuration) need to pay special attention to comments above
+    these build-initrd.sh options: USEDEVFS, BOOTDEV, CRYPTROOT and
+    EXTERNALGPGDEV.
+
+10b) Copy your national keyboard layout to /boot directory in uncompressed
+    form.
+
+        dumpkeys >/boot/default.kmap
+
+11) Contents of /boot/syslinux.cfg configuration file are below.
+    syslinux.cfg is the configuration file for syslinux. For your
+    convenience you can pass instructions to syslinux via syslinux.cfg
+    instead of typing them when booting.
+
+    default linux
+    timeout 100
+    prompt 1
+    label linux
+    kernel vmlinuz
+    append initrd=initrd.gz root=100 init=/linuxrc rootfstype=minix
+
+12) Build new /boot/initrd.gz
+
+        ./build-initrd.sh /boot/initrd.conf
+
+13a) Make sure that the USB-stick is not mounted.
+
+        umount /dev/sda4
+        umount /dev/sda1
+        umount /dev/sda
+
+    If it wasn't mounted, just ignore error messages.
+
+13b) Wipe clear first 5 MB of USB-stick device. This clears out existing
+    MBR, partition table and beginning of existing file system. Be careful
+    to supply correct device name here (partitionless device name).
+
+        dd if=/dev/zero of=/dev/sda bs=1024k count=5 conv=notrunc
+
+13c) Use "mkdiskimage" script from syslinux bootloader distribution to
+    create new partition 4 on the USB-stick device and also to create new
+    vfat file system on that USB-stick partition 4. For more information,
+    please read doc/usbkey.txt and doc/distrib.txt files of syslinux
+    bootloader distribution. Be careful to supply correct device name here
+    (mkdiskimage wants partitionless device name).
+
+        mkdiskimage -4 /dev/sda 0 64 32
+
+    mkdiskimage seems to have a dependency on "mtools" package. It won't
+    work properly if "mtools" package is not installed.
+
+13d) Copy files from /boot to USB-stick partition 4.
+
+        mount -t vfat /dev/sda4 /mnt
+        cp -pR /boot/* /mnt
+        umount /mnt
+
+    If you choose to copy only some of the /boot/* files, copy at least
+    these files: vmlinuz (your kernel) initrd.gz syslinux.cfg default.kmap
+    rootkey.gpg, and these programs: insmod* loadkeys losetup gpg aespipe,
+    and their libraries (lib* ld-linux*), and modules-*/loop.*o file for
+    your kernel. The "./build-initrd.sh /boot/initrd.conf" run in earlier
+    step showed what files that script copied to /boot. Same files are
+    needed on the USB-stick.
+
+13e) Install syslinux on vfat formatted USB-stick partition 4.
+
+        syslinux /dev/sda4
+        sync
+
+    Or alternatively, when using syslinux-4.x version:
+
+        syslinux --install /dev/sda4
+        sync
+
+14-21) Same as above 'encrypting root partition' steps 14-21, with exception
+    that in step 19 you must mount your USB-stick partition /dev/sda4 (file
+    system type is vfat) instead of /boot partition.
+
+If you are upgrading kernel of a system where root partition is already
+encrypted, only steps 5 to 7 and 13d to 13e are needed. However, if you are
+upgrading from 2.4 kernel to 2.6 kernel, new insmod may need to be copied to
+/boot directory by running step 12 before running step 13d.
+
+
+7.8. Example 8 - Encrypted partition using serpent cipher
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+This example shows how to create an ext2 file system on serpent encrypted
+hard disk partition. This example uses a fictitious partition /dev/hda666
+for storage and fictitious directory /mnt666 as mount point.
+
+Create 65 random encryption keys and encrypt those keys using gpg. Reading
+from /dev/random may take indefinitely long if kernel's random entropy pool
+is empty. If that happens, do some other work on some other console (use
+keyboard, mouse and disks). Use of gpg-encrypted key file depends on
+encrypted swap.
+
+    umask 077
+    head -c 3705 /dev/random | uuencode -m - | head -n 66 | tail -n 65 \
+        | gpg --symmetric -a >/etc/fskey2.gpg
+
+Fill the partition with random looking data. "dd" command may take a while
+to execute if partition is large.
+
+    head -c 15 /dev/urandom | uuencode -m - | head -n 2 | tail -n 1 \
+        | losetup -p 0 -e AES128 /dev/loop0 /dev/hda666
+    dd if=/dev/zero of=/dev/loop0 bs=4k conv=notrunc 2>/dev/null
+    losetup -d /dev/loop0
+
+Add this to your /etc/fstab file:
+
+ /dev/hda666 /mnt666 ext2 defaults,noauto,loop=/dev/loop0,encryption=serpent128,gpgkey=/etc/fskey2.gpg 0 0
+
+The "losetup -F" command asks for passphrase to unlock your key file.
+Losetup -F option reads loop related options from /etc/fstab. Partition name
+/dev/hda666, encryption=serpent128 and gpgkey=/etc/fskey2.gpg come from
+/etc/fstab.
+
+    modprobe loop_serpent
+    losetup -F /dev/loop0
+    mkfs -t ext2 /dev/loop0
+    losetup -d /dev/loop0
+    mkdir /mnt666
+
+Now you should be able to mount the file system like this. The "mount"
+command asks for your encryption password.
+
+    modprobe loop_serpent
+    mount /mnt666
+
+And unmount it like this:
+
+    umount /mnt666
+
+Or without modifying /etc/fstab, you can mount and and unmount file system
+like this:
+
+    modprobe loop_serpent
+    mount -t ext2 /dev/hda666 /mnt666 -o loop=/dev/loop0,encryption=serpent128,gpgkey=/etc/fskey2.gpg
+    umount /mnt666
+
+Or fsck, mount and unmount like this. Losetup -F option reads loop related
+options from /etc/fstab. Partition name /dev/hda666, encryption=serpent128
+and gpgkey=/etc/fskey2.gpg come from /etc/fstab.
+
+    modprobe loop_serpent
+    losetup -F /dev/loop0
+    fsck -t ext2 -f -y /dev/loop0
+    mount -t ext2 /dev/loop0 /mnt666
+    umount /mnt666
+    losetup -d /dev/loop0
+
+
+8. Security levels
+~~~~~~~~~~~~~~~~~~
+Loop encryption key can be set up in different ways. Just in case it isn't
+obvious how these different ways rank security wise, here is a list of
+security levels from 1 (highest security) to 4 (lowest security).
+
+1)  gpg encrypted multi-key-v3 or multi-key-v2 key file and/or gpg
+    public+private keys are stored on separate removable USB-stick that is
+    not available to attacker. If USB-stick and its key files are available
+    to attacker, security level is equivalent to level 2. (Examples 2 and 7)
+
+2)  gpg encrypted multi-key-v3 or multi-key-v2 key file and gpg
+    public+private keys are stored on disk that is available to attacker.
+    This assumes that included gpg patch is applied to gpg and symmetric
+    cipher encrypted key file or private keyring password was
+    created/changed with patched version. (Example 3)
+
+3)  Loop is used in single-key mode. Random password seed and iteration
+    count are used to slow down optimized dictionary attacks. This level is
+    vulnerable to watermark attacks. Watermarked files contain special bit
+    patterns that can be detected without decryption.
+
+4)  Loop is used in single-key mode. Neither password seed nor gpg encrypted
+    key file are used. This level is vulnerable to optimized dictionary
+    attacks as well as watermark attacks. (mainline linux cryptoloop is
+    example of this type of backdoored crypto)
+
+
+9. Performance tuning for 2.4 and newer kernels
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Loop-AES driver for 2.4 and newer kernels understand three additional
+options: lo_prealloc, lo_nice and lo_threads. lo_threads is only available
+on 2.6.19 and later kernels.
+
+First number of 'lo_prealloc' is the default number of RAM pages to
+pre-allocate for each device backed (partition backed) loop. Every
+configured device backed loop pre-allocates this amount of RAM pages unless
+later 'lo_prealloc' numbers provide an override. 'lo_prealloc' overrides are
+defined in pairs: loop_index,number_of_pages. If 'lo_prealloc' is undefined,
+all pre-allocations default to 125 pages for 2.4 kernels and 256 pages for
+2.6 and newer kernels. A maximum of four overrides (four number pairs) can
+be used. Allowed range for number of page pre-allocations per loop device is
+4...4096
+
+This example line added to your /etc/modules.conf file (2.4 kernels) or
+/etc/modprobe.conf file (2.6.x and 3.x kernels) means that each device
+backed loop device pre-allocates 100 pages of RAM at losetup/mount time,
+except that /dev/loop6 allocates 200 pages, and /dev/loop5 allocates 250
+pages.
+
+    options loop lo_prealloc=100,6,200,5,250
+
+On x86 systems page size is 4 Kbytes, some other architectures have 8 Kbyte
+page size.
+
+lo_nice option sets scheduler nice for loop helper threads. Values between 0
+(low priority) to -20 (high priority) can be used. If loop transfers are
+disk transfer rate limited, lowering loop thread priority may improve
+performance. If loop transfers are CPU processing power limited, increasing
+loop thread priority may improve performance. renice(8) command can be used
+to alter nice values of loop helper threads while loop is being used.
+Example /etc/modules.conf or /etc/modprobe.conf line:
+
+    options loop lo_nice=-4
+
+If lo_nice is not set, default nice value for kernels with old scheduler is
+-20. For kernels with O(1) scheduler, default nice value is -1.
+
+First number of 'lo_threads' is the default number of helper threads to
+create for each device backed (partition backed) loop. Every configured
+device backed loop device has this many threads unless later 'lo_threads'
+numbers provide an override. File backed loops always have 1 helper thread.
+'lo_threads' overrides are defined in pairs: loop_index,threads. If
+'lo_threads' is undefined, all loop devices default to 1 helper thread. A
+maximum of four overrides (four number pairs) can be used. Allowed range for
+number of helper threads per loop device is 1...4
+
+This example line added to your /etc/modprobe.conf file (2.6.19 and later
+kernels) means that each device backed loop device has 1 helper thread,
+except that /dev/loop6 and /dev/loop5 each have 2 threads.
+
+    options loop lo_threads=1,6,2,5,2
+
+If kernel patch version of loop-AES is used and loop code is statically
+linked to kernel, then above mentioned options can be specified as kernel
+parameters (via bootloader config). Like this:
+
+    lo_prealloc=100,6,200 lo_nice=-4 lo_threads=1,6,2
+
+2.6 kernels include anticipatory, CFQ and deadline I/O schedulers. Deadline
+I/O scheduler may improve performance of device backed loop devices. Please
+read kernel's Documentation/block/as-iosched.txt file for more information.
+
+Soft block size of loop device has negative effect on efficiency and
+performance if that soft block size is too small. On recent kernels, default
+soft block size is set to such value that full device can be accessed using
+X amount of such soft block size chunks. If device size is integer multiple
+of processor page size, then default soft block size will also be processor
+page size. Some older kernels inherit default soft block size from backing
+device.
+
+Mounting a file system on top of loop device sets loop device's soft block
+size to same as block size of that mounted file system, so none of this soft
+block size optimization affects mounted file system performance. But too
+small soft block size may affect unmounted loop device performance.
+Unmounting a file system may set loop device's soft block size back to
+default value (this depends on kernel version).
+
+Since unmounted loop device is not usually used for anything other than
+occasional fsck, this reduced efficiency and performance is not necessarily
+a problem. However, if you insist on getting maximum performance from fsck
+and other direct to loop device usage, then (1) you can use backing disk
+partition whose size is integer multiple of 4096 bytes, or (2) you can limit
+size of loop device to integer multiple of 4096 bytes, or (3) you can set
+loop device's soft block size manually to 4096 bytes. Option (3) doesn't
+work on all kernels because many kernels seem to revert to default soft
+block size when device is not mounted and no process is holding open file
+descriptor on it.
+
+This command shows size of device in 512 byte units:
+
+    blockdev --getsize /dev/loop0
+
+This command shows soft block size of device in byte units:
+
+    blockdev --getbsz /dev/loop0
+
+This command sets soft block size of device:
+
+    blockdev --setbsz 4096 /dev/loop0
+    
+In this example, backing device size is 20012106240 bytes (39086145 * 512).
+Loop device size is rounded down to integer multiple of 4096 bytes,
+20012105728 bytes:
+
+    blockdev --getsize /dev/hda666
+    39086145
+    losetup -e AES128 -K foo.gpg -s 20012105728 /dev/loop0 /dev/hda666
+                                 ^^^^^^^^^^^^^^
+You can also add sizelimit=20012105728 mount option /etc/fstab file. Mount
+won't benefit much from it because file system mount sets soft block size to
+desired value anyway, but "losetup -F /dev/loop0" reads and uses that option
+from /etc/fstab file. losetup -s and sizelimit mount option do not work with
+2.2 and older kernels.
+
+
+10. Files
+~~~~~~~~~
+ChangeLog                   History of changes and public releases.
+
+Makefile                    Makefile to build and install loop.o module.
+
+README                      This README file.
+
+aes-GPL.diff                A patch for aes-amd64.S and aes-x86.S files that
+                            updates licenses to be fully GPL compatible.
+                            aes-amd64.S and aes-x86.S files are derived from
+                            Brian Gladman's December 2001 published version
+                            that had no mention of GPL, but both Brian
+                            Gladman and Jari Ruusu permit this license
+                            change.
+
+aes-amd64.S                 Optimized assembler implementation of AES cipher
+                            for AMD64 and compatible processors.
+
+aes-intel*.S                Optimized assembler implementation of AES cipher
+                            using Intel hardware AES instructions for x86
+                            processors in 32 bit or 64 bit mode.
+
+aes-x86.S                   Optimized assembler implementation of AES cipher
+                            for x86 processors.
+
+aes.[ch]                    AES encryption functions, portable and usable in
+                            kernel and in user space, as well as in other
+                            operating systems.
+
+build-initrd.sh             Bash shell script to build a small initrd
+                            ram-disk that can be used when root partition is
+                            encrypted.
+
+dkms.conf                   Configuration file for Dynamic Kernel Module
+                            Support. http://linux.dell.com/dkms/dkms.html
+                            for more info. This dkms.conf can't be used to
+                            compile loop module with partial kernel sources
+                            that some distros provide. Build procedure
+                            depends on presence of full kernel sources, and
+                            using partial kernel source to build loop module
+                            will guarantee miscompiled loop module.
+
+glue.c                      Glue logic between loop driver and encryption
+                            functions in aes.c / aes-*.S and md5.c / md5-*.S
+
+gnupg-*.diff                Optional patch for gpg that increases password
+                            iteration and thus slows down dictionary attacks
+                            against gpg encrypted key files.
+
+gpgkey[123].asc             gpg encrypted key files that are used by
+                            Makefile when "make tests" command is run. These
+                            key files are encrypted with symmetric cipher
+                            using 12345678901234567890 password.
+
+kernel-*.diff               Kernel patch for those people who prefer not to
+                            use modules. Before this patch can be applied to
+                            your kernel, drivers/block/loop.c and
+                            include/linux/loop.h source files must be
+                            removed using 'rm' command. Obviously applying
+                            this patch changes your kernel sources, so this
+                            is not entirely hassle free. This patch is
+                            against recent mainline kernel. If this patch
+                            doesn't apply cleanly to your kernel, I don't
+                            want to know about it. Note: you only need to
+                            build loop.o module or apply this patch but not
+                            both.
+
+loop-aes-keygen             A script that can be used to create gpg
+                            encrypted key files.
+                            
+loop-aes-keygen.1           Man page for loop-aes-keygen script.
+
+loop.c-2.[02].diff          Kernel version specific patches that fix bugs
+                            and preregisters AES cipher transfer to latest
+                            loop.c source.
+
+loop.c-2.[02].original      Unmodified loop.c sources that are used as
+                            secondary source if patch does not apply cleanly
+                            to primary source. Primary source is the loop.c
+                            of your kernel.
+
+loop.c-*.patched            Pre-patched loop.c sources for 2.4.x / 2.6.x /
+                            3.x kernels where changes are so extensive that
+                            distributing *.original plus *.diff does not
+                            make sense.
+
+loop_blowfish.c             Loop cipher module that provides blowfish
+                            encryption.
+
+loop_serpent.c              Loop cipher module that provides serpent
+                            encryption.
+
+loop_twofish.c              Loop cipher module that provides twofish
+                            encryption.
+
+md5-2x-amd64.S              Optimized assembler implementation of MD5
+                            transform function for AMD64 and compatible
+                            processors. Does two transforms simultaneously.
+
+md5-amd64.S                 Optimized assembler implementation of MD5
+                            transform function for AMD64 and compatible
+                            processors.
+
+md5-x86.S                   Optimized assembler implementation of MD5
+                            transform function for x86 processors.
+
+md5.[ch]                    MD5 transform function implementation that is
+                            used to compute IVs. This source code was copied
+                            from Linux kernel CryptoAPI implementation.
+
+util-linux-*.diff           Util-linux patch that adds support for AES and
+                            other ciphers.
+
+
+11. Credits
+~~~~~~~~~~~
+This package uses AES cipher sources that were originally written by
+Dr Brian Gladman:
+
+// Copyright (c) 2001, Dr Brian Gladman <brg@gladman.uk.net>, Worcester, UK.
+// All rights reserved.
+//
+// TERMS
+//
+//  Redistribution and use in source and binary forms, with or without
+//  modification, are permitted subject to the following conditions:
+//
+//  1. Redistributions of source code must retain the above copyright
+//     notice, this list of conditions and the following disclaimer.
+//
+//  2. Redistributions in binary form must reproduce the above copyright
+//     notice, this list of conditions and the following disclaimer in the
+//     documentation and/or other materials provided with the distribution.
+//
+//  3. The copyright holder's name must not be used to endorse or promote
+//     any products derived from this software without his specific prior
+//     written permission.
+//
+//  This software is provided 'as is' with no express or implied warranties
+//  of correctness or fitness for purpose.
+
+Util-linux patch has few lines of documentation copied from international
+crypto patch: -p option documentation in losetup and mount man pages were
+written by Marc Mutz.
+
+Util-linux patch includes rmd160.[ch] files that were copied from
+international crypto patch: they were originally written by GnuPG team and
+modified by Marc Mutz.

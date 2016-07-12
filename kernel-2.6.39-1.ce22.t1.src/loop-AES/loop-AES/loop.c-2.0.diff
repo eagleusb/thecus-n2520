@@ -1,0 +1,318 @@
+--- loop.c-2.0.original	Sun Nov 15 20:32:52 1998
++++ patched-loop.c	Fri Oct 31 16:08:00 2003
+@@ -34,7 +34,7 @@
+ #include <linux/idea.h>
+ #endif
+ 
+-#include <linux/loop.h>		/* must follow des.h */
++#include "patched-loop.h"		/* must follow des.h */
+ 
+ #define MAJOR_NR LOOP_MAJOR
+ 
+@@ -51,22 +51,24 @@
+ static struct loop_device loop_dev[MAX_LOOP];
+ static int loop_sizes[MAX_LOOP];
+ static int loop_blksizes[MAX_LOOP];
++static int loop_hardsizes[MAX_LOOP];
+ 
+ /*
+  * Transfer functions
+  */
+ static int transfer_none(struct loop_device *lo, int cmd, char *raw_buf,
+-		  char *loop_buf, int size)
++		  char *loop_buf, int size, int devSect)
+ {
+ 	if (cmd == READ)
+ 		memcpy(loop_buf, raw_buf, size);
+ 	else
+ 		memcpy(raw_buf, loop_buf, size);
++	if(need_resched) schedule();
+ 	return 0;
+ }
+ 
+ static int transfer_xor(struct loop_device *lo, int cmd, char *raw_buf,
+-		 char *loop_buf, int size)
++		 char *loop_buf, int size, int devSect)
+ {
+ 	char	*in, *out, *key;
+ 	int	i, keysize;
+@@ -82,12 +84,13 @@
+ 	keysize = lo->lo_encrypt_key_size;
+ 	for (i=0; i < size; i++)
+ 		*out++ = *in++ ^ key[(i & 511) % keysize];
++	if(need_resched) schedule();
+ 	return 0;
+ }
+ 
+ #ifdef DES_AVAILABLE
+ static int transfer_des(struct loop_device *lo, int cmd, char *raw_buf,
+-		  char *loop_buf, int size)
++		  char *loop_buf, int size, int devSect)
+ {
+ 	unsigned long tmp[2];
+ 	unsigned long x0,x1,p0,p1;
+@@ -128,7 +131,7 @@
+ extern void idea_encrypt_block(idea_key,char *,char *,int);
+ 
+ static int transfer_idea(struct loop_device *lo, int cmd, char *raw_buf,
+-		  char *loop_buf, int size)
++		  char *loop_buf, int size, int devSect)
+ {
+   if (cmd==READ) {
+     idea_encrypt_block(lo->lo_idea_en_key,raw_buf,loop_buf,size);
+@@ -140,7 +143,12 @@
+ }
+ #endif
+ 
+-static transfer_proc_t xfer_funcs[MAX_LOOP] = {
++extern int transfer_aes(struct loop_device *, int, char *, char *, int, int);
++extern int keySetup_aes(struct loop_device *, struct loop_info *);
++extern int keyClean_aes(struct loop_device *);
++extern int handleIoctl_aes(struct loop_device *, int, unsigned long);
++
++static transfer_proc_t xfer_funcs[] = {
+ 	transfer_none,		/* LO_CRYPT_NONE */
+ 	transfer_xor,		/* LO_CRYPT_XOR */
+ #ifdef DES_AVAILABLE
+@@ -149,10 +157,11 @@
+ 	NULL,			/* LO_CRYPT_DES */
+ #endif
+ #ifdef IDEA_AVAILABLE           /* LO_CRYPT_IDEA */
+-	transfer_idea
++	transfer_idea,
+ #else
+-	NULL
++	NULL,
+ #endif
++        0,0,0,0,0,0,0,0,0,0,0,0,transfer_aes/*16*/,0,0,0
+ };
+ 
+ 
+@@ -213,7 +222,7 @@
+ 	}
+ 	block += lo->lo_offset / blksize;
+ 	offset += lo->lo_offset % blksize;
+-	if (offset > blksize) {
++	if (offset >= blksize) {
+ 		block++;
+ 		offset -= blksize;
+ 	}
+@@ -223,7 +232,7 @@
+ 		if (lo->lo_flags & LO_FLAGS_READ_ONLY)
+ 			goto error_out;
+ 	} else if (current_request->cmd != READ) {
+-		printk("unknown loop device command (%d)?!?", current_request->cmd);
++		printk("unknown loop device command (%d)?!?\n", current_request->cmd);
+ 		goto error_out;
+ 	}
+ 	while (len > 0) {
+@@ -237,7 +246,7 @@
+ 		}
+ 		bh = getblk(lo->lo_device, real_block, blksize);
+ 		if (!bh) {
+-			printk("loop: device %s: getblk(-, %d, %d) returned NULL",
++			printk("loop: device %s: getblk(-, %d, %d) returned NULL\n",
+ 			       kdevname(lo->lo_device),
+ 			       block, blksize);
+ 			goto error_out;
+@@ -256,7 +265,7 @@
+ 			size = len;
+ 			   
+ 		if ((lo->transfer)(lo, current_request->cmd, bh->b_data + offset,
+-				   dest_addr, size)) {
++				   dest_addr, size, (int)((((unsigned int)blksize >> 9) * (unsigned int)block) + ((unsigned int)offset >> 9)))) {
+ 			printk("loop: transfer error block %d\n", block);
+ 			brelse(bh);
+ 			goto error_out;
+@@ -286,6 +295,7 @@
+ {
+ 	struct file	*file;
+ 	struct inode	*inode;
++	int hardsz = 512;
+ 
+ 	if (arg >= NR_OPEN || !(file = current->files->fd[arg]))
+ 		return -EBADF;
+@@ -302,14 +312,20 @@
+ 			return error;
+ 		lo->lo_device = inode->i_rdev;
+ 		lo->lo_flags = 0;
++
++		if(hardsect_size[MAJOR(lo->lo_device)]) {
++			hardsz = hardsect_size[MAJOR(lo->lo_device)][MINOR(lo->lo_device)];
++		}
+ 	} else if (S_ISREG(inode->i_mode)) {
+ 		lo->lo_device = inode->i_dev;
+ 		lo->lo_flags = LO_FLAGS_DO_BMAP;
+ 	} else
+ 		return -EINVAL;
+ 
+-	if (IS_RDONLY (inode) || is_read_only(lo->lo_device)) {
++	loop_hardsizes[MINOR(dev)] = hardsz;
++	if ((S_ISREG(inode->i_mode) && IS_RDONLY(inode)) || is_read_only(lo->lo_device) || !(file->f_mode & FMODE_WRITE)) {
+ 		lo->lo_flags |= LO_FLAGS_READ_ONLY;
++		lo->lo_flags |= 0x200000; /* export to user space */
+ 		set_device_ro(dev, 1);
+ 	} else {
+ 		invalidate_inode_pages (inode);
+@@ -333,6 +349,7 @@
+ 	if (S_ISBLK(lo->lo_inode->i_mode))
+ 		blkdev_release (lo->lo_inode);
+ 	iput(lo->lo_inode);
++	if(lo->lo_encrypt_type == 16) keyClean_aes(lo);
+ 	lo->lo_device = 0;
+ 	lo->lo_inode = NULL;
+ 	lo->lo_encrypt_type = 0;
+@@ -368,6 +385,9 @@
+ 		if (info.lo_encrypt_key_size <= 0)
+ 			return -EINVAL;
+ 		break;
++	case 16:
++	        if((err = keySetup_aes(lo, &info)) != 0) return(err);
++	        break;
+ #ifdef DES_AVAILABLE
+ 	case LO_CRYPT_DES:
+ 		if (info.lo_encrypt_key_size != 8)
+@@ -399,6 +419,8 @@
+ 	lo->lo_encrypt_type = info.lo_encrypt_type;
+ 	lo->transfer = xfer_funcs[lo->lo_encrypt_type];
+ 	lo->lo_encrypt_key_size = info.lo_encrypt_key_size;
++	lo->lo_init[0] = info.lo_init[0];
++	lo->lo_init[1] = info.lo_init[1];
+ 	if (info.lo_encrypt_key_size)
+ 		memcpy(lo->lo_encrypt_key, info.lo_encrypt_key,
+ 		       info.lo_encrypt_key_size);
+@@ -431,6 +453,8 @@
+ 		info.lo_encrypt_key_size = lo->lo_encrypt_key_size;
+ 		memcpy(info.lo_encrypt_key, lo->lo_encrypt_key,
+ 		       lo->lo_encrypt_key_size);
++		info.lo_init[0] = lo->lo_init[0];
++		info.lo_init[1] = lo->lo_init[1];
+ 	}
+ 	memcpy_tofs(arg, &info, sizeof(info));
+ 	return 0;
+@@ -470,8 +494,12 @@
+ 			return err;
+ 		put_fs_long(loop_sizes[lo->lo_number] << 1, (long *) arg);
+ 		return 0;
+-		default:
++	default:
++		if(lo->lo_encrypt_type == 16) {
++			return handleIoctl_aes(lo, cmd, arg);
++		} else {
+ 			return -EINVAL;
++		}
+ 	}
+ 	return 0;
+ }
+@@ -565,8 +593,10 @@
+ 	}
+ 	memset(&loop_sizes, 0, sizeof(loop_sizes));
+ 	memset(&loop_blksizes, 0, sizeof(loop_blksizes));
++	memset(&loop_hardsizes, 0, sizeof(loop_hardsizes));
+ 	blk_size[MAJOR_NR] = loop_sizes;
+ 	blksize_size[MAJOR_NR] = loop_blksizes;
++	hardsect_size[MAJOR_NR] = loop_hardsizes;
+ 
+ 	return 0;
+ }
+@@ -576,5 +606,9 @@
+ cleanup_module( void ) {
+   if (unregister_blkdev(MAJOR_NR, "loop") != 0)
+     printk("loop: cleanup_module failed\n");
++
++  blk_size[MAJOR_NR] = 0;
++  blksize_size[MAJOR_NR] = 0;
++  hardsect_size[MAJOR_NR] = 0;
+ }
+ #endif
+--- /dev/null	Sun Aug 25 20:57:30 2002
++++ patched-loop.h	Fri Oct 31 16:08:00 2003
+@@ -0,0 +1,88 @@
++#ifndef _LINUX_LOOP_H
++#define _LINUX_LOOP_H
++
++/*
++ * include/linux/loop.h
++ *
++ * Written by Theodore Ts'o, 3/29/93.
++ *
++ * Copyright 1993 by Theodore Ts'o.  Redistribution of this file is
++ * permitted under the GNU Public License.
++ */
++
++#define LO_NAME_SIZE	64
++#define LO_KEY_SIZE	32
++
++#ifdef __KERNEL__
++       
++struct loop_device {
++	int		lo_number;
++	struct inode	*lo_inode;
++	int		lo_refcnt;
++	kdev_t		lo_device;
++	int		lo_offset;
++	int		lo_encrypt_type;
++	int		lo_encrypt_key_size;
++	int		lo_flags;
++	int		(*transfer)(struct loop_device *, int cmd,
++				    char *raw_buf, char *loop_buf, int size, int); /* MODIFIED for loop-AES */
++	char		lo_name[LO_NAME_SIZE];
++	char		lo_encrypt_key[LO_KEY_SIZE];
++#ifdef DES_AVAILABLE
++	des_key_schedule lo_des_key;
++	unsigned long	lo_des_init[2];
++#endif
++#ifdef IDEA_AVAILABLE
++        idea_key        lo_idea_en_key;
++        idea_key        lo_idea_de_key;
++#endif
++	void		*key_data;  /* MODIFIED for loop-AES */
++	unsigned long	lo_init[2]; /* MODIFIED for loop-AES */
++};
++
++typedef	int (* transfer_proc_t)(struct loop_device *, int cmd,
++				char *raw_buf, char *loop_buf, int size, int); /* MODIFIED for loop-AES */
++
++/*
++ * Loop flags
++ */
++#define LO_FLAGS_DO_BMAP	0x00000001
++#define LO_FLAGS_READ_ONLY	0x00000002
++
++#endif /* __KERNEL__ */
++
++struct loop_info {
++	int		lo_number;	/* ioctl r/o */
++	dev_t		lo_device; 	/* ioctl r/o */
++	unsigned long	lo_inode; 	/* ioctl r/o */
++	dev_t		lo_rdevice; 	/* ioctl r/o */
++	int		lo_offset;
++	int		lo_encrypt_type;
++	int		lo_encrypt_key_size; 	/* ioctl w/o */
++	int		lo_flags;	/* ioctl r/o */
++	char		lo_name[LO_NAME_SIZE];
++	unsigned char	lo_encrypt_key[LO_KEY_SIZE]; /* ioctl w/o */
++	unsigned long	lo_init[2];
++	char		reserved[4];
++};
++
++/*
++ * Loop encryption types --- LO_CRYPT_IDEA isn't supported yet
++ */
++
++#define LO_CRYPT_NONE	0
++#define LO_CRYPT_XOR	1
++#define LO_CRYPT_DES	2
++#define LO_CRYPT_IDEA	3
++#define MAX_LO_CRYPT	4
++
++/*
++ * IOCTL commands --- we will commandeer 0x4C ('L')
++ */
++
++#define LOOP_SET_FD	0x4C00
++#define LOOP_CLR_FD	0x4C01
++#define LOOP_SET_STATUS	0x4C02
++#define LOOP_GET_STATUS	0x4C03
++
++#endif

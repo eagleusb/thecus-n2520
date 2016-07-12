@@ -1,0 +1,73 @@
+#
+# Hardware monitoring chip drivers configuration
+#
+menu "Miscellaneous Thecus Hardware Monitor support"
+
+config THECUS_SENSORS_F71882FG
+	tristate "Fintek F71858FG, F71862FG, F71882FG, F71889FG and F8000"
+	help
+	  If you say yes here you get support for hardware monitoring
+	  features of the Fintek F71858FG, F71862FG/71863FG, F71882FG/F71883FG,
+	  F71889FG and F8000 Super-I/O chips.
+
+	  This driver can also be built as a module.  If so, the module
+	  will be called f71882fg.
+
+config THECUS_SENSORS_F75375S
+	tristate "Fintek F75375S/SP, F75373 and F75387SG"
+	depends on I2C
+	help
+	  If you say yes here you get support for hardware monitoring
+	  features of the Fintek F75375S/SP, F75373 and F75387SG.
+
+	  This driver can also be built as a module.  If so, the module
+	  will be called f75375s.
+
+config THECUS_SENSORS_IT87
+	tristate "ITE IT87xx and compatibles"
+	select HWMON_VID
+	help
+	  If you say yes here you get support for ITE IT8705F, IT8712F,
+	  IT8716F, IT8718F, IT8720F, IT8721F, IT8726F and IT8758E sensor
+	  chips, and the SiS960 clone.
+
+	  This driver can also be built as a module.  If so, the module
+	  will be called it87.
+
+config THECUS_SENSORS_W83795
+	tristate "Winbond/Nuvoton W83795G/ADG"
+	depends on I2C && EXPERIMENTAL
+	help
+	  If you say yes here you get support for the Winbond W83795G and
+	  W83795ADG hardware monitoring chip.
+
+	  This driver can also be built as a module.  If so, the module
+	  will be called w83795.
+
+config THECUS_SENSORS_W83627EHF
+	tristate "Winbond W83627EHF/EHG/DHG, W83667HG"
+	select HWMON_VID
+	help
+	  If you say yes here you get support for the hardware
+	  monitoring functionality of the Winbond W83627EHF Super-I/O chip.
+
+	  This driver also supports the W83627EHG, which is the lead-free
+	  version of the W83627EHF, and the W83627DHG, which is a similar
+	  chip suited for specific Intel processors that use PECI such as
+	  the Core 2 Duo.
+
+	  This driver also supports the W83667HG chip.
+
+	  This driver can also be built as a module.  If so, the module
+	  will be called w83627ehf.
+
+config THECUS_SENSORS_TMP401
+	tristate "Texas Instruments TMP401 and compatibles"
+	depends on I2C && EXPERIMENTAL
+	help
+	  If you say yes here you get support for Texas Instruments TMP401 and
+	  TMP411 temperature sensor chips.
+
+	  This driver can also be built as a module.  If so, the module
+	  will be called tmp401.
+endmenu

@@ -1,0 +1,23 @@
+#
+# Thecus device drivers
+#
+# *** DEPRECATED! Do not add new entries! See Makefile ***
+#
+
+menuconfig THECUS
+	bool "Thecus Device Support"
+	default y
+	---help---
+	  Thecus device driver includes board GPIO control, HW monitor and
+	  event handler for Thecus boards.
+
+	  If you want Thecus support, you should say Y here and also to the
+	  specific driver for your Thecus model below.
+
+if THECUS
+
+source drivers/thecus/event/Kconfig
+source drivers/thecus/gpio/Kconfig
+source drivers/thecus/hwmon/Kconfig
+
+endif #THECUS
