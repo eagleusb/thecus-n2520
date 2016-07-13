@@ -1,0 +1,153 @@
+#!/bin/sh
+
+# define flash device tree
+UBOOT=$((0x00000000))
+UBOOT_LEN=$((0x000c0000))
+ENV=$((0x000c0000))
+ENV_LEN=$((0x00040000))
+# image size for uenv
+UENV_LEN=$((0x20000))
+
+source libimg-tools
+
+# get device tree from uenv
+get_dtree(){
+	local DEV="$1"
+	local TMP_DT="/dev/shm/tmp.dt"
+	print_env "$DEV" > $TMP_DT
+	[ "$?" -ne 0 ] && return 1
+	eval `grep '^kernel_addr_n\|^fdt_addr_n\|^ramdisk_addr_n\|^ramdisk_size\|^ver_addr_n\|^ver_size' $TMP_DT |\
+		sed 's/=\([0-9A-Fa-f].*\)/=$((0x\1))/g;
+		s/kernel_addr_n/KERNEL/g; s/fdt_addr_n/DTB/g;
+		s/ramdisk_addr_n/RAMDISK/g; s/ramdisk_size/RAMDISK_LEN/g;
+		s/ver_addr_n/VERSION/g; s/ver_size/VERSION_LEN/g'`
+
+	rm -rf $TMP_DT
+
+	KERNEL_LEN=$((DTB - KERNEL))
+	DTB_LEN=$((VERSION - DTB))
+
+	return 0
+}
+
+# convert u-boot environment from text to bin file
+gen_uenv(){
+	local INPUT="$1"
+	[ ! -f "$INPUT" ] && echo "$INPUT file not found!" && return 1
+	[ -n "$2" ] && local OFILE="$2" || local OFILE="uenv.bin"
+	local TMPENV="/dev/shm/tmp.env"
+
+	# create an empty type image
+	dd if=/dev/zero of=$TMPENV bs=4 count=$(((UENV_LEN - 4)/4))
+	# transfer '\n' to 0 in order to match u-boot env format
+	tr "\n" "\000" < $INPUT | dd of=$TMPENV conv=notrunc
+	# calculate CRC32 checksum
+	local CRC32_SUM="`crc32sum $TMPENV | awk 'END {print $2}'`"
+	# Append CRC32 in front of env
+	str2bin "$CRC32_SUM" "$OFILE"
+	cat $TMPENV >> $OFILE
+
+	return 0
+}
+
+# print u-boot environment from bin file
+print_env(){
+	local DEV="$1"
+	local TMPENV="/dev/shm/tmp.env"
+	local ENV_LIST="/dev/shm/tmpenv.list"
+	local BS=$((0x10000))
+
+	dd if=$DEV of=$TMPENV bs=$BS skip=$((ENV/BS)) count=$((UENV_LEN/BS))
+	dd if=$TMPENV of=$ENV_LIST bs=4 skip=1
+	# get u-env checksum
+	local UENV_SUM="0x`hexdump -C $TMPENV |\
+		awk '{if(NR==1){ printf("%s%s%s%s\n", $2, $3, $4, $5)}}'`"
+	# calculate CRC32 checksum from file
+	local CRC32_SUM="0x`crc32sum $ENV_LIST | awk 'END {print $2}'`"
+	[ "$((UENV_SUM))" -ne "$((CRC32_SUM))" ] &&\
+		echo "Invalid checksum of uenv!" > /dev/stderr && return 1
+	# transfer 0 to '\n' for readable
+	tr "\000" "\n" < $ENV_LIST | grep '='
+
+	rm -rf $TMPENV $ENV_LIST
+	return 0
+}
+
+update_item(){
+	local FTYPE="$1"
+	local INPUT="$2"
+	local BS=$((0x10000))
+	local RET=0
+
+	if [ "`readlink -f $DEVICE | sed 's/[0-9]//g'`" = "/dev/mtd" ];then
+		# If target is mtd device, use mtd_program to update image,
+		# and we need its mtd name instead of actual offset.
+		local MITEM=""
+		local IMG="$INPUT"
+
+		case $FTYPE in
+		UBOOT) MITEM="firmware"
+			;;
+		ENV) MITEM="environment"
+			;;
+		KERNEL) MITEM="kernel"
+			;;
+		DTB) MITEM="device-tree"
+			;;
+		RAMDISK) MITEM="ramdisk"
+			;;
+		VERSION)
+			# if FTYPE is VERSION, create hex image first.
+			MITEM="version"
+			local IMG="/dev/shm/fver.bin"
+			gen_fver "$INPUT" "$IMG"
+			;;
+		esac
+
+		mtd_program "$FTYPE" "$MITEM" "$IMG"
+		RET=$?
+
+	else
+		# For target is not MTD device, we need to get item's offset
+		# in the image, except ENV and UBOOT.
+		case $FTYPE in
+		ENV|UBOOT)
+			local IMG="$INPUT"
+			;;
+		VERSION)
+			# if FTYPE is VERSION, create hex image first.
+			local IMG="/dev/shm/fver.bin"
+			gen_fver "$INPUT" "$IMG"
+			get_dtree "$DEVICE"
+			[ "$?" -ne 0 ] && return 1
+			;;
+		*)
+			local IMG="$INPUT"
+			get_dtree "$DEVICE"
+			[ "$?" -ne 0 ] && return 1
+			;;
+		esac
+
+		eval "local TARGET_OFFSET=\$$FTYPE"
+		eval "local TARGET_LEN=\$${FTYPE}_LEN"
+		[ -z "$TARGET_OFFSET" ] && echo "Invalid item." && return 1
+
+		ERASE_SIZE=$((TARGET_LEN/BS))
+
+		local ISIZE="`du -bs $IMG | cut -f1`"
+		if [ "$ISIZE" -gt "$TARGET_LEN" ];then
+			echo "Image size is illegal for $FTYPE!"
+			echo "Terminate the updating process!"
+			return 1
+		fi
+
+		# program item with forcing erase to generate image
+		# in flash style (pad 0xff)
+		bin_program "$FTYPE" "$IMG" "$TARGET_OFFSET" "$BS" "$ERASE_SIZE" "1"
+	fi
+
+	# clean version tmp file
+	[ "$FTYPE" = "VERSION" ] && rm -rf $IMG
+
+	return $RET
+}

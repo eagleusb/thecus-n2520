@@ -1,0 +1,141 @@
+#!/bin/sh
+
+PATH=$PATH:/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin:/usr/lib/nas_img-tools
+
+show_usage(){
+	echo "Usage:"
+	echo " `basename $0` <option> <parameter1> [parameter2]..."
+	echo "CE image generated tool"
+	echo 
+	echo "  Options:"
+	echo "   -b | --boots <file>          create boot script image by file"
+	echo "             output file would be boots.bin"
+	echo "   -v | --version <string>      create version image by input string"
+	echo "             output file would be fver.bin"
+	echo "   -m | --mac <plat_para file>  update MAC in platform_parameter"
+	echo "                                image (not support now)"
+	echo "             output file would be <plat_para file>.new"
+	echo "   -u | --update <type> <device> <item> <file>"
+	echo "                                Update specified item by file on"
+	echo "                                specified device."
+	echo 
+	echo "  Type:"
+	echo "   emmc              2G eMMC device"
+	echo "   emmc4             4G eMMC device"
+	echo "   flash             SPI Flash device"
+	echo 
+	echo "  Device:            Target device, could be a bin file."
+	echo 
+	echo "  Item could be:"
+	echo 
+	echo "   MFH               MFH table"
+	echo "   CEFDK             CEFDK image"
+	echo "   CEFDK_PARAM       BIOS settings"
+	echo "   PLAT_PARAM        Platform parameters"
+	echo "   KERNEL            Kernel image"
+	echo "   RAMDISK           Linux Ram disk"
+	echo "   SPLASH            Splash Screen"
+	echo "   FW8051            8051 firmware"
+	echo "   SCRIPT            Auto boot script"
+	echo "   VERSION           Image version"
+
+	exit $RET
+}
+
+init_env(){
+	OPT="$1"
+	PARAM1="$2"
+	PARAM2="$3"
+	PARAM3="$4"
+	PARAM4="$5"
+	SCRIPT_SIZE="0x800"
+	PP_SIZE="0x10000"
+
+	RET=0
+}
+
+check_ppimg(){
+	# check input file size
+	if [ "`du -bs $INPUT`" -eq "$((PP_SIZE))" ];then
+		# check checksum
+		return 0
+	fi
+
+	echo "Invalid platform_parameter image"
+	return 1
+}
+
+gen_boots(){
+	local INPUT="$1"
+	[ ! -f $INPUT ] && echo "$INPUT file not found!" && return 1
+
+	local OFILE="boots.bin"
+	# create a flash type image (filled with 0xff)
+	tr "\000" "\377" < /dev/zero | dd of=$OFILE bs=1 count=$((SCRIPT_SIZE))
+	# transfer '\n' to 0 in order to match CEFDK format
+	tr "\n" "\000" < $INPUT | dd of=$OFILE conv=notrunc
+
+	return 0
+}
+
+# TODO: this function has not been implemented.
+update_mac(){
+	local INPUT="$PARAM1"
+	[ ! -f $INPUT ] && echo "$INPUT file not found!" && return 1
+	check_ppimg
+	[ "$?" -ne 0 ] && return 1
+
+	local OFILE="${INPUT}.new"
+
+	return 0
+}
+
+if [ -z "$1" ];then
+	[ -z"$2" ] && RET=1
+	show_usage
+fi
+
+init_env "$@"
+source libce
+
+case "$OPT" in
+-b|--boots)
+	gen_boots "$PARAM1"
+	;;
+-v|--version)
+	gen_fver "$PARAM1"
+	;;
+-m|--mac)
+	update_mac
+	;;
+-u|--update)
+	case "$PARAM1" in
+	emmc)
+		USER_DATA=0x200000
+		;;
+	emmc4)
+		USER_DATA=0x400000
+		;;
+	flash)
+		USER_DATA=0
+		;;
+	*)
+		echo "Unsupported type!"
+		exit 1
+	esac
+
+	DEVICE="$PARAM2"
+	[ ! -e "$DEVICE" ] && echo "${DEVICE}: file not found!" && exit 1
+
+	get_mfh
+	update_item "$PARAM3" "$PARAM4"
+	;;
+*)
+	RET=1
+	show_usage
+	;;
+esac
+RET=$?
+
+exit $RET
+
