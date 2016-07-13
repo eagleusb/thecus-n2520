@@ -4,95 +4,73 @@ action=$1
 
 #sync to server
 function sync_to_server(){
-		
-    ntp_mode=`/usr/bin/sqlite /etc/cfg/conf.db "select v from conf where k='ntp_cfg_mode'"`
-    echo "Active NTP in mode : [ $ntp_mode ]"
-		
-    if [ "${ntp_mode}" = "no" ];then
-        echo "Disabled NTP Check"
+  ntp_mode=`/usr/bin/sqlite /etc/cfg/conf.db "select v from conf where k='ntp_cfg_mode'"`
+  echo "Active NTP in mode : [ $ntp_mode ]"
+
+  if [ "${ntp_mode}" = "no" ];then
+    echo "Disabled NTP Check"
+  else
+    ntp_server=`/usr/bin/sqlite /etc/cfg/conf.db "select v from conf where k='ntp_server'"`
+    if [ $ntp_server != "" ];then
+      echo "Set NTP Server to : ${ntp_server}"
+      /img/bin/ntpdate.sh "${ntp_server}"
     else
-        ntp_server=`/usr/bin/sqlite /etc/cfg/conf.db "select v from conf where k='ntp_server'"`
-  	if [ $ntp_server != "" ];then
-    	    echo "Set NTP Server to : ${ntp_server}"
-    	    /img/bin/ntpdate.sh "${ntp_server}"  
-  	else
-    	    echo "Set NTP Server to Default : clock1.unc.edu , ntp-1.mcs.anl.gov"
-            /img/bin/ntpdate.sh ntp-1.mcs.anl.gov 
-    	    /img/bin/ntpdate.sh clock1.unc.edu
-	fi
+      echo "Set NTP Server to Default : European pool NTP servers"
+      /img/bin/ntpdate.sh 0.europe.pool.ntp.org
+      /img/bin/ntpdate.sh 1.europe.pool.ntp.org
     fi
+  fi
 }
 
 function stop_ntpd(){
-
-    COUNT=0
-
-    psidlist=`/bin/ps | grep /usr/sbin/ntpd | grep -v grep | awk '{print $1}'`
-		
-    while [ "${psidlist}" != "" ]
-    do
-        COUNT=$[COUNT+1]
-	for psid in $psidlist
-	do 
-	    kill -9 $psid
-	done
-			
-	if [ "${COUNT}" = "5" ];
-	then
-	    return
-	fi
-						
-	sleep 1
-	psidlist=`/bin/ps|grep /usr/sbin/ntpd | grep -v grep | awk '{print $1}'`			
-    done	
+  pkill ntpd
 }
 
 function start_ntpd(){
+  ntp_server_mode=`/usr/bin/sqlite /etc/cfg/conf.db "select v from conf where k='ntp_server_mode'"`
+  del_crond
+  if [ "${ntp_server_mode}" == "1" ];then
+    pkill ntpd
+    sync_to_server
+    sleep 1
+    /usr/sbin/ntpd -c /etc/ntp.conf -f /etc/ntp/drift
+  fi
 
-    ntp_server_mode=`/usr/bin/sqlite /etc/cfg/conf.db "select v from conf where k='ntp_server_mode'"`
-    del_crond	
-    if [ "${ntp_server_mode}" == "1" ];then
-        stop_ntpd
-	sync_to_server
-	sleep 1
-	/usr/sbin/ntpd -c /etc/ntp.conf -f /etc/ntp/drift
+  if [ "${ntp_server_mode}" != "1" ];then
+  ntp_mode=`/usr/bin/sqlite /etc/cfg/conf.db "select v from conf where k='ntp_cfg_mode'"`
+    if [ "${ntp_mode}" = "yes" ];then
+      start_ntpd_client
     fi
-       
-    if [ "${ntp_server_mode}" != "1" ];then	
-        ntp_mode=`/usr/bin/sqlite /etc/cfg/conf.db "select v from conf where k='ntp_cfg_mode'"`
-        if [ "${ntp_mode}" = "yes" ];then
-                start_ntpd_client
-        fi
-    fi
+  fi
 }
 
 function start_ntpd_client(){
-    ntp_server=`/usr/bin/sqlite /etc/cfg/conf.db "select v from conf where k='ntp_server'"`
-    echo "server ${ntp_server} maxpoll 4 prefer" > /tmp/ntp.conf
-    echo "server ntp-1.mcs.anl.gov maxpoll 4" >> /tmp/ntp.conf
-    echo "server clock1.unc.edu maxpoll 4" >> /tmp/ntp.conf
-    echo "driftfile /var/lib/ntp/drift" >> /tmp/ntp.conf
-    /usr/sbin/ntpd -c /tmp/ntp.conf
+  ntp_server=`/usr/bin/sqlite /etc/cfg/conf.db "select v from conf where k='ntp_server'"`
+  echo "server ${ntp_server} maxpoll 4 prefer" > /tmp/ntp.conf
+  echo "server 0.europe.pool.ntp.org maxpoll 4" >> /tmp/ntp.conf
+  echo "server 1.europe.pool.ntp.org maxpoll 4" >> /tmp/ntp.conf
+  echo "driftfile /var/lib/ntp/drift" >> /tmp/ntp.conf
+  /usr/sbin/ntpd -c /tmp/ntp.conf
 }
 
 del_crond(){
-        local crond_conf="/etc/cfg/crond.conf"
-        local rc_filter="/img/bin/ntp_cfg"
-        local conf_tmp=`cat ${crond_conf}`
-        if [ "`echo "$conf_tmp" | grep ${rc_filter}`" ];then
-                echo "$conf_tmp" | grep -v ${rc_filter} > ${crond_conf}
-                cat ${crond_conf} | crontab - -u root
-        fi
+  local crond_conf="/etc/cfg/crond.conf"
+  local rc_filter="/img/bin/ntp_cfg"
+  local conf_tmp=`cat ${crond_conf}`
+  if [ "`echo "$conf_tmp" | grep ${rc_filter}`" ];then
+    echo "$conf_tmp" | grep -v ${rc_filter} > ${crond_conf}
+    cat ${crond_conf} | crontab - -u root
+  fi
 }
 
 case ${action} in
-	start)
-		start_ntpd
-	;;
-	stop)
-		stop_ntpd
-	;;
-	*)
-		echo -e "Need option[start|stop]!"
-	;;
+  start)
+  start_ntpd
+  ;;
+  stop)
+  stop_ntpd
+  ;;
+  *)
+  echo -e "Need option[start|stop]!"
+  ;;
 esac
