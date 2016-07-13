@@ -1,0 +1,290 @@
+#!/bin/sh 
+#################################################
+##	Vars defined
+#################################################
+sqlite="/usr/bin/sqlite"
+confdb="/etc/cfg/conf.db"
+rsyncd_conf="/tmp/rsyncd.conf"
+rsyncd_secret="/tmp/rsyncd.secrets"
+sshd_root="/root/.ssh"
+sshd_deny="/etc/hosts.deny"
+sshd_allow="/etc/hosts.allow"
+PidFile="/var/run/sshd_rsync.pid"
+. /img/bin/function/libpid_act
+
+#################################################
+##       Check Raid Mount First
+#################################################
+check_raid(){
+  sys_path=`/bin/ls -l /raid/sys | awk -F' ' '{printf $11}'`
+  data_path=`/bin/ls -l /raid/data | awk -F' ' '{printf $11}'`
+  if [ "$sys_path" == "" ] || [ "$data_path" == "" ];
+  then
+    echo "Your Master RAID link is not exist"
+    exit
+  fi
+}
+
+#################################################
+##	Declare subroutine
+#################################################
+
+get_rsync_target_setting() {
+	sqlcmd="select v from conf where k='nsync_target_rsync_enable'"
+	${sqlite} ${confdb} "${sqlcmd}"
+}
+
+rsync_target_default_setting() {
+	sqlcmd="insert into conf (k,v) values ('nsync_target_rsync_enable','0')"
+	${sqlite} ${confdb} "${sqlcmd}"
+}
+
+get_sshd_setting() {
+	sqlcmd="select v from conf where k='sshd_enable'"
+	${sqlite} ${confdb} "${sqlcmd}"
+}
+
+get_username() {
+	rsync_user=`${sqlite} ${confdb} "select v from conf where k='nsync_target_rsync_username'"`
+	if [ "$rsync_user" == "" ];then
+		rsync_user=`${sqlite} ${confdb} "select v from conf where k='rsync_target_username'"`
+	fi
+	echo ${rsync_user}
+}
+
+get_pwd() {
+	rsync_passwd=`${sqlite} ${confdb} "select v from conf where k='nsync_target_rsync_password'"`
+	if [ "$rsync_passwd" == "" ];then
+		rsync_passwd=`${sqlite} ${confdb} "select v from conf where k='rsync_target_password'"`
+	fi
+	echo ${rsync_passwd}
+}
+
+build_rsyncd_conf() {
+    rsync_username=`get_username`
+    rsync_pwd=`get_pwd`
+    max_connection=`/img/bin/check_service.sh "rsync_max_connection"`
+    
+    echo "" >> ${rsyncd_conf}
+    echo "[raidroot]" >> ${rsyncd_conf}
+    echo "path = /raid/data" >> ${rsyncd_conf}
+    echo "auth users = ${rsync_username}" >> ${rsyncd_conf}
+    echo "uid = root" >> ${rsyncd_conf}
+    echo "gid = root" >> ${rsyncd_conf}
+    echo "secrets file = ${rsyncd_secret}" >> ${rsyncd_conf}
+    echo "read only = no" >> ${rsyncd_conf}
+    echo "use chroot = no" >> ${rsyncd_conf}
+    echo "max connections = ${max_connection}" >> ${rsyncd_conf}
+    
+    folder=`cat /etc/samba/smb.conf | awk -F' = ' '/path/ {print $2}'`
+    echo -e "${folder}" | \
+    while read info
+    do
+        module_name=`echo ${info} | awk -F'/' '{print $4}'`
+        if [ "${module_name}" == "stackable" ];then
+            module_name=`echo ${info} | awk -F'/' '{print $5}'`
+        fi
+        
+        if [ "${module_name}" != "USBHDD" ] && [ "${module_name}" != "usbhdd" ] && [ "${module_name}" != "eSATAHDD" ] && [ "${module_name}" != "" ];then
+              echo "" >> ${rsyncd_conf}
+              echo "[${module_name}]" >> ${rsyncd_conf}
+              echo "path = ${info}" >> ${rsyncd_conf}
+              echo "auth users = ${rsync_username}" >> ${rsyncd_conf}
+              echo "uid = root" >> ${rsyncd_conf}
+              echo "gid = root" >> ${rsyncd_conf}
+              echo "secrets file = ${rsyncd_secret}" >> ${rsyncd_conf}
+              echo "read only = no" >> ${rsyncd_conf}
+              echo "max connections = ${max_connection}" >> ${rsyncd_conf}
+        fi
+    done
+                                                 
+                                                
+    echo "${rsync_username}:${rsync_pwd}" > ${rsyncd_secret}
+
+    chmod 600 ${rsyncd_conf}
+    chmod 600 ${rsyncd_secret}
+}
+
+## simplify to start rsyncd process
+start_rsyncd() {
+  ssh_start
+  able=`get_rsync_target_setting`
+  if [ "${able}" == "1" ];then
+    build_rsyncd_conf
+    /usr/bin/rsync --daemon --config=${rsyncd_conf}
+  
+    echo "Rsync Target Server works now!!"
+  fi
+}
+
+## simplify to stop rsyncd process
+stop_rsyncd() {
+	rm -f ${rsyncd_conf}
+	rm -f ${rsyncd_secret}
+
+	rsyncd_pid=`/bin/ps | grep /usr/bin/rsync | awk '/daemon/{print $1}'`
+    
+  if [ "${rsyncd_pid}" != "" ];then
+  		kill -9 $rsyncd_pid
+	fi
+	
+	ssh_stop
+	echo "Rsync Target Server stops."
+}
+
+## simplify to restart rsyncd process
+restart_rsyncd() {
+	stop_rsyncd
+	start_rsyncd
+	echo "Rsync Target Server restarted."
+}
+
+bootup_rsyncd(){
+  able=`get_rsync_target_setting`
+	if [ "${able}" = "" ];then
+		rsync_target_default_setting
+		able=0
+	fi
+	if [ "${able}" != "1" ];
+	then
+	   stop_rsyncd
+	   echo "Rsync Target Server is disable, not running ..."
+	else 
+	   start_rsyncd
+	   echo "Rsync Target Server is now working.."
+	fi
+}
+
+rebuild_conf(){
+  sleep 2
+  rm -f ${rsyncd_conf}
+
+  able=`get_rsync_target_setting`
+  if [ "${able}" == "1" ];then
+    build_rsyncd_conf
+  fi
+}
+
+ssh_stop()
+{
+  Lpid_del_process "ssh" "${PidFile}" 
+
+  if [ -d "${sshd_root}" ];then
+    rm -rf ${sshd_root}
+  fi
+
+  if [ -f "${sshd_deny}" ];then
+    rm ${sshd_deny}
+  fi
+
+  if [ -f "${sshd_allow}" ];then
+    rm ${sshd_allow}
+  fi
+}
+
+ssh_start()
+{
+  ssh_stop
+  sshd_enable=`get_sshd_setting`
+  
+  if [ "${sshd_enable}" != "1" ];then
+    echo "sshd disabled."
+    return
+  fi
+
+  if [ ! -d "${sshd_root}" ];then
+    mkdir /root/.ssh
+    chmod 700 /root/.ssh
+  fi
+
+  if [ -f "/etc/ssh/id_dsa.new" ] && [ -f "/etc/ssh/id_dsa.pub.new" ];then
+    cp -f /etc/ssh/id_dsa.pub.new /root/.ssh/authorized_keys
+  else
+    cp -f /etc/ssh/id_dsa.pub /root/.ssh/authorized_keys
+  fi
+
+  chmod 644 /root/.ssh/authorized_keys
+
+  if [ ! -f "${sshd_deny}" ];then
+    echo "sshd:all :deny" > ${sshd_deny}
+  fi
+  
+  if [ ! -f "${sshd_allow}" ];then
+    ip_str=""
+
+    for num in 1 2 3
+    do
+      ip_allow=`${sqlite} ${confdb} "select v from conf where k='sshd_ip${num}'"`
+      if [ "${ip_allow}" != "" ];then
+        ret=`/usr/bin/ipv6check -p ${ip_allow}`
+        if [ "${ret}" != "ipv6 format Error" ];then
+            ip_allow="[${ip_allow}]"
+        fi
+      
+        if [ "${ip_allow}" != "" ];then
+          if [ "${ip_str}" != "" ];then
+            ip_str="${ip_str}, ${ip_allow}"
+          else
+            ip_str=${ip_allow}
+          fi
+        fi
+      fi
+    done
+
+    echo "sshd:${ip_str} :allow" > ${sshd_allow}
+  fi
+  
+  ln -sf /usr/bin/rsync /usr/bin/rsync
+  
+  mkdir /var/empty/sshd
+  /usr/sbin/sshd -p 23 -o PidFile=${PidFile}
+}
+
+tar_key()
+{
+  rm -rf /tmp/key
+  mkdir /tmp/key
+
+  if [ -f "/etc/ssh/id_dsa.new" ] && [ -f "/etc/ssh/id_dsa.pub.new" ];then
+    cp -f /etc/ssh/id_dsa.pub.new /tmp/key/public_key
+    cp -f /etc/ssh/id_dsa.new /tmp/key/private_key
+  else
+    cp -f /etc/ssh/id_dsa.pub /tmp/key/public_key
+    cp -f /etc/ssh/id_dsa /tmp/key/private_key
+  fi
+
+  cd /tmp
+  tar zcvf key.tar.gz key
+  rm -rf /tmp/key
+}
+
+#################################################
+##	Main code
+#################################################
+case "$1"
+in
+	start)
+		check_raid
+		start_rsyncd
+		;;
+	stop)			
+		stop_rsyncd
+		;;
+	restart)
+		check_raid
+		restart_rsyncd
+		;;
+	boot)
+		check_raid
+		bootup_rsyncd
+		;;
+	rebuildconf)
+		rebuild_conf
+		;;
+	tar_key)
+	 tar_key
+	 ;;
+	*)			
+		echo "Usage: $0 {start|stop|restart|boot}"
+		;;
+esac

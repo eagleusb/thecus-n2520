@@ -1,0 +1,358 @@
+#!/bin/sh 
+#################################################
+##	Vars defined
+#################################################
+sqlite="/usr/bin/sqlite"
+db="/etc/cfg/conf.db"
+string_cmd="/usr/bin/specstr_handle"
+tmp_iso_file="/tmp/tmp_iso"
+tmp_point_file="/tmp/tmp_point"
+tmp_loop="/tmp/iso_loop"
+del_folder=$2
+raid_id=$3
+new_folder=$4
+action_type=$5
+recursize=$6
+
+master_raid=`ls -l /raid | awk -F' ' '{printf $11}' | awk -F'/' '{printf $2}'`
+#################################################
+##       Check Raid Mount First
+#################################################
+check_raid(){
+  sys_path=`/bin/ls -l /raid/sys | awk -F' ' '{printf $11}'`
+  data_path=`/bin/ls -l /raid/data | awk -F' ' '{printf $11}'`
+  if [ "$sys_path" == "" ] || [ "$data_path" == "" ];
+  then
+    echo "Your Master RAID link is not exist"
+    exit
+  fi
+  mount_raid=`mount | grep "${master_raid}"`
+  if [ "$mount_raid" == "" ];
+  then
+    echo "Your RAID is not mounted"
+    exit
+  fi
+}
+
+#################################################
+##	Declare subroutine
+#################################################
+#################################################
+## check isomount database exist	
+#################################################
+check_database(){
+	table_exist=`${sqlite} ${db} "select count(*) from sqlite_master where type='table' and name='mount'"`
+	if [ ! -f "${db}" ] || [ "$table_exist" == "0" ];
+	then
+		echo "create new isomount database"
+		/bin/rm -f ${db}
+		/bin/touch ${db}
+		$sqlite $db "create table mount(label,iso,point,size)"
+	else
+		echo "ISO Mount database is already exist."
+	fi
+}
+
+#################################################
+##  mount iso
+#################################################
+mount_iso(){
+	ret="1"	
+	if [ -f "/${raid_no}/data${iso}" ];
+	then
+		mkdir "/${raid_no}/data${mount_point}"
+		mknod /dev/loop${count} b 7 ${count}
+		/bin/mount -t udf,iso9660 -o loop=${dev_loop},user,utf8 "/${raid_no}/data${iso}" "/${raid_no}/data${mount_point}"
+		ret=$?
+		
+	fi
+
+	if [ "${ret}" != "0" ];
+	then
+		rmdir "/${raid_no}/data${mount_point}"
+		losetup -d /dev/loop${count}
+		${sqlite} ${db} "delete from mount where iso='${iso}'"
+	fi
+
+}
+
+#################################################
+##  umount iso
+##  para:action:1:record the loop
+#################################################
+umount_iso(){
+	action=$1
+	awk_point=`${string_cmd} "awk" "${mount_point}"`
+	cmdstr="df | awk '/ \/${raid_no}\/data${awk_point}$/{print \$1}'"
+	loop=`eval ${cmdstr}`
+	if [ "${loop}" == "" ];then
+		return 
+	fi
+        fuser -m -k "/${raid_no}/data${mount_point}"	
+	umount "/${raid_no}/data${mount_point}"
+  	
+	if [ "$?" != "0" ];then
+		echo 1
+		return 
+	fi
+
+	rmdir "/${raid_no}/data${mount_point}"
+	losetup -d ${loop}
+	
+	case "$action"
+	in
+		1|2)
+			if [ "$loop" != "" ];then
+				echo "$loop" >> $tmp_loop
+			fi
+        		;;
+	esac
+
+}
+
+#################################################
+##	mount all iso in isomount database
+#################################################
+start_iso() {
+	check_database
+	raid_exist=`df | grep "${master_raid}" | wc -l`
+	if [ ${raid_exist} != "0" -a -d "/${master_raid}/data" ];
+	then
+		count="20"
+		#db_list=`${sqlite} ${db} "select iso,point,label from mount"`
+		db_list=`${sqlite} ${db} "select point from mount"`
+		#db_list=`${string_cmd} "while" "${db_list}"`
+		echo -e "${db_list}" | \
+		while read info
+		do
+			if [ "${info}" != "" ]
+			then
+			  #iso=`echo ${info} | awk -F '|' '{print $1}'`
+				#mount_point=`echo ${info} | awk -F '|' '{print $2}'`
+				#folder=`echo ${info} | awk -F '|' '{print $3}'`
+				mount_point=${info}
+				sql_point=`${string_cmd} "sqlite" "${mount_point}"`
+				cmdstr="${sqlite} ${db} \"select iso from mount where point='${sql_point}'\""
+				iso=`eval ${cmdstr}`
+				cmdstr="${sqlite} ${db} \"select label from mount where point='${sql_point}'\""
+				folder=`eval ${cmdstr}`
+				folder=`${string_cmd} "awk" "${folder}"`
+				str="cat /etc/samba/smb.conf | awk -F'/' '/\/${folder}$/&&/path = /{print \$2}'"
+				raid_no=`eval $str`
+				
+				if [ "${raid_no}" == "raid" ];then
+					raid_no=${master_raid}
+				fi
+				
+				cmdstr="mount | grep "^/dev/loop" | grep 'on /${raid_no}/data${mount_point} type '"
+				mountpoint_exist=`eval ${cmdstr}`
+				if [ "${mountpoint_exist}" != "" ];then
+					echo "The iso [${iso}] had already been mounted."
+				        continue
+				fi
+				
+				ret="0"
+				while [ "${ret}" == "0" ];do
+					dev_loop=/dev/loop${count}
+					losetup ${dev_loop}
+					ret=`echo $?`
+					if [ "${ret}" == "0" ];then
+						count=$((${count}+1))
+					fi
+				done
+				
+				mount_iso
+				count=$((${count}+1))
+			fi
+		done
+	fi
+}
+
+#################################################
+##  umount all iso file 
+#################################################
+stop_iso() {
+	db_list=`${sqlite} ${db} "select point from mount"`
+	db_list=`${string_cmd} "while" "${db_list}"`
+	echo -e "${db_list}" | \
+	while read info
+	do
+		mount_point=${info}
+		sql_point=`${string_cmd} "sqlite" "${mount_point}"`
+		cmdstr="${sqlite} ${db} \"select label from mount where point='${sql_point}'\""
+		folder=`eval ${cmdstr}`
+		#folder=`${sqlite} ${db} "select label from mount where point=\"${mount_point}\""`
+		folder=`${string_cmd} "awk" "${folder}"`
+		str="cat /etc/samba/smb.conf | awk -F'/' '/\/${folder}$/&&/path = /{print \$2}'"		
+		raid_no=`eval $str`
+		
+		if [ "${raid_no}" == "raid" ];then
+			raid_no=${master_raid}
+		fi
+		umount_iso 0
+	done
+}
+
+#################################################
+##  deal with isomount db data, when folder action
+##  para:action :0 -> delete isomunt data
+##               1 -> update isomunt data
+#################################################
+db_action(){
+	action=$1
+	sql_point=`${string_cmd} "sqlite" "${mount_point}"`
+
+	if [ "$action" == "0" ];then		    
+		cmdstr="${sqlite} ${db} \"delete from mount where label='${sql_del_folder}' and point='${sql_point}'\""
+		eval $cmdstr
+	elif [ "$action" == "1" ];then	
+		sql_modify_folder=`${string_cmd} "sqlite" "${new_folder}"`
+		cmdstr="${sqlite} ${db} \"select iso from mount where label='${sql_del_folder}' and point='${sql_point}'\""
+		eval $cmdstr > $tmp_iso_file
+		cmdstr="${sqlite} ${db} \"select point from mount where label='${sql_del_folder}' and point='${sql_point}'\""
+		eval $cmdstr > $tmp_point_file
+		del_folder_len=`cat "$tmp_iso_file" | awk -F '/' '{print length($2)}'`
+		cmdstr="cat \"$tmp_point_file\" | awk '{len=$del_folder_len+2;print substr(\$0,len)}'"
+		point_loc=`eval $cmdstr`
+		modify_point="/${new_folder}${point_loc}"    
+    		cmdstr="cat \"$tmp_iso_file\" | awk '{len=$del_folder_len+2;print substr(\$0,len)}'"
+    		iso_loc=`eval $cmdstr`
+    		modify_iso="/${new_folder}${iso_loc}"
+		sql_modify_iso=`${string_cmd} "sqlite" "${modify_iso}"`
+		sql_modify_point=`${string_cmd} "sqlite" "${modify_point}"`
+		cmdstr="${sqlite} ${db} \"update mount set label='${sql_modify_folder}',iso='${sql_modify_iso}',point='${sql_modify_point}' where label='${sql_del_folder}' and point='${sql_point}'\""
+    		eval $cmdstr		
+	fi
+}
+
+#################################################
+##  umount iso for a folder
+##  para:action:0 -> delete isomunt data
+##              1 -> update isomunt data
+##       mount_action:recover -> do not umount action
+#################################################
+delete_iso() {
+	action=$1
+        mount_action=$2
+	if [ "${del_folder}" == "" ];then
+		echo "Please input folder name"
+		exit
+	fi
+	raid_no="raid${raid_id}"
+	sql_del_folder=`${string_cmd} "sqlite" "${del_folder}"`
+	if [ "$recursize" == "0" ];then
+		cmdstr="${sqlite} ${db} \"select point from mount where point like '%/${sql_del_folder}/%' and point not like '%/${sql_del_folder}/%/%'\""
+	else
+		if [ "$action_type" == "acl_umount" ];then
+			cmdstr="${sqlite} ${db} \"select point from mount where point like '%/${sql_del_folder}/%'\""
+		else
+			cmdstr="${sqlite} ${db} \"select point from mount where label='${sql_del_folder}'\""
+		fi
+	fi
+
+
+	db_list=`eval $cmdstr`
+	#db_list=`${sqlite} ${db} "select point from mount where label=\"${del_folder}\""`
+	#db_list=`${string_cmd} "while" "${db_list}"`
+	echo -e "${db_list}" | \
+	while read mount_point
+	do
+		if [ "${mount_point}" != "" ];then
+			if [ "${mount_action}" != "recover" ];then
+				fuser -m -k "/${raid_no}/data${mount_point}"
+				result=`umount_iso $action`
+
+				if [ "$result" == "1" ];then
+					echo 1
+					exit
+				fi
+			fi
+			if [ "$action" != "2" ];then
+				db_action $action
+			fi
+
+		fi
+	done
+}
+
+#################################################
+##  modify iso ,when folder rename
+#################################################
+modify_iso(){
+	case "$action_type"
+	in
+		updatedb|recover)
+			delete_iso 1 $action_type
+			rm $tmp_iso_file
+			rm $tmp_point_file
+			;;
+		acl_umount)
+			delete_iso 2 $action_type
+			rm $tmp_iso_file
+                        rm $tmp_point_file
+			;;
+		mount|acl_mount)
+			raid_no="raid${raid_id}"
+			iso_index="1"			 
+			sql_modify_folder=`${string_cmd} "sqlite" "${new_folder}"`
+			if [ "$recursize" == "0" ];then
+				cmdstr="${sqlite} ${db} \"select point from mount where point like '%/${sql_modify_folder}/%' and point not like '%/${sql_modify_folder}/%/%'\""
+			else
+				if [ "$action_type" == "acl_mount" ];then
+					cmdstr="${sqlite} ${db} \"select point from mount where point like '%/${sql_modify_folder}/%'\""
+				else
+					cmdstr="${sqlite} ${db} \"select point from mount where label='${sql_modify_folder}'\""
+				fi
+			fi
+			db_list=`eval $cmdstr`
+			#db_list=`${string_cmd} "while" "${db_list}"`
+			echo -e "${db_list}" | \
+			while read info
+			do
+				if [ "${info}" != "" ];
+				then
+					mount_point=`echo ${info}`
+					sql_point=`${string_cmd} "sqlite" "${mount_point}"`
+					cmdstr="${sqlite} ${db} \"select iso from mount where point='${sql_point}'\""
+					iso=`eval ${cmdstr}`
+					execstr="cat $tmp_loop | awk '{if(NR==$iso_index) print \$0}'"
+					dev_loop=`eval $execstr`
+			  		count=`echo "${dev_loop}" | awk -F'/' '{print substr($3,5)}'`
+			  		mount_iso
+					iso_index=$((${iso_index}+1))
+				fi
+			done
+			rm $tmp_loop
+			;;
+	esac	
+}
+#################################################
+##	Main code
+#################################################
+
+case "$1"
+in
+	boot|start)
+		check_raid
+		start_iso
+		;;
+	stop)			
+		stop_iso
+		;;
+	restart)
+		stop_iso
+		start_iso
+		;;
+	check_db)
+		check_database
+		;;	
+	delete)
+		delete_iso 0
+		;;
+	modify)
+		modify_iso
+		;;
+	*)			
+		echo "Usage: $0 { start | stop | restart | boot | check_db | delete folder_name}"
+		;;
+esac

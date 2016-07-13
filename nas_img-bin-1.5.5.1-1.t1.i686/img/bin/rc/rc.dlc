@@ -1,0 +1,18 @@
+#!/bin/sh
+act=$1
+if [ "${act}" = "start" ];then
+	for srv in bt ftp flv http
+	do
+		cd "/raid/sys/DLC/conf/${srv}"
+		for run in *
+		do
+			/bin/sh /raid/sys/DLC/conf/${srv}/"${run}"
+		done
+		cd -
+	done
+elif [ "${act}" = "stop" ];then
+	killall wget
+	killall rtorrent
+else
+	echo "rc.dlc start|sop"
+fi

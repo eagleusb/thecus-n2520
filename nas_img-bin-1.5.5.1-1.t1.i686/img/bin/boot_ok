@@ -1,0 +1,64 @@
+#!/bin/sh
+while [ ! -f "/tmp/boot_ok1" ]
+do
+  sleep 2
+done
+. /img/bin/function/libcommon
+
+PIC_MSG=/img/bin/pic.sh
+${PIC_MSG} LCM_MSG System Ready 248
+
+SLED=`/img/bin/check_service.sh warning_led`
+if [ "${SLED}" == "1" ];then
+  #Stop booting LED
+  ${PIC_MSG} SLED 1 1
+fi
+
+/img/bin/dom_flag.sh set dirty 0
+
+# some body open buzzer, don't turn off it
+if [ `cat /proc/thecus_io | grep "Buzzer:" | cut -d" " -f2` != "ON" ]; then
+  BEEP 1
+fi
+
+if [ ! -f /var/run/mum ];then
+  echo "OSD_LED 1" > /proc/thecus_io
+fi
+
+if [ `/bin/ps | grep [p]ost_create | wc -l` -eq 0 ]; then
+  echo "Busy 0" > /proc/thecus_io
+fi
+
+if [ -f /etc/.jbod_resize ]; then
+  echo "jbod resizing"
+  /img/bin/jbod_resize.sh < /etc/.jbod_resize > /dev/null 2>&1 &
+fi
+
+
+PWR_LED=`/img/bin/check_service.sh power_led`
+if [ "${PWR_LED}" = "usb" ];then
+  # for N0204 used, echo U_LED
+  echo "UF_LED 0" > /proc/thecus_io
+elif [ "${PWR_LED}" = "power" ];then
+  # for N2200 used, echo PWR_LED
+  echo "PWR_LED 1" > /proc/thecus_io
+else
+  FW_VER=`cat /etc/version`
+  if [ "`/img/bin/check_service.sh atmega168`" != "1" ];then 
+     ${PIC_MSG} LCM_MSG "Firmware Version" "${FW_VER}"
+  fi
+  sleep 3
+  ${PIC_MSG} PWR_S "" ""
+  if [ "`/img/bin/check_service.sh atmega168`" == "1" ];then
+       echo "" > /tmp/agent2_ok
+  fi     
+fi
+
+echo "PWR_S 2" > /proc/thecus_io
+echo "BTN_OP 4" > /proc/thecus_io
+/img/bin/ctrl_thecus_io.sh "`/img/bin/check_service.sh boot_ok_led`"
+
+LOGO_LED=`/usr/bin/sqlite /etc/cfg/conf.db "select v from conf where k='LOGO1_LED'"`
+/img/bin/ctrl_thecus_io.sh "LOGO1_LED:${LOGO_LED}"
+
+#/usr/bin/sounds/startupsound

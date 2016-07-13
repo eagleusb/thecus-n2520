@@ -1,0 +1,101 @@
+.shortcut-tree-remove-icon {
+    background-image:url(/theme/images/icons/fam/delete.gif) !important;
+}
+.shortcut-tree-add-icon {
+    background-image:url(/theme/images/icons/fam/add.gif) !important;
+}
+.shortcut-tree-load-icon {
+    background-image:url(/theme/images/icons/fam/application_go.png) !important;
+}
+
+.shortcut-pre-btn,
+.shortcut-next-btn {
+    position: absolute;
+    top: 4px;
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+}
+
+.shortcut-pre-btn {
+    left: 10px;
+    background: 0px 0px url(/theme/images/t/base/popup_utils.png) no-repeat !important;
+}
+
+.shortcut-pre-btn:active {
+    background: -16px 0px url(/theme/images/t/base/popup_utils.png) no-repeat !important;
+}
+
+.shortcut-next-btn {
+    left: 30px;
+    background: -32px 0px url(/theme/images/t/base/popup_utils.png) no-repeat !important;
+}
+
+.shortcut-next-btn:active {
+    background: -48px 0px url(/theme/images/t/base/popup_utils.png) no-repeat !important;
+}
+
+.scitem {
+    margin: 15px 10px 10px 10px;
+    width: 150px;
+    height: 140px;
+    text-align:center;  
+    float:left;
+    cursor:pointer;
+}
+
+.scitem:hover {
+    margin: 10px 10px 15px 10px;
+    width: 150px;
+    height: 140px;
+    text-align:center;
+    float:left;
+    cursor:pointer;
+}
+
+.scitem_small_group[bg=normal] {
+    width: 100%;
+    padding: 10px 8px 15px 8px;
+}
+
+.scitem_small_group[bg=gray] {
+    width: 100%;
+    padding: 10px 8px 15px 8px;
+    background: #C4D2E4;
+}
+
+.scitem_small_group_title {
+    font-weight: bold;
+}
+
+.scitem_small {
+    padding: 5px 6px 0px 6px;
+    width: 94px;
+    float: left;
+    cursor: pointer;
+    text-align: center;
+}
+
+.scitem_small img {
+    width: 48px;
+    height: 48px;
+    padding-top: 5px;
+}
+
+.scitem_small div {
+    width: 100%;
+    height: 42px;
+    line-height: 14px;
+    text-align: center;
+    text-overflow: ellipsis;
+    overflow: hidden;
+}
+
+.scitem_small:hover {
+    padding: 0px 6px 5px 6px;
+}
+
+.shortcut-group-view {
+    overflow-x: hidden;
+    overflow-y: auto;
+}

@@ -1,0 +1,196 @@
+#/bin/sh
+preview_size=$2
+task_path="/raid/data/_NAS_Picture_/Webcam"
+module_path="/usr"
+pgm="${module_path}/spcacat"
+sql_cmd="/usr/bin/sqlite /etc/cfg/conf.db"
+crond="/etc/cfg/crond.conf"
+
+preview(){
+  if [ `/bin/ps | grep "spcaserv -s ${preview_size}" |grep -v grep|wc -l` = "0" ];then
+    stop_serv
+    if [ "`pidof spcacat`" = "" ];then
+      cd ${module_path}
+      ./spcaserv -s ${preview_size} -g -f jpg  > /dev/null 2>&1 &
+      cd - > /dev/null 2>&1
+    fi
+  fi
+}
+
+stop_serv(){
+  killall spcaserv > /dev/null 2>&1
+  while [ "`pidof spcaserc`" != "" ]
+  do 
+  	sleep 2
+  	killall -9 spcaserv > /dev/null 2>&1
+  done
+}
+
+start_cat(){
+  if [ "`pidof spcacat`" != "" ];then
+    echo "spcacat is running!"
+  else
+    if [ "`pidof spcaserv`" != "" ];then
+      stop_serv
+    fi
+
+    umask 0
+    [ -d "${task_path}" ] || mkdir -p "${task_path}"
+    cd "${task_path}"
+      size=`${sql_cmd} "select v from conf where k='webcam_size'"`
+      interval=`${sql_cmd} "select v from conf where k='webcam_interval'"`
+      if [ "${size}" != '' -a "${interval}" != '' ];then
+        interval=$((${interval}*1000))
+        ${pgm} -d /dev/video0 -g -f jpg -s ${size} -p ${interval} > /dev/null 2>&1 &
+	sleep 10
+	if [ "`pidof spcacat`" != "" ];then
+	  set `pidof spcacat`
+	  if [ $# -lt 3 ];then
+	    if [ "`pidof spcacat`" = "" ];then
+	      ${pgm} -d /dev/video0 -g -f jpg -s ${size} -p ${interval} > /dev/null 2>&1 &
+	    fi
+	    sleep 10
+	    if [ "`pidof spcacat`" = "" ];then
+	      ${pgm} -d /dev/video0 -g -f jpg -s ${size} -p ${interval} > /dev/null 2>&1 &
+	    fi
+	  fi
+	else
+	  ${pgm} -d /dev/video0 -g -f jpg -s ${size} -p ${interval} > /dev/null 2>&1 &
+	  sleep 10
+	  if [ "`pidof spcacat`" = "" ];then
+	    ${pgm} -d /dev/video0 -g -f jpg -s ${size} -p ${interval} > /dev/null 2>&1 &
+	  fi
+	fi
+      fi
+    cd - > /dev/null 2>&1
+  fi 
+}
+
+stop_cat(){
+  task_pid=`pidof spcacat`
+  if [ "${task_pid}" != "" ];then
+    killall spcacat > /dev/null 2>&1
+    while [ "`pidof spcacat`" != "" ]
+    do 
+    	sleep 2
+    	killall -9 spcacat > /dev/null 2>&1
+    done
+    echo "webcam capture stop!"
+  else
+    echo "No spcacat can stop!"
+  fi
+}
+
+start(){
+  if [ "`${sql_cmd} "select v from conf where k='webcam_schedule_enable'"`" = '1' ];then
+    enable
+  fi
+}
+
+stop(){
+  disable
+}
+
+restart() {
+  stop
+  start
+}
+
+boot() {
+  if [ "`${sql_cmd} "select v from conf where k='webcam_schedule_enable'"`" = '1' ];then
+    enable
+  else
+    disable
+  fi
+}
+
+enable(){
+  always=`${sql_cmd} "select v from conf where k='webcam_schedule_always'"`
+  rc=`cat ${crond} | grep 'rc.webcam' | wc -l`
+
+  if [ "${always}" = 'on' ];then
+	if [ ${rc} != '0' ];then
+		rmrc
+	fi
+	start_cat
+  else
+  	if [ ${rc} = '0' ];then
+		mkrc
+  	fi
+  	check "no"
+  fi
+}
+
+mkrc(){
+	echo '0 * * * * /img/bin/rc/rc.webcam check' >> ${crond}
+	cat ${crond} | crontab - -u root
+}
+
+disable(){
+  if [ `cat ${crond} | grep 'rc.webcam' | wc -l` != '0' ];then
+	rmrc
+  fi
+  stop_cat
+  stop_serv
+}
+
+rmrc(){
+	cp ${crond} /tmp/crond.conf
+	cat /tmp/crond.conf | grep -v 'rc.webcam' > ${crond}
+	cat ${crond} | crontab - -u root
+}
+
+check(){
+  clearfd=$1
+  d=`date +%w`
+  h=`date +%H`
+  h=`expr ${h} + 0`
+  checkweek=`${sql_cmd} "select v from conf where k='webcam_schedule_w${d}'"`
+  checktime=`${sql_cmd} "select v from conf where k='webcam_schedule_t${h}'"`
+  if [ "${checktime}" = 'on' -a "${checkweek}" = 'on' ];then
+  	if [ "`${sql_cmd} "select v from conf where k='webcam_schedule_enable'"`" = '1' ];then
+		start_cat
+	fi
+  else
+	stop_cat
+	if [ "${clearfd}" != "no" ];then
+		sleep 3
+		dir=`date +%Y%m%d/%H/`
+		rm -rf ${task_path}/${dir}
+		dir=`date +%Y%m%d/`
+		if [ `ls "${task_path}/${dir}" | wc -l` -eq 0 ]; then
+			rm -rf ${task_path}/${dir}
+		fi
+	fi
+  fi
+}
+
+case "$1" in
+    boot)
+        boot
+        ;;
+    start)
+        start
+        ;;
+    stop)
+        stop
+        ;;
+    restart|reload)
+        restart
+        ;;
+    preview)
+        preview
+        ;;
+    enable)
+        enable
+        ;;
+    disable)
+        disable
+        ;;
+    check)
+        check
+        ;;
+    *)
+        echo $"Usage: $0 {boot|start|stop|restart|reload|preview|enable|disable|check}"
+        exit 1
+esac

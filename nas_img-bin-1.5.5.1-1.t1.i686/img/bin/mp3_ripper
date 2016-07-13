@@ -1,0 +1,23 @@
+#!/bin/sh
+dir=$1 
+if [ "$1" = "" ]; then
+  dir=wav-temp
+else
+  dir=wav-temp/$dir
+fi
+
+/usr/bin/lockfile /var/lock/cdmp3.lock
+running=`/bin/ps aux |grep "bladeenc" |grep -v "grep" |wc -l`
+if [ $running -le 1 ]; then
+
+  filename=`/usr/bin/find /raid/iTunes/$dir -iname "*.wav"`
+  for i in $filename
+  do
+    dir_name=`/usr/bin/dirname $i` 
+    dir_name=`/usr/bin/basename ${dir_name}`
+    /bin/mkdir /raid/iTunes/${dir_name}
+    /bin/chmod 777 /raid/iTunes/${dir_name}
+    /img/bin/bladeenc -delete -outdir=/raid/iTunes/${dir_name} $i
+  done
+fi
+rm -f /var/lock/cdmp3.lock

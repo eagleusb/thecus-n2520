@@ -1,0 +1,1034 @@
+#!/bin/sh
+#
+# Start the User Quote: Linux User Quota Management.
+#
+NAS_KEY="x86_64"
+QUOTAPATH="/usr"
+cmdsqlite="/usr/bin/sqlite"
+confdb="/etc/cfg/conf.db"
+ad_db="/raid/sys/ad_account.db"
+stackdb="/etc/cfg/stackable.db"
+tmp_file="/tmp/quota1.tmp"
+tmp_file2="/tmp/quota2.tmp"
+add_list="/tmp/quota.add"
+del_list="/tmp/quota.del"
+crond_conf="/etc/cfg/crond.conf"
+tmp_crond_conf="/tmp/backup_crond.conf"
+warnqutoa_sh="/img/bin/warnquota.sh"
+event="/img/bin/logevent/event"
+
+var_quota="/var/tmp/www/quota"
+need_sync="${var_quota}/need_sync"
+quota_conf="${var_quota}/quota_conf"
+quota_finish="${var_quota}/quota_finish"
+
+if [ "${NAS_KEY}" == "x86_32" ];then
+    stackable_path="/raid/stackable"
+elif [ "${NAS_KEY}" == "x86_64" ];then
+    maste_raid=`ls -l /var/tmp/rss | awk -F " " '{print $11}' | awk -F "/" '{print $4}'`
+    stackable_path="/${maste_raid}/data/stackable"
+fi
+    Quotadb="/etc/cfg/quota.db"
+    QuotaCheck="/sbin/quotacheck"
+    SetQuota="/usr/sbin/setquota"
+    QuotaOn="/sbin/quotaon"
+    QuotaOff="/sbin/quotaoff"
+    Quota="/usr/bin/quota"
+
+. /img/bin/function/libraid
+
+###########################################
+#    Check Quota Enable/Disable           #
+###########################################
+quota_enable=`$cmdsqlite $confdb "select v from conf where k='quota'"`
+ads_enable=`$cmdsqlite $confdb "select v from conf where k='winad_enable'"`
+if [ "${ads_enable}" != "1" ]; then
+    ads_enable=`$cmdsqlite $confdb "select v from conf where k='ldap_enabled'"`
+fi
+if [ "${NAS_KEY}" == "x86_32" ];then
+    md_list=`cat /proc/mdstat | grep 'md[0-9] ' | grep -v 'md0' | awk -F " " '/md/{printf("%s\n",$1)}' | awk -F "md" '/[0-9]/{printf("%s\n",$2)}' | sort -u`
+elif [ "${NAS_KEY}" == "x86_64" ];then
+    md_list=`cat /proc/mdstat | awk '/^md6[0-9] :/{print substr($1,3)}' | sort -u`
+    if [ "${md_list}" == "" ];then
+        md_list=`cat /proc/mdstat | awk -F: '/^md[0-9] :/{print substr($1,3)}' | sort -u`
+    fi
+fi
+
+if [ "${NAS_KEY}" == "x86_32" ];then
+    stack_list=`mount | awk ' /stackable/{print $3}' | awk -F "/" '{print $4}' | sort`
+elif [ "${NAS_KEY}" == "x86_64" ];then
+    stack_list=`mount | awk ' /stackable/{print $3}' | awk -F "/" '{print $5}' | sort`
+fi
+
+if [ ! -d ${var_quota} ];then
+    mkdir -p ${var_quota}
+fi
+
+initial_conf() {
+    if [ ! -f ${quota_conf} ]; then
+        lock=`ps | grep /img/bin/rc/rc.user_quota quota_sync`
+        if [ "$lock" == "" ]; then
+            lock=0
+        else
+            lock=1
+        fi
+        echo -e "sync_reboot:0\nsync_lock:$lock\nsync_cancel:0\nsync_show:0\nsync_type:0" > ${quota_conf}
+    fi
+}
+
+quota_conf()
+{
+    if [ "${quota_enable}" != "1" ];then
+      #echo "You don't have enable Quota!"
+      exit 1
+    fi
+
+    if [ ! -f ${quota_conf} ]; then
+        initial_conf
+    fi
+
+    act=$1
+    action=$2
+    conf=$3
+    if [ "${act}" == "set" ];then
+        status=`cat ${quota_conf}|sed "s/${action}:.*/${action}:${conf}/g"`
+        echo "${status}" > ${quota_conf}
+    elif [ "${act}" == "get" ];then
+        conf=`grep ${action} ${quota_conf} | cut -d: -f2`
+        if [ "${conf}" == "" ]; then
+            conf="0"
+        fi
+        echo $conf
+    fi
+}
+
+check_quota()
+{
+    check_type=$1
+    if [ "${quota_enable}" != "1" ];then
+      #echo "You don't have enable Quota!"
+      exit 1
+    fi
+
+    reboot=`quota_conf get sync_reboot`
+    if [ "${reboot}" == "1" ];then
+        #echo "You need to reboot NAS!"
+        exit 1
+    fi
+
+    if [ "${check_type}" == "lock" ];then
+        lock=`quota_conf get sync_lock`
+        if [ "${lock}" == "1" ];then
+            #echo "User Quota is syncing!"
+            exit 1
+        fi
+    fi
+}
+
+start_quota()
+{
+  check_quota lock
+  initial_Quotadb
+  if [ ! -f ${quota_conf} ]; then
+    initial_conf
+  fi
+  mount_quota
+  ${event} 997 454 info email
+}
+
+mount_quota()
+{
+    check_quota
+    raid_type=$1
+    show=0
+    if [ "${raid_type}" != "stack" ];then
+        for md in $md_list
+        do
+            if [ "${NAS_KEY}" == "x86_32" ];then
+                md=$(($md-1))
+                raid_path="/raid${md}/data"
+                db_file="/raid${md}/sys/raid.db"
+            elif [ "${NAS_KEY}" == "x86_64" ];then
+                raid_path="/raid${md}"
+                db_file="/raid${md}/sys/smb.db"
+            fi
+
+            mount_quota=`mount | grep " ${raid_path} " | awk -F " " '{if ($3=="'${raid_path}'") print $6}' | grep usrquota`
+            fs_type=`mount | grep " ${raid_path} " | awk -F " " '{if ($3=="'${raid_path}'") print $5}'`
+            if [ "${mount_quota}" == "" ];then
+                if ([ "${NAS_KEY}" == "x86_32" ] && [ "${fs_type}" == "ext3" ]) || [ "${fs_type}" == "ext4" ];then
+                    mount -o remount,usrquota,grpquota "${raid_path}"
+                elif [ "${fs_type}" == "xfs" ];then
+                    if [ "${NAS_KEY}" == "x86_32" ];then
+                        use_encrypt=`$cmdsqlite ${db_file} "select v from conf where k='encrypt'"`
+                        if [ "$use_encrypt" = "1" ];then
+                            dev_name="/dev/loop${md}"
+                        else
+                            dev_name="/dev/vg${md}/lv0"
+                        fi
+                    elif [ "${NAS_KEY}" == "x86_64" ];then
+                        use_encrypt=`$cmdsqlite ${db_file} "select v from conf where k='encrypt'"`
+                        if [ "$use_encrypt" = "1" ];then
+                            dev_name=`mount | grep " ${raid_path} " | awk -F " " '{if ($3=="'${raid_path}'") print $1}'`
+                        else
+                            dev_name="/dev/md${md}"
+                        fi
+
+                        raid_master=`$cmdsqlite ${db_file} "select v from conf where k='raid_master'"`
+                        if [ "${raid_master}" == "1" ];then
+                            usb_hdd="${raid_path}/data/USBHDD"
+                            esata_hdd="${raid_path}/data/eSATAHDD"
+
+                            for j in `mount | grep -E "${usb_hdd}" | cut -d" " -f1`
+                            do
+                                /bin/umount -l $j
+                            done
+
+                            for j in `mount | grep -E "${esata_hdd}" | cut -d" " -f1`
+                            do
+                                /bin/umount -l $j
+                            done
+                        fi
+                    fi
+
+                    fuser -mk "${raid_path}"
+                    umount -f "${raid_path}"
+                    result="$?"
+
+                    offset=0
+                    while [ ${offset} -lt 10 ] && [ "${result}" != "0" ]
+                    do
+                        sleep 1
+                        offset=`expr ${offset} + 1`
+
+                        fuser -mk "${raid_path}"
+                        umount -f "${raid_path}"
+                        result="$?"
+                    done
+                    if [ "${NAS_KEY}" == "x86_32" ];then
+                        lib_xfs_mount "${dev_name}" "${raid_path}" rw noatime "${quota_enable}"
+                    elif [ "${NAS_KEY}" == "x86_64" ];then
+                        mount -o noatime,nodiratime,nobarrier,inode64,uquota,grpquota ${dev_name} ${raid_path}
+                    fi
+                else
+                    continue
+                fi
+
+                raid_master=`$cmdsqlite ${db_file} "select v from conf where k='raid_master'"`
+                if [ "${NAS_KEY}" == "x86_64" ] && [ "${fs_type}" == "xfs" ] && [ "${raid_master}" == "1" ];then
+                    /img/bin/usb.hotplug add usb
+                    /img/bin/usb.hotplug add esata
+                fi
+            fi
+
+            lock=`quota_conf get sync_lock`
+            if [ "${lock}" == "0" ];then
+                if [ ! -f /raid$md/sys/quota_sync_time ] && [ "${show}" != "1" ];then
+                    show=1
+                fi
+
+                if [ ! -f "${raid_path}/aquota.user" ] && [ ! -f "${raid_path}/aquota.group" ];then
+                    cp "/etc/cfg/quota/aquota.user" "${raid_path}"
+                    cp "/etc/cfg/quota/aquota.group" "${raid_path}"
+                fi
+            fi
+        done
+    fi
+    
+    for stack in $stack_list
+    do
+        mount_quota=`mount | grep " ${stackable_path}/${stack} " | grep usrquota | awk -F " " '{print $6}'`
+        if [ "${mount_quota}" == "" ];then
+            dev_name=`mount | grep " ${stackable_path}/${stack} " | awk -F " " '{print $1}'`
+            mount -o remount,usrquota,grpquota ${dev_name}
+        else
+            continue
+        fi
+
+        lock=`quota_conf get sync_lock`
+        if [ "${lock}" == "0" ];then
+            stack_folder="${stackable_path}/${stack}"
+            if [ ! -f ${stack_folder}/quota_sync_time ] && [ "${show}" != "1" ];then
+                show=1
+            fi
+
+            if [ ! -f "${stack_folder}/aquota.user" ] && [ ! -f "${stack_folder}/aquota.group" ];then
+                cp "/etc/cfg/quota/aquota.user" "${stack_folder}"
+                cp "/etc/cfg/quota/aquota.group" "${stack_folder}"
+            fi
+        fi
+    done
+    
+    if [ "${show}" == "1" ];then
+        quota_conf set sync_show 1
+    fi
+    
+    if [ "${lock}" == "0" ];then
+        quota_check_on
+    fi
+}
+
+quota_check_on()
+{
+  check_quota
+  ${QuotaOn} -avug
+  if [ "${ads_enable}" == "0" ];then
+    wherestr="where role='local_user' or role='local_group'"
+  else
+    wherestr=""
+  fi
+
+  $cmdsqlite ${Quotadb} "SELECT * FROM quota ${wherestr}" > ${tmp_file}
+  cat "${tmp_file}" | \
+  while read target
+  do
+    name=`echo "${target}" | awk -F'|' '{print $1}'`
+    uid=`echo "${target}" | awk -F'|' '{print $2}'`
+    role=`echo "${target}" | awk -F'|' '{print $3}'`
+    size=`echo "${target}" | awk -F'|' '{print $4}'`
+    set_quota "${role}" "${uid}" "${size}"
+  done
+
+  cron_add
+}
+
+set_need_sync()
+{
+    check_quota lock
+    rm ${need_sync} > /dev/null 2>&1
+    need_sync_list=("$@")
+    if [ "${need_sync_list[1]}" != "" ];then
+        mount_quota=`mount | grep "raid" | grep usrquota,grpquota`
+        if [ "${mount_quota}" != "" ];then
+            for i in "${need_sync_list[@]:1:$#}"
+            do
+                raid_type=`echo ${i}|awk -F "|" '{printf("%s\n",$1)}'`
+                raid_name=`echo ${i}|awk -F "|" '{printf("%s\n",$2)}'`
+
+                if [ "${raid_type}" == "raid" ];then
+                    raid_list=`ls / |grep raid|awk -F "/" '{printf("%s\n",substr($1,5,6))}'`
+                    for j in ${raid_list}
+                    do
+                        if [ "${NAS_KEY}" == "x86_32" ];then
+                            db_file="/raid${j}/sys/raid.db"
+                        elif [ "${NAS_KEY}" == "x86_64" ];then
+                            db_file="/raid${j}/sys/smb.db"
+                        fi
+
+                        ret=`${cmdsqlite} ${db_file} "select v from conf where v='${raid_name}'"`
+                        if [ "${ret}" != "" ];then
+                            echo "${raid_type}|md$((${j}+1))" >> ${need_sync}
+                            break
+                        fi
+                    done
+                else
+                    echo "${i}" >> ${need_sync}
+                fi
+            done
+        fi
+    else
+        #echo "You no have Choose!"
+        exit 1
+    fi
+}
+
+get_need_sync()
+{
+    for md in $md_list
+    do
+        if [ "${NAS_KEY}" == "x86_32" ];then
+            md=$(($md-1))
+            raid_path="/raid${md}/data"
+            db_file="/raid${md}/sys/raid.db"
+        elif [ "${NAS_KEY}" == "x86_64" ];then
+            raid_path="/raid${md}"
+            db_file="/raid${md}/sys/smb.db"
+        fi
+        
+        mount_quota=`mount | grep " ${raid_path} " | awk -F " " '{if ($3=="'${raid_path}'") print $6}' | grep usrquota`
+        fs_type=`mount | grep " ${raid_path} " | awk -F " " '{if ($3=="'${raid_path}'") print $5}'`
+        raid_name=`${cmdsqlite} ${db_file} "select v from conf where k='raid_name'"`
+        if [ "${fs_type}" == "fuse" ];then
+            raid_status="raid|${raid_name}|QnSn|zfs|-1"
+        elif [ "${mount_quota}" == "" ];then
+            raid_status="raid|${raid_name}|QnSn|${fs_type}|-1"
+        elif [ "${mount_quota}" != "" ];then
+            if [ "${fs_type}" == "ext3" ];then
+                esti_time=`estimation_time ${md}`
+            else
+                esti_time="0"
+            fi
+            if [ ! -f /raid$md/sys/quota_sync_time ]; then
+                raid_status="raid|${raid_name}|QySn|${fs_type}|${esti_time}"
+            else
+                raid_status="raid|${raid_name}|QySy|${fs_type}|${esti_time}"
+            fi
+        fi
+        echo "${raid_status}"
+    done
+
+    for stack in $stack_list
+    do
+        stack_folder="${stackable_path}/${stack}"
+        mount_quota=`mount | grep " ${stack_folder} " | grep usrquota | awk -F " " '{print $6}'`
+        if [ "${mount_quota}" != "" ];then
+            if [ ! -f ${stack_folder}/quota_sync_time ]; then
+                stack_status="stack|${stack}|QySn|stack|0"
+            else
+                stack_status="stack|${stack}|QySy|stack|0"
+            fi
+        else
+            stack_status="stack|${stack}|QnSn|stack|-1"
+        fi
+        echo "${stack_status}"
+    done
+}
+
+stop_sync()
+{
+    check_quota
+    lock=`quota_conf get sync_lock`
+    if [ "${lock}" == "1" ];then
+        ${event} 997 473 info email
+        quota_conf set sync_cancel 1
+        rm ${need_sync} > /dev/null 2>&1
+        killall quotacheck > /dev/null 2>&1
+    fi
+}
+
+stop_quota()
+{
+  lock=`quota_conf get sync_lock`
+  if [ "${lock}" == "1" ];then
+    #echo "User Quota is syncing!"
+    exit 1
+  fi
+  
+  ${QuotaOff} -a
+
+  db_list=`$cmdsqlite ${Quotadb} "select id from quota where size!='0'"`
+  para="-u"
+
+  for tname in $db_list
+  do
+    for md in $md_list
+    do
+      if [ "${NAS_KEY}" == "x86_32" ];then
+        md=$(($md-1))
+        raid_path="/raid${md}/data"
+      elif [ "${NAS_KEY}" == "x86_64" ];then
+        raid_path="/raid${md}"
+      fi
+      
+      mount_quota=`mount | grep " ${raid_path} " | awk -F " " '{if ($3=="'${raid_path}'") print $6}' | grep usrquota`
+      fs_type=`mount | grep " ${raid_path} " | awk -F " " '{if ($3=="'${raid_path}'") print $5}'`
+      if [ "${mount_quota}" != "" ];then
+        if [ "${fs_type}" == "xfs" ];then
+          para_fs="-F xfs ${para}"
+        else
+          para_fs=${para}
+        fi
+        ${SetQuota} ${para_fs} "${tname}" 0 0 0 0 ${raid_path}
+        if [ "$quota_enable" != "1" ];then
+          rm "/raid${md}/sys/quota_sync_time"
+        fi
+      fi
+    done
+    
+    for stack in $stack_list
+    do
+      stack_folder="${stackable_path}/${stack}"
+      ${SetQuota} ${para} "${tname}" 0 0 0 0 ${stack_folder}
+      if [ "$quota_enable" != "1" ];then
+        rm "${stack_folder}/quota_sync_time"
+      fi
+    done
+  done
+
+  cron_del
+}
+
+initial_Quotadb()
+{
+    if [ ! -f ${Quotadb} ];then
+        if [ "${NAS_KEY}" == "x86_64" ];then
+            tableexist=`$cmdsqlite ${confdb} "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='quota'"`
+            if [ "${tableexist}" == "0" ];then
+                $cmdsqlite ${Quotadb} "CREATE TABLE quota(name,id,role,size,v1,v2)"
+            else
+                cp ${confdb} ${Quotadb}
+                $cmdsqlite ${Quotadb} "drop table conf"
+                $cmdsqlite ${Quotadb} "drop table nfs"
+                $cmdsqlite ${Quotadb} "drop table hot_spare"
+                $cmdsqlite ${Quotadb} "drop table mount"
+                $cmdsqlite ${Quotadb} "drop table nsync"
+                $cmdsqlite ${confdb} "drop table quota"
+            fi
+        fi
+    else
+        tableexist=`$cmdsqlite ${Quotadb} "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='quota'"`
+        if [ "${tableexist}" == "0" ];then
+            $cmdsqlite ${Quotadb} "CREATE TABLE quota(name,id,role,size,v1,v2)"
+        fi
+    fi
+}
+
+scan_local()
+{
+  if [ "${NAS_KEY}" == "x86_32" ];then
+    cat /etc/passwd|awk -F: '$3 > 1001 {print $1"|"$3}' | sort > ${tmp_file}
+  elif [ "${NAS_KEY}" == "x86_64" ];then
+    cat /etc/passwd|awk -F: '$3 > 999 {print $1"|"$3}' | sort > ${tmp_file}
+  fi
+
+  $cmdsqlite ${Quotadb} "select name,id from quota where role='local_user' order by name" | sort > ${tmp_file2}
+  diff -u ${tmp_file} ${tmp_file2} | grep '[-+].*|' | awk -F'|' '{print $1,$2}' | checkDB "local_user" | $cmdsqlite ${Quotadb}
+
+  #cat /etc/group|awk -F: '$3 > 99 {print $1"|"$3}' | sort > ${tmp_file}
+  #checkDB "local_group"
+}
+
+scan_ad()
+{
+  if [ ! -f "${ad_db}" ];then
+    #echo "The database of AD isn't exist."
+    exit 1
+  fi
+
+  $cmdsqlite ${ad_db} "select user,id from acl where role='ad_user' order by user" | sort> ${tmp_file}
+  $cmdsqlite ${Quotadb} "select name,id from quota where role='ad_user' order by name" | sort > ${tmp_file2}
+  diff -u ${tmp_file} ${tmp_file2} | grep '[-+].*|' | awk -F'|' '{print $1,$2}' | checkDB "ad_user" | $cmdsqlite ${Quotadb}
+
+
+  #$cmdsqlite ${ad_db} "select user,id from acl where role='ad_group' order by user" | sort> ${tmp_file}
+  #checkDB "ad_group"
+}
+
+checkDB()
+{
+    initial_Quotadb
+    trole="$1"
+    echo "BEGIN TRANSACTION;"
+    while read target
+    do
+        target=(${target})
+
+        name="${target[@]:0:1}"
+        len=`echo $name | wc -c`
+        rule="${name:0:1}"
+        name="${name:1:$len}"
+        id="${target[@]:1:1}"
+        if [ "$rule" == "-" ]; then
+            echo "insert into quota (name,id,role,size) values ('${name}','${id}','${trole}','0');"
+        else
+            echo "delete from quota where name='${name}' and id='${id}' and role='${trole}';"
+            set_quota ${trole} ${id} 0
+        fi
+    done
+    echo "COMMIT;"
+}
+
+user_list()
+{
+    check_quota lock
+    trole=$1
+    tname=$2
+
+    if [ "${tname}" == "" ];then
+        tname="%"
+    else
+        tname="${tname}%"
+    fi
+
+    if [ "${trole}" == "local_user" ];then
+        scan_local
+    elif [ "${trole}" == "ad_user" ];then
+        scan_ad
+    fi
+    user_list=`$cmdsqlite ${Quotadb} "select name, size from quota where role='${trole}' and name like '${tname}' order by name"`
+    echo "${user_list}"
+}
+
+check_used()
+{
+  trole=$1
+  tname=$2
+
+  if [ "${trole}" == "local_user" ] || [ ${trole} == "ad_user" ];then
+    para="uv"
+  else
+    para="gv"
+  fi
+
+  uid=`$cmdsqlite ${Quotadb} "select id from quota where role='$trole' and name='$tname'"`
+
+  for md in $md_list
+  do
+    if [ "${NAS_KEY}" == "x86_32" ];then
+      md=$(($md-1))
+      raid_path="/raid${md}/data"
+      db_file="/raid${md}/sys/raid.db"
+      use_encrypt=`$cmdsqlite ${db_file} "select v from conf where k='encrypt'"`
+      if [ "$use_encrypt" = "1" ];then
+        dev_name="/dev/loop${md}"
+      else
+        dev_name="/dev/vg${md}/lv0"
+      fi
+    elif [ "${NAS_KEY}" == "x86_64" ];then
+      raid_path="/raid${md}"
+      db_file="/raid${md}/sys/smb.db"
+      use_encrypt=`$cmdsqlite ${db_file} "select v from conf where k='encrypt'"`
+      if [ "$use_encrypt" = "1" ];then
+        dev_name=`mount | grep " /raid${md} " | awk -F " " '{if ($3=="'/raid${md}'") print $1}'`
+      else
+        dev_name="/dev/md${md}"
+      fi
+    fi
+
+    mount_quota=`mount | grep " ${raid_path} " | awk -F " " '{if ($3=="'${raid_path}'") print $6}' | grep usrquota`
+    fs_type=`mount | grep " ${raid_path} " | awk -F " " '{if ($3=="'${raid_path}'") print $5}'`
+    if [ "${fs_type}" == "fuse" ];then
+        fs_type="zfs"
+    fi
+    raid_name=`${cmdsqlite} ${db_file} "select v from conf where k='raid_name'"`
+    if [ "${mount_quota}" != "" ];then
+      used=`"${Quota}" -${para} "${uid}" | grep "${dev_name}" | awk -F " " '{print $2}'| sed 's/\*//g'`
+      if [ "${used}" == "" ] || [ "${used}" == "0" ];then
+        used=0
+      else
+        used=$(( ${used} / 1024 ))
+      fi
+
+      limit=`"${Quota}" -${para} "${uid}" | grep "${dev_name}" | awk -F " " '{print $3}'| sed 's/\*//g'`
+      if [ "${fs_type}" != "xfs" ] && [ ${limit} -gt 4293918720 ];then          #4095G
+        limit=4194304                                                           #4096G
+      else
+        limit=$(( $limit /1024 ))
+      fi
+      echo "${raid_name}|${fs_type}|${limit}|${used}"
+    else
+      echo "${raid_name}|${fs_type}|Unsupported|"
+    fi
+  done
+
+  for stack in $stack_list
+  do
+    mount_quota=`mount | grep " ${stackable_path}/${stack} " | grep usrquota | awk -F " " '{print $1}'`
+    if [ "${mount_quota}" != "" ];then
+      dev_name="${mount_quota}"
+      used=`${Quota} -${para} "${uid}" | grep "${dev_name}" | awk -F " " '{print $2}'| sed 's/\*//g'`
+      if [ "${used}" == "" ] || [ "${used}" == "0" ];then
+        used=0
+      else
+        used=$(( ${used} / 1024 ))
+      fi
+      
+      limit=`"${Quota}" -${para} "${uid}" | grep "${dev_name}" | awk -F " " '{print $3}'| sed 's/\*//g'`
+      if [ ${limit} -gt 4293918720 ];then           #4095G
+        limit=4194304                               #4096G
+      else
+        limit=$(( $limit / 1024 ))
+      fi
+      echo "${stack}|stack|${limit}|${used}"
+    else
+      echo "${stack}|stack|Unsupported|"
+    fi
+  done
+}
+
+set_quota()
+{
+  reboot=`quota_conf get sync_reboot`
+  if [ "${reboot}" == "1" ];then
+    #echo "You need to reboot NAS!"
+    exit 1
+  fi
+  trole=$1
+
+  if [ "${2}" == "" ];then
+    exit 1
+  fi
+  uid=$2
+
+  if [ "${3}" == "" ];then
+    tsize=0
+  else
+    tsize=$(( ${3} * 1024 ))
+  fi
+
+  if [ "${trole}" == "local_user" ] || [ "${trole}" == "ad_user" ];then
+    para="-u"
+  else
+    para="-g"
+  fi
+
+  tsize_hard=$(( ${tsize} * 21 / 20 ))
+
+  for md in $md_list
+  do
+    if [ "${NAS_KEY}" == "x86_32" ];then
+      md=$(($md-1))
+      raid_path="/raid${md}/data"
+    elif [ "${NAS_KEY}" == "x86_64" ];then
+      raid_path="/raid${md}"
+    fi
+    
+    mount_quota=`mount | grep " ${raid_path} " | awk -F " " '{if ($3=="'${raid_path}'") print $6}' | grep usrquota`
+    fs_type=`mount | grep " ${raid_path} " | awk -F " " '{if ($3=="'${raid_path}'") print $5}'`
+    if [ "${mount_quota}" != "" ];then
+      if [ "${fs_type}" == "xfs" ];then
+        para_fs="-F xfs ${para}"
+      else
+        para_fs=${para}
+        if [ ${tsize} -gt 4293918720 ];then                 #4095G
+          tsize=4294967295                                  #4096G
+          tsize_hard=4294967295                             #4096G
+        else
+          if [ ${tsize_hard} -gt 4293918720 ];then
+            tsize_hard=4294967295
+          fi
+        fi
+      fi
+      ${SetQuota} ${para_fs} "${uid}" ${tsize} ${tsize_hard} 0 0 "${raid_path}"
+    fi
+  done
+
+  for stack in $stack_list
+  do
+    stack_folder="${stackable_path}/${stack}"
+    mount_quota=`mount | grep " ${stack_folder} " | grep usrquota | awk -F " " '{print $6}'`
+    if [ "${mount_quota}" != "" ];then
+      if [ ${tsize} -gt 4293918720 ];then
+        tsize=4294967295
+        tsize_hard=4294967295
+      else
+        if [ ${tsize_hard} -gt 4293918720 ];then
+          tsize_hard=4294967295
+        fi
+      fi
+      ${SetQuota} ${para} "${uid}" ${tsize} ${tsize_hard} 0 0 "${stack_folder}"
+    fi
+  done
+}
+
+reset_quota()
+{
+  if [ "${ads_enable}" == "0" ];then
+    wherestr="where role='local_user' or role='local_group'"
+  else
+    wherestr=""
+  fi
+
+  $cmdsqlite ${Quotadb} "SELECT * FROM quota ${wherestr}" > ${tmp_file}
+  cat "${tmp_file}" | \
+  while read target
+  do
+    name=`echo "${target}" | awk -F'|' '{print $1}'`
+    uid=`echo "${target}" | awk -F'|' '{print $2}'`
+    role=`echo "${target}" | awk -F'|' '{print $3}'`
+                        
+    set_quota "${role}" "${uid}" "0" 
+  done
+}
+
+quota_sync()
+{
+    check_quota lock
+    if [ ! -f "${need_sync}" ];then
+        #echo "Can't find need_sync file!"
+        exit 1
+    fi
+    
+    ${event} 997 471 info email
+    quota_conf set sync_lock 1
+    
+    need_sync_list=`cat ${need_sync}`
+    if [ "${need_sync_list}" != "" ];then
+        rm ${quota_finish} > /dev/null 2>&1
+        sync_type="0"
+        ${QuotaOff} -a
+        raid_sync
+        stack_sync
+        rm ${need_sync} > /dev/null 2>&1
+
+        sleep 1
+        if [ "${sync_type}" == "1" ];then
+            echo "0" > /var/tmp/raidlock
+            /img/bin/service start
+        elif [ "${sync_type}" == "2" ];then
+            /img/bin/rc/rc.samba restart
+        fi
+
+        quota_check_on
+        quota_conf set sync_show 0
+
+        cancel=`quota_conf get sync_cancel`
+        if [ "$cancel" != "0" ]; then
+            quota_conf set sync_cancel 0
+        else
+            ${event} 997 472 info email
+        fi
+    fi
+    
+    quota_conf set sync_lock 0
+}
+
+raid_sync()
+{
+    raid_sync_list=`cat ${need_sync} | awk -F "|" '/raid/{printf("%s\n",$2)}' | awk -F "md" '/[0-9]/{printf("%s\n",$2)}' | sort -u`
+    if [ "${raid_sync_list}" != "" ];then
+        sync_type="1"
+        /img/bin/service stop nokill
+        echo "1" > /var/tmp/raidlock
+
+        for md in ${raid_sync_list}
+        do
+            md=$(($md-1))
+            if [ -f ${need_sync} ];then
+                if [ "${NAS_KEY}" == "x86_32" ];then
+                    raid_path="/raid${md}/data"
+                    db_file="/raid${md}/sys/raid.db"
+                    use_encrypt=`$cmdsqlite ${db_file} "select v from conf where k='encrypt'"`
+                    if [ "$use_encrypt" = "1" ];then
+                        dev_name="/dev/loop${md}"
+                    else
+                        dev_name="/dev/vg${md}/lv0"
+                    fi
+                elif [ "${NAS_KEY}" == "x86_64" ];then
+                    raid_path="/raid${md}"
+                    db_file="/raid${md}/sys/smb.db"
+                    use_encrypt=`$cmdsqlite ${db_file} "select v from conf where k='encrypt'"`
+                    if [ "$use_encrypt" = "1" ];then
+                        dev_name=`mount | grep " /raid${md} " | awk -F " " '{if ($3=="'/raid${md}'") print $1}'`
+                    else
+                        dev_name="/dev/md${md}"
+                    fi
+                fi
+                
+                fs_type=`mount | grep " ${raid_path} " | awk -F " " '{if ($3=="'${raid_path}'") print $5}'`
+                if [ "${fs_type}" == "xfs" ];then
+                    echo -e "raid${md}|1" >> ${quota_finish}
+                    date > /raid${md}/sys/quota_sync_time
+                else
+                    echo -e "raid${md}|\c" >> ${quota_finish}
+                    ${QuotaCheck} -vugm "${dev_name}"
+                    ret=$?
+                    if [ "${ret}" != "0" ];then
+                        echo "0" >> ${quota_finish}
+                    else
+                        echo "1" >> ${quota_finish}
+                        date > /raid${md}/sys/quota_sync_time
+                    fi
+                fi
+            else
+                echo -e "raid${md}|0" >> ${quota_finish}
+            fi
+        done
+    fi
+}
+
+stack_sync()
+{
+    stack_sync_list=`cat ${need_sync} | awk -F "|" '/stack/{printf("%s\n",$2)}' | sort`
+    if [ "${stack_sync_list}" != "" ];then
+        if [ "${sync_type}" == "1" ];then
+            /img/bin/rc/rc.initiator start
+        else
+            sync_type="2"
+            /img/bin/rc/rc.samba restart
+        fi
+
+        for stack in $stack_sync_list
+        do
+            if [ -f ${need_sync} ];then
+                stack_folder="${stackable_path}/${stack}"
+                dev_name=`mount | grep " ${stack_folder} " | awk -F " " '{print $1}'`
+                
+                echo -e "${stack}|\c" >> ${quota_finish}
+                ${QuotaCheck} -vugm "${dev_name}"
+                ret=$?
+                if [ "${ret}" != "0" ];then
+                    echo "0" >> ${quota_finish}
+                else
+                    echo "1" >> ${quota_finish}
+                fi
+                date > ${stack_folder}/quota_sync_time
+             else
+                echo -e "${stack}|0" >> ${quota_finish}
+            fi
+        done
+        if [ "${sync_type}" == "1" ];then
+            /img/bin/rc/rc.initiator stop
+        fi
+    fi
+}
+
+estimation_time()
+{
+    md=$1
+    base_time=0.07      #N5200XXX EXT3 80G quotacheck 5min
+
+    if [ "${NAS_KEY}" == "x86_32" ];then
+        db_file="/raid${md}/sys/raid.db"
+        use_encrypt=`$cmdsqlite ${db_file} "select v from conf where k='encrypt'"`
+        if [ "$use_encrypt" = "1" ];then
+            dev_name="/dev/loop${md}"
+        else
+            dev_name="/dev/vg${md}/lv0"
+        fi
+    elif [ "${NAS_KEY}" == "x86_64" ];then
+        db_file="/raid${md}/sys/smb.db"
+        use_encrypt=`$cmdsqlite ${db_file} "select v from conf where k='encrypt'"`
+        if [ "$use_encrypt" = "1" ];then
+            dev_name=`mount | grep " /raid${md} " | awk -F " " '{if ($3=="'/raid${md}'") print $1}'`
+        else
+            dev_name="/dev/md${md}"
+        fi
+    fi
+
+    raid_size=`df | grep "${dev_name}" |awk -F " " '{printf("%s\n",$2)}'`
+    raid_size=`expr ${raid_size} \/ 1048576`
+
+    esti_time=$(echo ${base_time} ${raid_size} | awk '{print $1*$2}')
+    esti_time=(`echo ${esti_time}|sed "s/\./ /g"`)
+    if [ "${esti_time[1]}" != "" ];then
+        echo "$((${esti_time[0]}+1))"
+    else
+        echo "${esti_time[0]}"
+    fi
+}
+
+check_finish()
+{
+    check_quota lock
+    if [ ! -f ${quota_finish} ];then
+        #echo "Can't find quota_finish file"
+        echo "fail"
+        exit 1
+    fi
+    sync_fail=`cat ${quota_finish} | awk -F "|" '/\|0/{print $1}'`
+    if [ "${sync_fail}" != "" ];then
+        #echo "${sync_fail}"
+        echo "fail"
+    else
+        #echo "User Quota sync is finish!"
+        echo "finish"
+    fi
+}
+
+reboot() {
+    quota_conf set sync_reboot 1
+}
+
+is_reboot() {
+    quota_conf get sync_reboot
+}
+
+is_lock() {
+    quota_conf get sync_lock
+}
+
+is_cancel() {
+    quota_conf get sync_cancel
+}
+
+
+###########################################################
+#Crontab add
+###########################################################
+cron_add(){
+  warnquota_cmd="${warnqutoa_sh} > /dev/null 2>&1"
+  cronjob_exist=`cat $crond_conf | grep "$warnquota_cmd"`
+  if [ "$cronjob_exist" != "" ];
+  then
+    echo "Your cron job is already exist."
+    return 
+  fi
+  #############################################################
+  #     Setting cron job
+  #############################################################
+    cron_job="0 0 * * * $warnquota_cmd"
+    /bin/cat $crond_conf > $tmp_crond_conf
+    /bin/mv $tmp_crond_conf $crond_conf
+    echo -e "$cron_job" >> $crond_conf
+    cat $crond_conf | /usr/bin/crontab - -u root
+}
+
+cron_del(){
+    /bin/cat $crond_conf | grep -v "$warnqutoa_sh" > $tmp_crond_conf
+    /bin/mv $tmp_crond_conf $crond_conf
+    cat $crond_conf | /usr/bin/crontab - -u root
+}
+
+#####  Check Raid #####
+Lraid_check_raid
+
+case "$1" in
+  boot|start)
+    start_quota
+    ;;
+  stop)
+    stop_quota
+    ;;
+  stop_sync)
+    stop_sync
+    ;;
+  scan_local)
+    scan_local
+    ;;
+  scan_ad)
+    scan_ad
+    ;;
+  user_list)
+    user_list $2 $3
+    ;;
+  check_used)
+    check_used $2 $3
+    ;;
+  set_quota)
+    set_quota $2 $3 $4
+    ;;
+  reset_quota)
+    reset_quota
+    ;;
+  mount_quota)
+    mount_quota $2
+    ;;
+  get_need_sync)
+    get_need_sync
+    ;;
+  set_need_sync)
+    set_need_sync "$@"
+    ;;
+  quota_sync)
+    quota_sync
+    ;;
+  get_conf)
+    quota_conf get $2
+    ;;
+  set_conf)
+    quota_conf set $2 $3
+    ;;
+  estimation_time)
+    estimation_time $2
+    ;;
+  check_finish)
+    check_finish
+    ;;
+  reboot)
+    reboot
+    ;;
+  is_reboot)
+    is_reboot
+    ;;
+  is_lock)
+    is_lock
+    ;;
+  is_cancel)
+    is_cancel
+    ;;
+  *)
+    echo "Usage: {boot|start|stop|stop_sync|user_list|check_used|set_quota|get_need_sync|set_need_sync|mount_raid_quota|mount_stack_quota|quota_sync|get_conf|set_conf|is_lock|is_cancel}" >&2
+    exit 1
+    ;;
+esac

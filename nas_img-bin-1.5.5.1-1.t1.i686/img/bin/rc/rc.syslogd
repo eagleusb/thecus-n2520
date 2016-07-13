@@ -1,0 +1,247 @@
+#!/bin/sh
+#####################################
+#raid_name="raid"
+sqlite="/usr/bin/sqlite"
+confdb="/etc/cfg/conf.db"
+TMPIPV6EN="/var/tmp/ipv6_en"
+
+syslog_cmd="/sbin/syslog-ng"
+syslog_temp="/tmp/syslog-ng"
+syslog_conf_file="${syslog_temp}/syslog-ng.conf"
+syslog_persist_file="${syslog_temp}/syslog-ng.persist"
+syslog_control_socket="${syslog_temp}/syslog-ng.ctl"
+syslog_pid_file="${syslog_temp}/syslog-ng.pid"
+syslog_version="3.3"
+VALIDATE_SH="/img/bin/function/validate.sh"
+
+ENABLE_IPV6=`cat ${TMPIPV6EN}`
+
+get_db(){
+    syslogd_db(){
+        db_value=(syslogd_enabled syslogd_target syslogd_ip syslogd_folder syslogd_server syslogd_level \
+                 access_log_enabled smb_log apple_log ftp_log iscsi_log sshd_log)
+        echo "BEGIN TRANSACTION;"
+        for value in ${db_value[@]}; do
+            echo "SELECT * FROM conf WHERE k='$value';"
+        done
+        echo "COMMIT;"
+    }
+    syslogd_db | $sqlite -separator '=' $confdb
+}
+
+eval `get_db`
+dont_check_raid=""
+
+check_raid(){
+  sys_path=`/bin/ls -l /raid/sys | awk -F' ' '{printf $11}'`
+  data_path=`/bin/ls -l /raid/data | awk -F' ' '{printf $11}'`
+  if [ "$sys_path" == "" ] || [ "$data_path" == "" ];then
+    echo "Your Master RAID link is not exist"
+    exit
+  fi
+}
+if [ "$syslogd_folder" == "" ];then
+      syslogd_folder="NAS_Public" 
+fi
+
+syslod_ng(){
+  if [ "$syslogd_server" == "1" ];then
+    if [ "$ENABLE_IPV6" == "1" ];then
+      udp="udp6(port(514))"
+    else
+      udp="udp()"
+    fi
+    echo "source src { unix-dgram(\"/dev/log\" so_rcvbuf(131072)); internal(); ${udp}; };" >> $syslog_conf_file
+    echo "destination information { file(\"/raid/ftproot/${syslogd_folder}/syslog/information\"); };" >> $syslog_conf_file
+    echo "destination error { file(\"/raid/ftproot/${syslogd_folder}/syslog/error\"); };" >> $syslog_conf_file
+    echo "destination warning { file(\"/raid/ftproot/${syslogd_folder}/syslog/warning\"); };" >> $syslog_conf_file
+    echo "filter f_info { level(info); };" >> $syslog_conf_file
+    echo "filter f_error { level(error); };" >> $syslog_conf_file
+    echo "filter f_warning { level(warning); };" >> $syslog_conf_file
+    echo "log { source(src); filter(f_info); destination(information); };" >> $syslog_conf_file
+    echo "log { source(src); filter(f_error); destination(error); };" >> $syslog_conf_file
+    echo "log { source(src); filter(f_warning); destination(warning); };" >> $syslog_conf_file
+  else
+    echo "source src { unix-dgram(\"/dev/log\" so_rcvbuf(8192)); internal(); };" >> $syslog_conf_file
+    if [ "$syslogd_target" == "1" ];then
+      IPv6=`$VALIDATE_SH IPV6 $syslogd_ip`
+      if [ "$IPv6" != "1" ];then
+        echo "destination syslog_server { udp6(\"$syslogd_ip\" port(514)); };" >> $syslog_conf_file
+      else  
+        echo "destination syslog_server { udp(${syslogd_ip}); };" >> $syslog_conf_file
+      fi
+      
+      if [ "$syslogd_level" == "all"  ];then
+        sys_level="level(info) or level(warn) or level(err)"
+      elif [ "$syslogd_level" == "warning" ];then
+        sys_level="level(warn) or level(err)"
+      else
+        sys_level="level(err)"
+      fi
+      
+      echo "filter kern { (${sys_level}) and not facility(user) and not facility(kern) and not facility(daemon); };" >> $syslog_conf_file
+      echo "log { source(src); filter(kern); destination(syslog_server); };" >> $syslog_conf_file
+                                                 
+    else
+      echo "destination error { file(\"/raid/ftproot/${syslogd_folder}/syslog/error\"); };" >> $syslog_conf_file
+      echo "filter f_error { (level(err)) and not facility(user) and not facility(kern) and not facility(daemon); };" >> $syslog_conf_file
+      echo "log { source(src); filter(f_error); destination(error); };" >> $syslog_conf_file
+    
+      if [ "$syslogd_level" == "warning" ] || [ "$syslogd_level" == "all" ];then
+        echo "destination warning { file(\"/raid/ftproot/${syslogd_folder}/syslog/warning\"); };" >> $syslog_conf_file
+        echo "filter f_warning { (level(warning)) and not facility(user) and not facility(kern) and not facility(daemon); };" >> $syslog_conf_file
+        echo "log { source(src); filter(f_warning); destination(warning); };" >> $syslog_conf_file
+      fi
+      
+      if [ "$syslogd_level" == "all"  ];then
+        echo "destination information { file(\"/raid/ftproot/${syslogd_folder}/syslog/information\"); };" >> $syslog_conf_file
+        echo "filter f_info { (level(info)) and not facility(user) and not facility(kern) and not facility(daemon); };" >> $syslog_conf_file
+        echo "log { source(src); filter(f_info); destination(information); };" >> $syslog_conf_file
+      fi 
+    fi
+  fi
+}
+
+access_log(){
+    access_log_path="/var/run/access_log"
+
+    if [ "${access_log_enabled}" != "1" ];then
+        return            
+    fi
+
+    if [ ! -d "${access_log_path}" ];then
+        mkdir -p "${access_log_path}"            
+    fi
+
+    if [ "${sshd_log}" == "1" ];then
+        rm -f ${access_log_path}/sshd
+        mkfifo ${access_log_path}/sshd
+        echo "filter f_sshd { program('^stond') and (message('Closing') or message('Accepted password') or message('Failed password')); };" >> $syslog_conf_file
+        echo "destination sshd { pipe(\"${access_log_path}/sshd\" template(\"\$YEAR-\$MONTH-\$DAY \$HOUR:\$MIN:\$SEC|\$PID|\$MSG\\n\")); };" >> $syslog_conf_file
+        echo "log { source(src); filter(f_sshd); destination(sshd); };" >> $syslog_conf_file
+    fi
+    
+    if [ "${smb_log}" == "1" ];then
+        rm -f ${access_log_path}/smbd
+        mkfifo ${access_log_path}/smbd
+        echo "filter f_smbd { program('^smbd') and not message('IPC_') and facility(local5); };" >> $syslog_conf_file
+        echo "destination smbd { pipe(\"${access_log_path}/smbd\" template(\"\$YEAR-\$MONTH-\$DAY \$HOUR:\$MIN:\$SEC|\$MSG\\n\")); };" >> $syslog_conf_file
+        echo "log { source(src); filter(f_smbd); destination(smbd); };" >> $syslog_conf_file
+    fi
+    
+    if [ "${ftp_log}" == "1" ];then
+        rm -f ${access_log_path}/ftpd
+        mkfifo ${access_log_path}/ftpd
+        echo "filter f_ftpd { facility(ftp) and (message('Anonymous') or message('now') or message('NOTICE') or message('Authentication failed') or message('created') or message('removed') or message('Logout')); };" >> $syslog_conf_file
+        echo "destination ftpd { pipe(\"${access_log_path}/ftpd\" template(\"\$YEAR-\$MONTH-\$DAY \$HOUR:\$MIN:\$SEC|\$MSG\\n\")); };" >> $syslog_conf_file
+        echo "log { source(src); filter(f_ftpd); destination(ftpd); };" >> $syslog_conf_file
+    fi
+    
+    if [ "${apple_log}" == "1" ];then
+        rm -f ${access_log_path}/afpd
+        mkfifo ${access_log_path}/afpd
+        echo "filter f_afpd { program('^afpd') and (message('Login') or message('logout') or message('failure')); };" >> $syslog_conf_file
+        #echo "filter f_afpd { program('^afpd'); };" >> $syslog_conf_file
+        echo "destination afpd { pipe(\"${access_log_path}/afpd\" template(\"\$YEAR-\$MONTH-\$DAY \$HOUR:\$MIN:\$SEC|\$PID|\$MSG\\n\")); };" >> $syslog_conf_file
+        echo "log { source(src); filter(f_afpd); destination(afpd); };" >> $syslog_conf_file
+    fi
+    
+    if [ "${iscsi_log}" == "1" ];then    
+        rm -f ${access_log_path}/iscsi
+        mkfifo ${access_log_path}/iscsi
+        echo "filter f_iscsi {(message('iSCSI logout. ') or message('iSCSI login. ') or message('Received iSCSI login request from') or message('is not authorized to access iSCSI target')); };" >> $syslog_conf_file
+        #echo "filter f_iscsi { level(debug); };" >> $syslog_conf_file
+        echo "destination iscsi { pipe(\"${access_log_path}/iscsi\" template(\"\$YEAR-\$MONTH-\$DAY \$HOUR:\$MIN:\$SEC|\$MSG\\n\")); };" >> $syslog_conf_file
+        echo "log { source(src); filter(f_iscsi); destination(iscsi); };" >> $syslog_conf_file
+    fi
+}
+
+assemble_syslog_conf() {
+    if [ ! -d "${syslog_temp}" ];
+    then
+        mkdir -p ${syslog_temp}
+    fi
+    echo "@version: $syslog_version" > $syslog_conf_file
+    echo "@include \"scl.conf\"" >> $syslog_conf_file
+    echo "options { stats_freq(0); create_dirs(yes); dir_perm(0777); perm(0644); };" >> $syslog_conf_file
+    if [ "$syslogd_enabled" == "1" ];then
+        syslod_ng
+    else
+        echo "source src { unix-dgram(\"/dev/log\" so_rcvbuf(8192)); internal(); };" >> $syslog_conf_file
+    fi
+    access_log
+}
+
+start(){
+    stop
+    sleep 1
+    #if all log is not enable, dont_check_raid=1
+    local log="smb_log apple_log ftp_log iscsi_log sshd_log"
+    local enable dont_check_raid=0
+    for val in $log; do
+        enable=`eval "echo $"${val}`
+        [ -z "$enable" ] && enable=0
+        let "dont_check_raid = $dont_check_raid | $enable"
+    done
+    let "dont_check_raid = !$dont_check_raid"
+    if [ "$dont_check_raid" == "1" -a "$syslogd_enabled" != "1" ];then
+        exit
+    fi
+    
+    if [ "${syslogd_server}" == "0" -a "${syslogd_target}" == "1" ] || [ "${dont_check_raid}" == "1" ];then
+        make_flag="1"
+    else
+        check_raid
+        make_flag="0"
+    fi
+    
+    if [ ! -d "/raid/data/ftproot/$syslogd_folder/syslog" ] && [ "${make_flag}" != "1" ];then
+        mkdir -p "/raid/data/ftproot/$syslogd_folder/syslog"
+	chown nobody:nogroup "/raid/data/ftproot/$syslogd_folder/syslog"
+    fi
+    assemble_syslog_conf
+    $syslog_cmd -R $syslog_persist_file -c $syslog_control_socket -p $syslog_pid_file -f $syslog_conf_file 
+    /sbin/klogd -c 4
+    echo "Syslogd work now"
+#   /img/bin/logevent/event 997 443 info email
+    killall access_log.sh
+    if [ "$smb_log" == "1" ] || [ "$apple_log" == "1" ] || [ "$ftp_log" == "1" ] || [ "$iscsi_log" == "1" ] || [ "$sshd_log" == "1" ];then
+        /img/bin/access_log.sh "$smb_log" "$apple_log" "$ftp_log" "$iscsi_log" "$sshd_log" > /dev/null 2>&1 &
+    fi
+}
+stop(){
+    is_process=`/bin/ps www | grep '/sbin/syslog-ng' | grep -v grep`            
+    if [ "$is_process" != "" ];then
+#       /img/bin/logevent/event 997 444 info email
+        killall klogd
+        killall syslog-ng
+        killall access_log.sh        
+    fi
+    rm -rf ${syslog_temp}
+}
+
+restart(){
+  stop
+  sleep 1
+  start
+}
+#################################################
+##      Main code
+#################################################
+
+case "$1"
+in
+  start|boot)
+    start
+  ;;
+  stop)
+    stop
+  ;;
+  restart)
+    restart
+  ;;
+  *)
+    echo "Usage: $0 {start|stop|restart|boot}"
+  ;;
+esac
+exit 0

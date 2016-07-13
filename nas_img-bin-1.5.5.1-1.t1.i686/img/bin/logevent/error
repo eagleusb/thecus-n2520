@@ -1,0 +1,287 @@
+#!/bin/sh
+OID="1.3.6.1.4.1.38243"
+snmp_trap_cmd="/usr/bin/snmptrap"
+snmp_enabled=`/usr/bin/sqlite /etc/cfg/conf.db "select v from conf where k='snmp_enabled'"`
+snmp_community=`/usr/bin/sqlite /etc/cfg/conf.db "select v from conf where k='snmp_read_comm'"`
+snmp_trap_target_ip=`/usr/bin/sqlite /etc/cfg/conf.db "select v from conf where k like'snmp_trap_target_ip%'"`
+snmp_trap_port="162"
+open_snmpd=`/img/bin/check_service.sh netsnmp`
+enable_led="YES"
+
+if [ $# -lt 1 ]; then 
+echo "Need At Least one argument : Event ID"
+exit 1
+fi
+
+. /img/bin/logevent/sysinfo
+. /img/bin/logevent/setsyslog
+event_id=$1
+param_1=${2}
+err_log_path=$log_path"error"
+tmp_err_log_path=$log_path"error_dist"
+
+if [ "`/img/bin/check_service.sh warning_led`" == "0" ];then
+    	enable_led="NO"
+
+elif [ "`/usr/bin/sqlite /etc/cfg/conf.db "select v from conf where k='notif_led'"`" == "0" ];then
+    	enable_led="NO"
+fi
+
+Usage(){
+echo "Event : "$1
+echo "Argument Error : "$2
+}
+
+      case $event_id in
+           224)
+	              error_msg="The system [${host_name}] found UPS battery is bad and needs to be replaced."
+             ;;
+           225)
+	              error_msg="The system [${host_name}] found UPS is unavailable."
+             ;;
+           226)
+	              error_msg="The system [${host_name}] found UPS has low battery less then user define ,and system will auto shutdown."
+             ;;
+           301)
+#006-301
+	      username=$2
+	      if [ $# -eq 2 ]; then
+	      error_msg="Add user failed: User name [${username}] is reserved."
+	      else
+	      Usage "301" "UserName"
+	      fi
+           ;;
+           302)
+#007-302
+	      username=$2
+	      if [ $# -eq 2 ]; then
+	      error_msg="Add user [${username}] failed: User [${username}] exists!"
+	      else
+	      Usage "302" "UserName"
+	      fi
+           ;;
+           303)
+#010-303
+	      groupname=$2
+	      if [ $# -eq 2 ]; then
+	              error_msg="Add group failed: Group name ${groupname} is reserved."
+	      else
+	      Usage "303" "GroupName"
+	      fi
+             ;;
+           304)
+#014-304
+	      username=$2
+	      if [ $# -eq 2 ]; then
+              error_msg="User ${username} password change failed: Invalid password!"
+	      else
+	      Usage "304" "UserName"
+	      fi
+	   ;;
+           305)
+#021-305
+              username=$2
+              ip=$3
+              if [ $# -eq 3 ]; then
+              error_msg="User ${username} logged in fail from ${ip}"
+              else
+              Usage "305" "UserName IP"
+              fi
+           ;;
+           306)
+#023-306
+              new_host_name=$2
+              if [ $# -eq 2 ]; then
+              error_msg="Set server name failed: Server name [${new_host_name}] is using by other machine!"
+              else
+              Usage "306" "New_Host_Name"
+              fi
+           ;;
+           307)
+#027-307
+              error_msg=" Error: The system [${host_name}] temperature is higher than 70 degrees.  The system is automatically shut off."
+           ;;
+           308)
+#031-308
+              error_msg="The system [${host_name}]'s fan has failed."
+           ;;
+           309)
+#032-309
+              error_msg="The system [${host_name}]'s fan working normally."
+           ;;
+           310)
+#035-310
+              error_msg="The system [${host_name}] $2 network was unplugged."
+	      enable_led="NO"
+           ;;
+           311)
+#036-311
+		ADS=$2
+              if [ $# -eq 2 ]; then
+              error_msg="The ADS server ${ADS} connection was lost."
+              else
+              Usage "311" "ADS"
+              fi
+           ;;
+           312)
+#039-312
+              error_msg="The RAID [${param_1}] on system [${host_name}] is suffering the severe disk problem."
+           ;;
+           313)
+#043-313
+              error_msg="The RAID [${param_1}] on system [${host_name}] change to degrade mode."
+           ;;
+           314)
+#050-314
+		Disk_ID=$2
+              if [ $# -eq 2 ]; then
+              error_msg=" Disk ${Disk_ID} on [${host_name}] has failed."
+              else
+              Usage "314" "Disk_ID"
+              fi
+           ;;
+           315)
+#052-315
+		Disk_ID=$2
+              if [ $# -eq 2 ]; then
+              error_msg="Hard Disk ${Disk_ID} on [${host_name}] has an I/O error."
+              else
+              Usage "315" "Disk_ID"
+              fi
+           ;;
+           316)
+#054-316
+              error_msg="Flash was full"
+            ;;
+           317)
+#056-317
+              raid_name=$2
+              error_msg="The system [${host_name}]'s $raid_name disk usage has reached 90%."
+           ;;
+           318)
+#062-318
+		Task=$2
+		Fail_result=$3
+              if [ $# -eq 3 ]; then
+              error_msg="Network Synchronization: Task ${Task} has failed due to ${Fail_result}."
+              else
+              Usage "318" "Task"
+              fi
+           ;;
+           319)
+#063-319
+		Task=$2
+              if [ $# -eq 2 ]; then
+              error_msg="Network Synchronization: Task ${Task} has failed, because previous unfinished task."
+              else
+              Usage "319" "Task"
+              fi
+           ;;
+           320)
+#066-320
+		Task=$2
+              if [ $# -eq 2 ]; then
+              error_msg="Network Synchronization: Restore Task ${Task} has failed."
+              else
+              Usage "320" "Task"
+              fi
+           ;;
+           321)
+              partition=$2
+              if [ $# -eq 2 ]; then
+              error_msg="found Partition ${partition} and mount fail"
+              else
+              Usage "321" "partition"
+              fi
+           ;;
+           322)
+
+              error_msg="One touch copy fail"
+           ;;
+           323)
+#083-323
+              error_msg="The system [${host_name}] LAN network was unplugged."
+	      enable_led="NO"
+           ;;
+           330)
+
+              error_msg="Swap Disk Damage"
+           ;;
+           331)
+
+              error_msg="Create swap Fail"
+           ;;
+           332)
+
+              error_msg="Create system dom backup Fail"
+           ;;
+           333)
+
+              error_msg="Add HA raid failed, size is not match!"
+           ;;
+           334)
+
+              error_msg="Enable HA RAID Fail, no RAID for HA found, go disable HA"
+           ;;
+           335)
+
+              error_msg="HA is enabled, but the version of active and standby nas is different!"
+           ;;
+           336)
+
+              error_msg="Enable HV raid failed."
+           ;;
+           337)
+
+              error_msg="Disable HV RAID Fail."
+           ;;
+           338)
+
+              error_msg="The HA RAID UUID is not match, please check HA RAID disk!"
+           ;;
+           339)
+              DISK_ID=$2
+              if [ $# -eq 2 ]; then
+              error_msg="Disk ${DISK_ID} on [${host_name}] was auto rebuild failed."
+              else
+              Usage "339" "RAID_ID"
+              fi
+           ;;
+           997)
+              event_message_id="$2"
+              error_msg="$3"
+           ;;
+           999)
+              error_msg="$2"
+           ;;
+	   *)
+	      echo "No Such Event ID In Error Pool"
+	      enable_led="NO"
+	   ;;
+      esac
+
+if [ "$enable_led" == "YES" ];then
+      echo 0 0 SLED 0 > /var/tmp/oled/pipecmd
+fi
+
+
+if [ "${error_msg}" != "" ]; then
+      ###########################################################
+      # Send trap to snmptrap target ip
+      ###########################################################
+      if [ "$event_id" == "997" ];
+      then
+        event_id="$event_message_id"
+      fi
+      $sqlite $db_path "insert into sysinfo(Date_time,Details,level) values('${time_stamp}',\"[${host_name}] : ${error_msg}\",'Error')"
+      echo "${event_id}: ${time_stamp} ${host_name} : ${error_msg}" >> $tmp_err_log_path
+      for snmp_ip in ${snmp_trap_target_ip}
+      do
+          if [ "$snmp_enabled" == "1" ] && [ "$snmp_community" != "" ] && [ "$snmp_ip" != "" ] && [ "$open_snmpd" == "1" ];
+          then
+            ${snmp_trap_cmd} -v 2c -c ${snmp_community} ${snmp_ip}:${snmp_trap_port} "" ${OID} ${OID}.${event_id} s "${error_msg}"
+          fi
+      done
+      
+      set_syslog "error" "${error_msg}"
+fi

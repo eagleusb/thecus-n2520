@@ -1,0 +1,833 @@
+#!/bin/sh
+#
+#	High-Availability Apache/IBMhttp control script
+# 
+# apache (aka IBMhttpd)
+#
+# Description:	starts/stops apache web servers.
+#
+# Author:	Alan Robertson
+#		Sun Jiang Dong
+#
+# Support:	linux-ha@lists.linux-ha.org
+#
+# License:	GNU General Public License (GPL)
+#
+# Copyright:	(C) 2002-2005 International Business Machines
+#
+#
+# An example usage in /etc/ha.d/haresources: 
+#       node1  10.0.0.170 apache::/etc/httpd/conf/httpd.conf
+#       node1  10.0.0.170 IBMhttpd
+#
+# Our parsing of the Apache config files is very rudimentary.
+# It'll work with lots of different configurations - but not every
+# possible configuration.
+#
+# Patches are being accepted ;-)
+#
+# OCF parameters:
+#  OCF_RESKEY_configfile
+#  OCF_RESKEY_httpd
+#  OCF_RESKEY_port
+#  OCF_RESKEY_statusurl
+#  OCF_RESKEY_options
+#  OCF_RESKEY_testregex
+#  OCF_RESKEY_client
+#  OCF_RESKEY_testurl
+#  OCF_RESKEY_testregex10
+#  OCF_RESKEY_testconffile
+#  OCF_RESKEY_testname
+#  OCF_RESKEY_envfiles
+
+
+: ${OCF_FUNCTIONS_DIR=${OCF_ROOT}/resource.d/heartbeat}
+. ${OCF_FUNCTIONS_DIR}/.ocf-shellfuncs
+HA_VARRUNDIR=${HA_VARRUN}
+
+#######################################################################
+#
+#	Configuration options - usually you don't need to change these
+#
+#######################################################################
+#
+IBMHTTPD=/usr/sbin/httpd
+HTTPDLIST="/sbin/httpd2 /usr/sbin/httpd2 /usr/sbin/apache2 /sbin/httpd /usr/sbin/httpd /usr/lib/ocf/resource.d/heartbeat/apache $IBMHTTPD"
+MPM=/usr/share/apache2/find_mpm
+if
+  [ -x $MPM ]
+then
+  HTTPDLIST="$HTTPDLIST `$MPM 2>/dev/null`"
+fi
+
+# default options for http clients
+# NB: We _always_ test a local resource, so it should be
+# safe to connect from the local interface.
+WGETOPTS="-O- -q -L --no-proxy --bind-address=127.0.0.1"
+CURLOPTS="-o - -Ss -L --interface lo"
+
+LOCALHOST="http://localhost"
+HTTPDOPTS="-DSTATUS"
+DEFAULT_IBMCONFIG=/etc/httpd/conf/httpd.conf
+DEFAULT_NORMCONFIG="/etc/apache2/httpd.conf"
+#
+# You can also set
+#	HTTPD
+#	PORT
+#	STATUSURL
+#	CONFIGFILE
+# in this section if what we're doing doesn't work for you...
+#
+#	End of Configuration options
+#######################################################################
+
+CMD=`basename $0`
+
+#	The config-file-pathname is the pathname to the configuration
+#	file for this web server.  Various appropriate defaults are
+#	assumed if no config file is specified.  If this command is
+#	invoked as *IBM*, then the default config file name is
+#	$DEFAULT_IBMCONFIG, otherwise the default config file
+#	will be $DEFAULT_NORMCONFIG.
+usage() {
+  cat <<-!
+usage: $0 action
+
+action:
+	start	start the web server
+
+	stop	stop the web server
+
+	status	return the status of web server, run or down
+
+	monitor  return TRUE if the web server appears to be working.
+                For this to be supported you must configure mod_status
+		 and give it a server-status URL.  You have to have 
+		installed either curl or wget for this to work.
+
+	meta-data	show meta data message
+
+	validate-all	validate the instance parameters
+	!
+  exit $1
+}
+
+#
+# run the http client
+#
+curl_func() {
+	cl_opts="$CURLOPTS $test_httpclient_opts"
+	if [ x != "x$test_user" ]; then
+		echo "-u $test_user:$test_password" |
+			curl -K - $cl_opts "$1"
+	else
+		curl $cl_opts "$1"
+	fi
+}
+wget_func() {
+	auth=""
+	cl_opts="$WGETOPTS $test_httpclient_opts"
+	[ x != "x$test_user" ] &&
+		auth="--http-user=$test_user --http-passwd=$test_password"
+	wget $auth $cl_opts "$1"
+}
+#
+# rely on whatever the user provided
+userdefined() {
+	$test_httpclient $test_httpclient_opts "$1"
+}
+
+#
+# find a good http client
+#
+findhttpclient() {
+	# prefer wget (for historical reasons)
+	if [ "x$CLIENT" != x ]; then
+		echo "$CLIENT"
+	elif which wget >/dev/null 2>&1; then
+		echo "wget"
+	elif which curl >/dev/null 2>&1; then
+		echo "curl"
+	else
+		return 1
+	fi
+}
+gethttpclient() {
+	[ -z "$test_httpclient" ] &&
+		test_httpclient=$ourhttpclient
+	case "$test_httpclient" in
+		curl|wget) echo ${test_httpclient}_func;;  #these are supported
+		*) echo userdefined;;
+	esac
+}
+
+# test configuration good?
+is_testconf_sane() {
+	if [ "x$test_regex" = x -o "x$test_url" = x ]; then
+		ocf_log err "test regular expression or test url empty"
+		return 1
+	fi
+	if [ "x$test_user$test_password" != x -a \( "x$test_user" = x -o "x$test_password" = x \) ]; then
+		ocf_log err "bad user authentication for extended test"
+		return 1
+	fi
+	return 0
+}
+#
+# read the test definition from the config
+#
+readtestconf() {
+	test_name="$1" # we look for this one or the first one if empty
+	lcnt=0
+	readdef=""
+	test_url="" test_regex=""
+	test_user="" test_password=""
+	test_httpclient="" test_httpclient_opts=""
+
+	while read key value; do
+		lcnt=$((lcnt+1))
+		if [ "$readdef" ]; then
+			case "$key" in
+			"url") test_url="$value" ;;
+			"user") test_user="$value" ;;
+			"password") test_password="$value" ;;
+			"client") test_httpclient="$value" ;;
+			"client_opts") test_httpclient_opts="$value" ;;
+			"match") test_regex="$value" ;;
+			"end") break ;;
+			"#"*|"") ;;
+			*) ocf_log err "$lcnt: $key: unknown keyword"; return 1 ;;
+			esac
+		else
+			[ "$key" = "test" ] &&
+				[ -z "$test_name" -o "$test_name" = "$value" ] &&
+				readdef=1
+		fi
+	done
+}
+
+source_envfiles() {
+	for f; do
+		[ -f "$f" -a -r "$f" ] &&
+			. "$f"
+	done
+}
+
+apachecat() {
+	awk '
+	function procline() {
+		split($0,a);
+		if( a[1]~/^[Ii]nclude$/ ) {
+			procinclude(a[2]);
+		} else {
+			if( a[1]=="ServerRoot" ) {
+				rootdir=a[2];
+				gsub("\"","",rootdir);
+			}
+			print;
+		}
+	}
+	function printfile(infile, a) {
+		while( (getline<infile) > 0 ) {
+			procline();
+		}
+		close(infile);
+	}
+	function allfiles(dir, cmd,f) {
+		cmd="find -L "dir" -type f";
+		while( ( cmd | getline f ) > 0 ) {
+			printfile(f);
+		}
+		close(cmd);
+	}
+	function listfiles(pattern, cmd,f) {
+		cmd="ls "pattern" 2>/dev/null";
+		while( ( cmd | getline f ) > 0 ) {
+			printfile(f);
+		}
+		close(cmd);
+	}
+	function procinclude(spec) {
+		if( rootdir!="" && spec!~/^\// ) {
+			spec=rootdir"/"spec;
+		}
+		if( isdir(spec) ) {
+			allfiles(spec); # read all files in a directory (and subdirs)
+		} else {
+			listfiles(spec); # there could be jokers
+		}
+	}
+	function isdir(s) {
+		return !system("test -d \""s"\"");
+	}
+	{ procline(); }
+	' $1 |
+	sed 's/#.*//;s/[[:blank:]]*$//;s/^[[:blank:]]*//' |
+	grep -v '^$'
+}
+
+#
+# set parameters (as shell vars) from our apache config file
+#
+get_apache_params() {
+  configfile=$1
+  shift 1
+  vars=`echo $@ | sed 's/ /,/g'`
+
+  eval `
+  apachecat $configfile | awk -v vars="$vars" '
+  BEGIN{
+    split(vars,v,",");
+    for( i in v )
+  	  vl[i]=tolower(v[i]);
+  }
+  {
+	  for( i in v )
+	  	if( tolower($1)==vl[i] ) {
+			print v[i]"="$2
+			delete vl[i]
+			break
+		}
+  }
+  '`
+}
+
+#
+#	Return the location(s) that are handled by the given handler
+#
+FindLocationForHandler() {
+  PerlScript='while (<>) {
+	/<Location "?([^ >"]+)/i && ($loc=$1);
+	'"/SetHandler +$2"'/i && print "$loc\n"; 
+  }'
+  apachecat $1 | perl -e "$PerlScript"
+}
+
+#
+#	Check if the port is valid
+#
+CheckPort() {
+  ocf_is_decimal "$1" && [ $1 -gt 0 ]
+}
+
+buildlocalurl() {
+  [ "x$Listen" != "x" ] &&
+	echo "http://${Listen}" ||
+	echo "${LOCALHOST}:${PORT}"
+}
+#
+#	Get all the parameters we need from the Apache config file
+#
+GetParams() {
+  ConfigFile=$1
+  if [ ! -f $ConfigFile ]; then
+  	return 1
+  fi
+  get_apache_params $ConfigFile ServerRoot PidFile Port Listen
+  case $PidFile in
+    /*)	;;
+    [[:alnum:]]*)	PidFile=$ServerRoot/$PidFile;;
+    *)	PidFile=$HA_VARRUNDIR/${httpd_basename}.pid;;
+  esac
+
+  for p in "$PORT" "$Port" 80; do
+    if CheckPort "$p"; then
+      PORT="$p"
+      break
+    fi
+  done
+ 
+  echo $Listen | grep ':' >/dev/null ||  # Listen could be just port spec
+	  Listen="localhost:$Listen"
+
+  #
+  # It's difficult to figure out whether the server supports
+  # the status operation.
+  # (we start our server with -DSTATUS - just in case :-))
+  #
+  # Typically (but not necessarily) the status URL is /server-status
+  #
+  # For us to think status will work, we have to have the following things:
+  #
+  # - The server-status handler has to be mapped to some URL somewhere
+  #
+  # We assume that:
+  #
+  # - the "main" web server at $PORT will also support it if we can find it
+  #	somewhere in the file
+  # - it will be supported at the same URL as the one we find in the file
+  #
+  # If this doesn't work for you, then set the statusurl attribute.
+  #
+  if
+     [ "X$STATUSURL" = "X" ]
+  then
+      StatusURL=`FindLocationForHandler $1 server-status | tail -1`
+      STATUSURL="`buildlocalurl`$StatusURL"
+  fi
+  test "$PidFile"
+}
+
+#
+# return TRUE if a process with given PID is running
+#
+ProcessRunning() {
+    ApachePID=$1
+    # Use /proc if it looks like it's here...
+    if
+      [ -d /proc -a -d /proc/1 ]
+    then
+       [ -d /proc/$ApachePID ]
+    else
+      #  This assumes we're running as root...
+      kill -s 0 "$ApachePID" >/dev/null 2>&1
+    fi
+}
+
+
+silent_status() {
+  if
+    [ -f $PidFile  ] 
+  then
+    ProcessRunning `cat $PidFile`
+  else
+    : No pid file
+    false
+  fi
+}
+
+start_apache() {
+  if
+    silent_status
+  then
+    ocf_log info "$CMD already running (pid $ApachePID)"
+    return $OCF_SUCCESS
+  fi
+  ocf_run $HTTPD $HTTPDOPTS $OPTIONS -f $CONFIGFILE
+  tries=0
+  while :  # wait until the user set timeout
+  do
+    monitor_apache
+	ec=$?
+	if [ $ec -eq $OCF_NOT_RUNNING ]
+	then
+		tries=`expr $tries + 1`
+		ocf_log info "waiting for apache $CONFIGFILE to come up"
+		sleep 1
+	else
+		break
+	fi
+  done
+	if [ $ec -ne 0 ] && silent_status; then
+		stop_apache
+	fi
+	return $ec
+}
+
+stop_apache() {
+  if
+    silent_status
+  then
+    if
+      kill $ApachePID
+    then
+      tries=0
+      while
+        ProcessRunning $ApachePID &&
+        [ $tries -lt 10 ]
+      do
+        sleep 1
+        kill $ApachePID >/dev/null 
+        ocf_log info "Killing apache PID $ApachePID"
+        tries=`expr $tries + 1`
+      done
+    else
+      ocf_log warn "Killing apache PID $ApachePID FAILED."
+    fi
+    if
+      ProcessRunning $ApachePID
+    then
+      ocf_log info "$CMD still running ($ApachePID)."
+      false
+    else
+      ocf_log info "$CMD stopped."
+    fi
+  else
+    ocf_log info "$CMD is not running."
+  fi
+
+  for sig in SIGTERM SIGHUP SIGKILL ; do
+    if pgrep -f $HTTPD.*$CONFIGFILE >/dev/null ; then
+      pkill -$sig  -f $HTTPD.*$CONFIGFILE >/dev/null
+      ocf_log info "apache children were signalled ($sig)"
+      sleep 1
+    else
+      break
+    fi
+  done
+}
+
+status_apache() {
+  silent_status
+  rc=$?
+  if
+    [ $rc -eq 0 ]
+  then
+    ocf_log info "$CMD is running (pid $ApachePID)."
+    return $OCF_SUCCESS
+  else
+    ocf_log info "$CMD is stopped."
+    return $OCF_NOT_RUNNING
+  fi
+}
+
+fixtesturl() {
+	echo $test_url | grep -qs "^http" && return
+	test_url="`buildlocalurl`$test_url"
+}
+monitor_apache_extended() {
+  if [ "$TESTCONFFILE" ]; then
+    readtestconf < $TESTCONFFILE
+  else
+	test_url="$TESTURL"
+	test_regex="$TESTREGEX10"
+  fi
+  whattorun=`gethttpclient`
+  fixtesturl
+  is_testconf_sane ||
+    return $OCF_ERR_CONFIGURED
+  $whattorun "$test_url" | grep -Ei "$test_regex" > /dev/null
+}
+monitor_apache_basic() {
+  if [ -z "$STATUSURL" ]; then
+    ocf_log err "statusurl parameter empty"
+	return $OCF_ERR_CONFIGURED
+  elif [ -z "$ourhttpclient" ]; then
+    ocf_log err "could not find a http client; make sure that either wget or curl is available"
+	return $OCF_ERR_CONFIGURED
+  fi
+  ${ourhttpclient}_func "$STATUSURL" | grep -Ei "$TESTREGEX" > /dev/null
+}
+monitor_apache() {
+  silent_status
+  if [ $? -ne 0 ]; then
+    ocf_log info "$CMD not running"
+    return $OCF_NOT_RUNNING
+  fi
+  ourhttpclient=`findhttpclient`  # we'll need one
+  monitor_apache_basic
+  rc=$?
+  [ $rc -ne 0 ] && return $rc
+  case "$OCF_CHECK_LEVEL" in
+  ""|0) true;;
+  10) monitor_apache_extended;;
+  *)
+    ocf_log err "bad OCF_CHECK_LEVEL: $OCF_CHECK_LEVEL"
+	return $OCF_ERR_CONFIGURED
+	;;
+  esac
+}
+
+metadata_apache(){
+	cat <<END
+<?xml version="1.0"?>
+<!DOCTYPE resource-agent SYSTEM "ra-api-1.dtd">
+<resource-agent name="apache">
+<version>1.0</version>
+
+<longdesc lang="en">
+This is the resource agent for the Apache web server.
+This resource agent operates both version 1.x and version 2.x Apache
+servers.
+
+The start operation ends with a loop in which monitor is
+repeatedly called to make sure that the server started and that
+it is operational. Hence, if the monitor operation does not
+succeed within the start operation timeout, the apache resource
+will end with an error status.
+
+The monitor operation by default loads the server status page
+which depends on the mod_status module and the corresponding
+configuration file (usually /etc/apache2/mod_status.conf).
+Make sure that the server status page works and that the access
+is allowed *only* from localhost (address 127.0.0.1).
+See the statusurl and testregex attributes for more details.
+
+See also http://httpd.apache.org/
+</longdesc>
+<shortdesc lang="en">Manages an Apache web server instance</shortdesc>
+
+<parameters>
+<parameter name="configfile" required="0" unique="1">
+<longdesc lang="en">
+The full pathname of the Apache configuration file.
+This file is parsed to provide defaults for various other
+resource agent parameters.
+</longdesc>
+<shortdesc lang="en">configuration file path</shortdesc>
+<content type="string" default="/etc/apache2/httpd.conf" />
+</parameter>
+
+<parameter name="httpd">
+<longdesc lang="en">
+The full pathname of the httpd binary (optional).
+</longdesc>
+<shortdesc lang="en">httpd binary path</shortdesc>
+<content type="string" default="/usr/sbin/httpd" />
+</parameter>
+
+<parameter name="port" >
+<longdesc lang="en">
+A port number that we can probe for status information
+using the statusurl.
+This will default to the port number found in the
+configuration file, or 80, if none can be found
+in the configuration file.
+
+</longdesc>
+<shortdesc lang="en">httpd port</shortdesc>
+<content type="integer" />
+</parameter>
+
+<parameter name="statusurl">
+<longdesc lang="en">
+The URL to monitor (the apache server status page by default).
+If left unspecified, it will be inferred from
+the apache configuration file.
+
+If you set this, make sure that it succeeds *only* from the
+localhost (127.0.0.1). Otherwise, it may happen that the cluster
+complains about the resource being active on multiple nodes.
+</longdesc>
+<shortdesc lang="en">url name</shortdesc>
+<content type="string" />
+</parameter>
+
+<parameter name="testregex">
+<longdesc lang="en">
+Regular expression to match in the output of statusurl.
+Case insensitive.
+</longdesc>
+<shortdesc lang="en">monitor regular expression</shortdesc>
+<content type="string" default="exists, but impossible to show in a human readable format (try grep testregex)"/>
+</parameter>
+
+<parameter name="client">
+<longdesc lang="en">
+Client to use to query to Apache. If not specified, the RA will
+try to find one on the system. Currently, wget and curl are
+supported. For example, you can set this parameter to "curl" if
+you prefer that to wget.
+</longdesc>
+<shortdesc lang="en">http client</shortdesc>
+<content type="string" default=""/>
+</parameter>
+
+<parameter name="testurl">
+<longdesc lang="en">
+URL to test. If it does not start with "http", then it's
+considered to be relative to the Listen address.
+</longdesc>
+<shortdesc lang="en">test url</shortdesc>
+<content type="string" />
+</parameter>
+
+<parameter name="testregex10">
+<longdesc lang="en">
+Regular expression to match in the output of testurl.
+Case insensitive.
+</longdesc>
+<shortdesc lang="en">extended monitor regular expression</shortdesc>
+<content type="string" />
+</parameter>
+
+<parameter name="testconffile">
+<longdesc lang="en">
+A file which contains test configuration. Could be useful if
+you have to check more than one web application or in case sensitive
+info should be passed as arguments (passwords). Furthermore,
+using a config file is the only way to specify certain
+parameters.
+
+Please see README.webapps for examples and file description.
+</longdesc>
+<shortdesc lang="en">test configuration file</shortdesc>
+<content type="string" />
+</parameter>
+
+<parameter name="testname">
+<longdesc lang="en">
+Name of the test within the test configuration file.
+</longdesc>
+<shortdesc lang="en">test name</shortdesc>
+<content type="string" />
+</parameter>
+
+<parameter name="options">
+<longdesc lang="en">
+Extra options to apply when starting apache. See man httpd(8).
+</longdesc>
+<shortdesc lang="en">command line options</shortdesc>
+<content type="string" />
+</parameter>
+
+<parameter name="envfiles">
+<longdesc lang="en">
+Files (one or more) which contain extra environment variables.
+If you want to prevent script from reading the default file, set
+this parameter to empty string.
+</longdesc>
+<shortdesc lang="en">environment settings files</shortdesc>
+<content type="string" default="/etc/apache2/envvars"/>
+</parameter>
+
+</parameters>
+
+<actions>
+<action name="start"   timeout="40s" />
+<action name="stop"    timeout="60s" />
+<action name="status"  timeout="30s" />
+<action name="monitor" depth="0"  timeout="20s" interval="10" />
+<action name="meta-data"  timeout="5" />
+<action name="validate-all"  timeout="5" />
+</actions>
+</resource-agent>
+END
+
+	exit $OCF_SUCCESS
+}
+
+validate_all_apache() {
+
+  if CheckPort $PORT; then
+# We are sure to succeed here, since we forced $PORT to be valid in GetParams()
+	: OK
+  else
+	ocf_log err "Port number $PORT is invalid!"
+	exit $OCF_ERR_ARGS
+  fi
+
+  if [ -z $STATUSURL ]; then
+	: OK to be empty
+  else
+	case $STATUSURL in
+	    http://*/*) ;;
+	    *) 
+	    ocf_log err "Invalid STATUSURL $STATUSURL"
+	    exit $OCF_ERR_ARGS ;;
+	esac
+  fi
+  if [ ! -x $HTTPD ]; then
+	ocf_log err "HTTPD $HTTPD not found or is not an executable!"
+	exit $OCF_ERR_ARGS
+  fi
+  if [ ! -f $CONFIGFILE ]; then
+# We are sure to succeed here, since we have parsed $CONFIGFILE before getting here
+	ocf_log err "Configuration file $CONFIGFILE not found!"
+	exit $OCF_ERR_CONFIGURED
+  fi
+
+
+  return $OCF_SUCCESS
+}
+
+if
+  [ $# -eq 1 ]
+then
+  COMMAND=$1
+  HTTPD="$OCF_RESKEY_httpd"
+  PORT="$OCF_RESKEY_port"
+  STATUSURL="$OCF_RESKEY_statusurl"
+  CONFIGFILE="$OCF_RESKEY_configfile"
+  OPTIONS="$OCF_RESKEY_options"
+  CLIENT=${OCF_RESKEY_client}
+  TESTREGEX=${OCF_RESKEY_testregex:-'</ *body *>[[:space:]]*</ *html *>'}
+  TESTURL="$OCF_RESKEY_testurl"
+  TESTREGEX10=${OCF_RESKEY_testregex10}
+  TESTCONFFILE="$OCF_RESKEY_testconffile"
+  TESTNAME="$OCF_RESKEY_testname"
+  : ${OCF_RESKEY_envfiles="/etc/apache2/envvars"}
+  source_envfiles $OCF_RESKEY_envfiles
+else
+  usage $OCF_ERR_ARGS
+fi
+
+LSB_STATUS_STOPPED=3
+if
+  [ "X$HTTPD" = X -o ! -f "$HTTPD" -o ! -x "$HTTPD" ]
+then
+  case $0 in
+    *IBM*)	HTTPD=$IBMHTTPD
+		DefaultConfig=$DEFAULT_IBMCONFIG;;
+    *)	
+	HTTPD=
+	for h in $HTTPDLIST
+	do
+	  if
+	    [ -f $h -a -x $h ]
+	  then
+	    HTTPD=$h
+	    break
+	  fi
+	done
+# It is possible that we still do not have a valid httpd at this stage
+	if
+          [ -z "$HTTPD" ]
+	then
+	  case $COMMAND in
+	    stop)	exit	$OCF_SUCCESS;;
+	    monitor)	exit	$OCF_NOT_RUNNING;;
+            status)	exit  $LSB_STATUS_STOPPED;;
+  	    meta-data)	metadata_apache;;
+	  esac
+	  ocf_log err "No valid httpd found! Please revise your <HTTPDLIST> item"
+          exit $OCF_ERR_INSTALLED
+	fi
+# Let the user know that the $HTTPD used is not the one (s)he specified via $OCF_RESKEY_httpd
+        if
+          [ "X$OCF_RESKEY_httpd" != X ]
+        then
+	  ocf_log info "Using $HTTPD as HTTPD"
+        fi
+	DefaultConfig=$DEFAULT_NORMCONFIG;;
+  esac
+fi
+httpd_basename=`basename $HTTPD`
+case $httpd_basename in
+  *-*)	httpd_basename=`echo "$httpd_basename" | sed -e 's%\-.*%%'`;;
+esac
+
+case "$CONFIGFILE" in
+  "") CONFIGFILE=$DefaultConfig;;
+  *)		;;
+esac
+
+if
+  [ ! -f "$CONFIGFILE" ]
+then
+  case $COMMAND in
+    stop)	ocf_log warn "$CONFIGFILE not found - apache considered stopped"
+    		exit $OCF_SUCCESS;;
+    monitor)	exit $OCF_NOT_RUNNING;;
+    status)	exit $LSB_STATUS_STOPPED;;
+  esac
+fi
+
+if
+  [ "X$COMMAND" = Xmeta-data ] || GetParams $CONFIGFILE
+then
+  : OK
+else
+  ocf_log err "Cannot parse config file [$CONFIGFILE]"
+  exit $OCF_ERR_CONFIGURED
+fi
+
+case $COMMAND in
+  start)	start_apache;;
+  stop)		stop_apache;;
+  status)	status_apache;;
+  monitor)	monitor_apache;;
+  meta-data)	metadata_apache;;
+  validate-all)	validate_all_apache;;
+  *)		usage $OCF_ERR_UNIMPLEMENTED;;
+esac

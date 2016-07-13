@@ -1,0 +1,6 @@
+#!/bin/sh
+TMP_FILE_LIST=`find /tmp/ -type f`
+
+echo "${TMP_FILE_LIST}" | while read FILE;do
+	touch -c $FILE
+done

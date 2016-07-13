@@ -1,0 +1,29 @@
+#!/bin/sh
+
+if [ ! -f /var/run/mum ];then
+  exit 0
+fi
+
+if [ -f /var/lock/ir_power.lock ]; then
+  exit 0
+fi
+
+/opt/bin/lockfile /var/lock/ir_power.lock
+
+case "$1"
+in
+  "AUTO" ) 
+    pid=`pidof osd`
+    if [ "${pid}" != "" ]; then
+      /img/bin/rc/rc.osd off
+    else
+      /img/bin/rc/rc.osd on
+    fi
+               ;;
+  "ON" ) /img/bin/rc/rc.osd on
+               ;;
+  "OFF" ) /img/bin/rc/rc.osd off
+               ;;
+esac
+
+rm -f /var/lock/ir_power.lock

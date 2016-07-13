@@ -1,0 +1,990 @@
+#!/bin/sh
+#
+# Start the iSCSI: Generic SCSI Target Subsystem for Linux.
+#
+iscsi_limit=`/img/bin/check_service.sh iscsi_limit`
+if [ "${iscsi_limit}" == "0" ];then
+    exit 0
+fi
+
+PATH=/sbin:/bin:/usr/sbin:/usr/bin
+MEM_SIZE=1048576
+cmdsqlite="/usr/bin/sqlite"
+confdb="/etc/cfg/conf.db"
+CONFIGFS=/sys/kernel/config
+TARGET=/sys/kernel/config/target/core
+FABRIC=/sys/kernel/config/target/iscsi
+crond_conf="/etc/cfg/crond.conf"
+isnsutil="/usr/bin/isns_regi"
+fallocate="/usr/bin/fallocate"
+name=$2
+mdnum=$3
+lunname=$4
+
+. /img/bin/function/libnetwork
+
+check_service="/img/bin/check_service.sh"
+TMPIPV6EN="/var/tmp/ipv6_en"
+
+###########################################
+#	Check iSCSI Enable/Disable			  #
+###########################################
+iscsi_enable=`$cmdsqlite $confdb "select v from conf where k='iscsi'"`
+ha_enable=`$cmdsqlite $confdb "select v from conf where k='ha_enable'"`
+isns_enable=`$cmdsqlite $confdb "select v from conf where k='isns_enable'"`
+
+if [ "${ha_enable}" == "1" ];then
+	MODEL=`$cmdsqlite $confdb "select v from conf where k='ha_virtual_name'" |tr [:upper:] [:lower:]`
+	ha_heartbeat=`$cmdsqlite $confdb "select v from conf where k='ha_heartbeat'"`
+else
+	MODEL=`cat /etc/manifest.txt  | awk '/^type/{print $2}'|tr [:upper:] [:lower:]`
+fi
+
+MODEL=`echo ${MODEL} | sed -r 's/[^a-zA-Z0-9-]//g'`
+
+if [ "${isns_enable}" == "1" ];then
+  isns_ip=`$cmdsqlite $confdb "select v from conf where k='isns_ip'"`
+  
+  echo "ServerAddress   = ${isns_ip}:3205" > /var/run/isnsadm.conf
+  echo "Auth.ReplayWindow = 2m" >> /var/run/isnsadm.conf
+  echo "Auth.TimeStampJitter = 1s" >> /var/run/isnsadm.conf
+fi
+
+configure_memsize()
+{
+    if [ -e /proc/sys/net/core/wmem_max ]; then
+#        echo ${MEM_SIZE} > /proc/sys/net/core/wmem_max
+        echo 8388608 > /proc/sys/net/core/wmem_max
+    fi
+
+    if [ -e /proc/sys/net/core/rmem_max ]; then
+#        echo ${MEM_SIZE} > /proc/sys/net/core/rmem_max
+        echo 8388608 > /proc/sys/net/core/rmem_max
+    fi
+
+    if [ -e /proc/sys/net/core/wmem_default ]; then
+        echo ${MEM_SIZE} > /proc/sys/net/core/wmem_default
+    fi
+
+    if [ -e /proc/sys/net/core/rmem_default ]; then
+        echo ${MEM_SIZE} > /proc/sys/net/core/rmem_default
+    fi
+
+#    if [ -e /proc/sys/net/ipv4/tcp_mem ]; then
+#        echo "${MEM_SIZE} ${MEM_SIZE} ${MEM_SIZE}" > /proc/sys/net/ipv4/tcp_mem
+#    fi
+
+#    if [ -e  /proc/sys/net/ipv4/tcp_rmem ]; then
+#        echo "${MEM_SIZE} ${MEM_SIZE} ${MEM_SIZE}" > /proc/sys/net/ipv4/tcp_rmem
+#    fi
+
+#    if [ -e /proc/sys/net/ipv4/tcp_wmem ]; then
+#        echo "${MEM_SIZE} ${MEM_SIZE} ${MEM_SIZE}" > /proc/sys/net/ipv4/tcp_wmem
+#    fi
+}
+
+#################################################
+##       Check Raid Mount First
+#################################################
+check_raid(){
+  sys_path=`/bin/ls -l /raid/sys | awk -F' ' '{printf $11}'`
+  data_path=`/bin/ls -l /raid/data | awk -F' ' '{printf $11}'`
+  if [ "$sys_path" == "" ] || [ "$data_path" == "" ];
+  then
+    echo "Your Master RAID link is not exist"
+    exit
+  fi
+}
+
+check_table(){
+  mdnum=$1
+
+  iscsi_db="/raid${mdnum}/sys/smb.db"
+        
+  tableexist=`$cmdsqlite ${iscsi_db} "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='iscsi'"`
+  if [ "${tableexist}" == "0" ];then
+    $cmdsqlite ${iscsi_db} "CREATE TABLE iscsi(alias,name,enabled,chap,user,pass,chap_mutual,user_mutual,pass_mutual,year,month,crc_data,crc_header,v1,v2,v3,v4,v5)"
+  fi
+
+  tableexist=`$cmdsqlite ${iscsi_db} "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='lun'"`
+  if [ "${tableexist}" == "0" ];then
+    $cmdsqlite ${iscsi_db} "CREATE TABLE lun(target,name,thin,id,percent,block,serial,v1,v2)"
+  fi
+
+  tableexist=`$cmdsqlite ${iscsi_db} "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='lun_acl'"`
+  if [ "${tableexist}" == "0" ];then
+    $cmdsqlite ${iscsi_db} "CREATE TABLE lun_acl(init_iqn, lunname, privilege,v1,v2)"
+  fi
+}
+
+start_server()
+{
+  ###########################################
+  #   Check table
+  ###########################################
+  md_list=`cat /proc/mdstat | awk '/^md6[0-9] :/{print substr($1,3)}' | sort -u`
+  if [ "${md_list}" == "" ];then
+    md_list=`cat /proc/mdstat | awk -F: '/^md[0-9] :/{print substr($1,3)}' | sort -u`
+  fi
+  
+  for md in $md_list
+  do
+    check_table ${md}
+  done
+
+  ###########################################
+  #	Check Model			  #
+  ###########################################
+  iscsi_limit=`$check_service iscsi_limit`
+  if [ "$iscsi_limit" == "0" ];
+  then
+    echo "Permission Deny...You don't have this function!"
+    exit 1
+  fi
+
+  if [ "$iscsi_enable" != "1" ];
+  then
+    echo "You don't have enable iSCSI!"
+    exit 1
+  fi
+
+  chk=`lsmod|grep configfs|wc -l`
+  if [ $chk -eq 0 ];then
+    modprobe configfs
+  fi	
+
+  chk=`lsmod|grep target_core_mod|wc -l`
+  if [ $chk -eq 0 ];then
+    modprobe target_core_mod
+  fi	
+
+  chk=`lsmod|grep iscsi_target_mod|wc -l`
+  if [ $chk -eq 0 ];then
+    modprobe iscsi_target_mod
+  fi	
+
+  configure_memsize
+  
+  if [ ! -d "${TARGET}" ];then
+    mount -t configfs none ${CONFIGFS}
+  fi
+  
+  for md in $md_list
+  do
+    mdnum=$md
+
+    iscsi_db="/raid${mdnum}/sys/smb.db"
+
+    #get iscsi data
+    iscsi_list=`$cmdsqlite $iscsi_db "select name from iscsi where enabled='1'"`
+    
+    for t_name in ${iscsi_list}
+    do
+      name=$t_name
+      add_iscsi
+    done
+  done
+  
+  if [ "${isns_enable}" == "1" ];then
+    isnsregi
+    add_cron_isns
+  fi
+}
+	
+stop_server()
+{
+  del_cron_isns
+  isnsregi "del"
+
+  target_list=`ls ${FABRIC} | grep "[a-z0-9.\-].${MODEL}:iscsi"`
+  for iscsi_iqn in $target_list
+  do 
+    echo -n 0 > ${FABRIC}/${iscsi_iqn}/tpgt_1/enable
+    rmdir ${FABRIC}/${iscsi_iqn}/tpgt_1/np/*
+    
+    for TMP_DIR in `ls $FABRIC/$iscsi_iqn/tpgt_1/acls/`
+    do
+      for TMP_LUN in `ls $FABRIC/$iscsi_iqn/tpgt_1/acls/${TMP_DIR}/ | grep "lun_"`
+      do
+        rm $FABRIC/$iscsi_iqn/tpgt_1/acls/${TMP_DIR}/${TMP_LUN}/${TMP_LUN}
+        rmdir $FABRIC/$iscsi_iqn/tpgt_1/acls/${TMP_DIR}/${TMP_LUN}
+      done
+                                    
+      rmdir $FABRIC/$iscsi_iqn/tpgt_1/acls/${TMP_DIR}
+    done
+                                          
+    for TMP_DIR in `ls $FABRIC/$iscsi_iqn/tpgt_1/lun/`
+    do
+      for TMP_LUN in `ls $FABRIC/$iscsi_iqn/tpgt_1/lun/${TMP_DIR}/ | grep "lio_"`
+      do
+        rm $FABRIC/$iscsi_iqn/tpgt_1/lun/${TMP_DIR}/${TMP_LUN}
+      done
+                                                                    
+      rmdir $FABRIC/$iscsi_iqn/tpgt_1/lun/${TMP_DIR}
+    done
+  
+    rmdir $FABRIC/$iscsi_iqn/tpgt_1/
+    rmdir $FABRIC/$iscsi_iqn
+  done
+
+  #disable the lun and remove the folder in the kernel, and delete the files
+  lun_list=`ls $TARGET/fileio_0/`
+  for lun in ${lun_list}
+  do
+    if [ -d "$TARGET/fileio_0/${lun}" ];then
+      rmdir $TARGET/fileio_0/${lun}
+    fi
+  done
+
+  rmdir $TARGET/fileio_0/
+}
+
+reverse_domain() {
+	domain1=$1
+	domain2=$2
+	domain3=$3
+	rdomain=""
+	
+	if [ "$domain3" != "" ];then
+		rdomain="$domain3"
+	fi
+	if [ "$domain2" != "" ];then
+		if [ "$rdomain" != "" ];then
+			rdomain="$rdomain.$domain2"
+		else
+			rdomain="$domain2"
+		fi
+	fi
+	if [ "$domain1" != "" ];then
+		if [ "$rdomain" != "" ];then
+			rdomain="$rdomain.$domain1"
+		else
+			rdomain="$domain1"
+		fi
+	fi
+	
+	echo $rdomain
+}
+
+set_iqn()
+{
+	if [ "$year" != "" ] && [ "$mon" != "" ];then
+		scst_date="$year-$mon"
+	fi
+	
+	# set iqn
+	DEF_IQN=`echo "iqn.$scst_date.$revdomain.$MODEL:iscsi.$name.raid${mdnum}" |tr [:upper:] [:lower:]`
+}
+
+add_iscsi()
+{
+  iscsi_db="/raid${mdnum}/sys/smb.db"
+
+  #get iscsi data
+  iscsi_data=`$cmdsqlite $iscsi_db "select * from iscsi where name='${name}'"`
+  enabled=`echo $iscsi_data | awk -F'|' '{print $3}'`
+  chap=`echo $iscsi_data | awk -F'|' '{print $4}'`
+  year=`echo $iscsi_data | awk -F'|' '{print $10}'`
+  mon=`echo $iscsi_data | awk -F'|' '{print $11}'`
+  crcdata=`echo $iscsi_data | awk -F'|' '{print $12}'`
+  crcheader=`echo $iscsi_data | awk -F'|' '{print $13}'`
+  connection_id=`echo $iscsi_data | awk -F'|' '{print $14}'`
+  error_recovery_id=`echo $iscsi_data | awk -F'|' '{print $15}'`
+  initR2T=`echo $iscsi_data | awk -F'|' '{print $16}'`
+
+  if [ ${enabled} != "1" ] || [ "$iscsi_enable" != "1" ];then
+    echo "The iSCSI ${name} is disabled."
+    return 1
+  fi
+  
+  #set iqn
+  set_iqn
+    
+  crc_data="CRC32C,None"
+  crc_header="CRC32C,None"
+    
+  if [ "${crcdata}" == "1" ];then
+    crc_data="CRC32C"
+  fi
+
+  if [ "${crcheader}" == "1" ];then
+    crc_header="CRC32C"
+  fi
+
+  if [ "${connection_id}" == "" ];then
+    connection_id="8"
+  fi
+    
+  if [ "${error_recovery_id}" == "" ];then
+    error_recovery_id="2"
+  fi
+  
+  if [ "${initR2T}" == "" ];then
+    initR2T="No"
+  else
+    tmp=`echo ${initR2T} | tr [:upper:] [:lower:]`
+    if [ "${tmp}" == "no" ];then
+      initR2T="No"
+    else
+      initR2T="Yes"
+    fi
+  fi
+
+  if [ "${ha_enable}" == "1" ];then
+    np_list=`ifconfig|grep HWaddr|awk '{if ($1!="'${ha_heartbeat}'") print $1}'`
+  else
+    np_list=`ifconfig|grep HWaddr|awk '{print $1}'`
+  fi
+
+  ENABLE_IPV6=`cat ${TMPIPV6EN}`
+  if [ "$ENABLE_IPV6" == "1" ];then
+    for np in ${np_list}
+    do
+      PORTAL_IPV6=`real_get_ipv6 "${np}"`
+      if [ "${PORTAL_IPV6}" != "" ] && [ ! -d "$FABRIC/$DEF_IQN/tpgt_1/np/[${PORTAL_IPV6}]:3260" ];then
+        mkdir -p "$FABRIC/$DEF_IQN/tpgt_1/np/[${PORTAL_IPV6}]:3260"
+      fi
+    done
+  fi
+  
+  for np in ${np_list}
+  do
+    PORTAL=`ifconfig ${np} |awk '/inet addr/{print $2}' | awk -F':' '{print $2}'`
+    if [ "${PORTAL}" != "" ] && [ ! -d "$FABRIC/$DEF_IQN/tpgt_1/np/${PORTAL}:3260" ];then
+      mkdir -p "$FABRIC/$DEF_IQN/tpgt_1/np/${PORTAL}:3260"
+    fi
+  done
+
+  lunname_list=`${cmdsqlite} ${iscsi_db} "select name from lun where target='${name}' order by id"`
+  for l_name in ${lunname_list}
+  do
+    add_lun ${name} ${mdnum} ${l_name}
+  done
+    
+  echo ${crc_data} > $FABRIC/$DEF_IQN/tpgt_1/param/DataDigest
+  echo ${crc_header} > $FABRIC/$DEF_IQN/tpgt_1/param/HeaderDigest
+  echo ${error_recovery_id} > $FABRIC/$DEF_IQN/tpgt_1/param/ErrorRecoveryLevel
+  echo ${initR2T} > $FABRIC/$DEF_IQN/tpgt_1/param/InitialR2T
+  echo 16 > $FABRIC/$DEF_IQN/tpgt_1/param/MaxOutstandingR2T
+  echo 65536 > $FABRIC/$DEF_IQN/tpgt_1/param/MaxRecvDataSegmentLength
+  echo ${connection_id} > $FABRIC/$DEF_IQN/tpgt_1/param/MaxConnections
+  echo "NAS Target" > $FABRIC/$DEF_IQN/tpgt_1/param/TargetAlias
+  echo -n 128 > $FABRIC/$DEF_IQN/tpgt_1/attrib/default_cmdsn_depth
+  echo -n ${chap} > $FABRIC/$DEF_IQN/tpgt_1/attrib/authentication
+  echo -n ${enabled} > $FABRIC/$DEF_IQN/tpgt_1/enable
+}
+
+delete_iscsi()
+{  
+  iscsi_db="/raid${mdnum}/sys/smb.db"
+
+  #get iscsi data
+  iscsi_data=`$cmdsqlite $iscsi_db "select * from iscsi where name='${name}'"`
+  year=`echo $iscsi_data | awk -F'|' '{print $10}'`
+  mon=`echo $iscsi_data | awk -F'|' '{print $11}'`
+
+  #set iqn
+  set_iqn
+    
+  echo -n 0 > $FABRIC/$DEF_IQN/tpgt_1/enable
+  rmdir $FABRIC/$DEF_IQN/tpgt_1/np/*
+    
+  for TMP_DIR in `ls $FABRIC/$DEF_IQN/tpgt_1/acls/`
+  do
+    for TMP_LUN in `ls $FABRIC/$DEF_IQN/tpgt_1/acls/${TMP_DIR}/ | grep "lun_"`
+    do
+      rm $FABRIC/$DEF_IQN/tpgt_1/acls/${TMP_DIR}/${TMP_LUN}/${TMP_LUN}
+      rmdir $FABRIC/$DEF_IQN/tpgt_1/acls/${TMP_DIR}/${TMP_LUN}
+    done
+                                    
+    rmdir $FABRIC/$DEF_IQN/tpgt_1/acls/${TMP_DIR}
+  done
+                                          
+  for TMP_DIR in `ls $FABRIC/$DEF_IQN/tpgt_1/lun/`
+  do
+    for TMP_LUN in `ls $FABRIC/$DEF_IQN/tpgt_1/lun/${TMP_DIR}/ | grep "lio_"`
+    do
+      rm $FABRIC/$DEF_IQN/tpgt_1/lun/${TMP_DIR}/${TMP_LUN}
+    done
+                                                                    
+    rmdir $FABRIC/$DEF_IQN/tpgt_1/lun/${TMP_DIR}
+  done
+  
+  rmdir $FABRIC/$DEF_IQN/tpgt_1/
+  rmdir $FABRIC/$DEF_IQN
+                                                                              
+  #disable the lun and remove the folder in the kernel, and delete the files
+  lun_list=`${cmdsqlite} ${iscsi_db} "select name from lun where target='${name}'"`
+  for lun in ${lun_list}
+  do
+    if [ -d "$TARGET/fileio_0/${name}_${lun}" ];then
+      rmdir $TARGET/fileio_0/${name}_${lun}
+    fi
+  done
+}
+
+add_lun()
+{
+  target_name=$1
+  md=$2
+  lun_name=$3
+    
+  if [ "${md}" == "" ];then
+    md="0"
+  fi
+  
+  tmp_iscsi_db="/raid${md}/sys/smb.db"
+  
+  lundata=`$cmdsqlite ${tmp_iscsi_db} "select * from lun where target='${target_name}' and name='${lun_name}'"`
+  if [ "${lundata}" == "" ];then
+    echo "No this LUN name: ${lun_name}"
+    return 1
+  fi
+
+  lunpath="/raid${md}/data/iSCSI_${target_name}"
+  if [ ! -d "${lunpath}" ];then
+    /img/bin/user_folder.sh "add" "iSCSI_${target_name}" "${md}" "" "no" "no"
+  fi
+
+  lundata_thin=`echo $lundata | awk -F'|' '{print $3}'`
+  lundata_id=`echo $lundata | awk -F'|' '{print $4}'`
+  lundata_size=`echo $lundata | awk -F'|' '{print $5}'`
+  lundata_block=`echo $lundata | awk -F'|' '{print $6}'`
+  lundata_serial=`echo $lundata | awk -F'|' '{print $7}'`
+
+  lun_capacity=$(($lundata_size*1024))
+  if [ "$lundata_size" == "16384" ];then
+    lun_capacity=$(($lun_capacity-1))
+  fi
+
+  if [ ! -f "${lunpath}/${lun_name}" ];then
+      if [ "${lundata_thin}" == "1" ];then
+        dd if=/dev/zero of="${lunpath}/${lun_name}" bs=1M count=0 seek=${lun_capacity}
+      else
+        ${fallocate} -l ${lun_capacity}M "${lunpath}/${lun_name}"
+      fi
+
+      sync
+      sync
+  fi
+    
+  target_enable=`$cmdsqlite ${tmp_iscsi_db} "select * from iscsi where name='${target_name}' and enabled='1'"`
+  if [ "${target_enable}" == "" ] || [ "$iscsi_enable" != "1" ];then
+    echo "The target is disabled."
+    return 1
+  fi
+
+  lun_byte=$(($lun_capacity*1024*1024))
+  mkdir -p $TARGET/fileio_0/${target_name}_${lun_name}
+  echo -n "fd_dev_name=${lunpath}/${lun_name},fd_dev_size=${lun_byte},fd_buffered_io=1" > $TARGET/fileio_0/${target_name}_${lun_name}/control        
+    
+  echo -n "${lundata_serial}" > $TARGET/fileio_0/${target_name}_${lun_name}/wwn/vpd_unit_serial
+  echo -n 1 > $TARGET/fileio_0/${target_name}_${lun_name}/enable
+    
+  if [ "${lundata_block}" == "4096" ];then
+    echo -n ${lundata_block} > $TARGET/fileio_0/${target_name}_${lun_name}/attrib/block_size
+  fi
+
+  echo -n "128" > $TARGET/fileio_0/${target_name}_${lun_name}/attrib/queue_depth
+  echo -n "1" > $TARGET/fileio_0/${target_name}_${lun_name}/attrib/emulate_write_cache
+  
+  #get iscsi data
+  iscsi_data=`$cmdsqlite $tmp_iscsi_db "select * from iscsi where name='${target_name}'"`
+  year=`echo $iscsi_data | awk -F'|' '{print $10}'`
+  mon=`echo $iscsi_data | awk -F'|' '{print $11}'`
+	
+  #set iqn
+  set_iqn
+
+  mkdir -p "$FABRIC/$DEF_IQN/tpgt_1/lun/lun_${lundata_id}"
+  ln -s $TARGET/fileio_0/${target_name}_${lun_name} "$FABRIC/$DEF_IQN/tpgt_1/lun/lun_${lundata_id}/lio_${lun_name}_port"
+
+  acl_list=`$cmdsqlite $tmp_iscsi_db "select * from lun_acl where lunname='${lun_name}'"`
+  for acldata in ${acl_list} 
+  do
+    t_iqn_name=`echo ${acldata} | awk -F'|' '{printf $1}'`
+    add_acl ${t_iqn_name} ${md} ${lun_name} 
+  done
+}
+
+#delete the lun file of the target
+#if lun_name is null, then delete all lun files of the target and remove the shared folder
+del_lun()
+{
+  target_name=$1
+  md=$2
+  lun_name=$3
+   	
+  tmp_iscsi_db="/raid${md}/sys/smb.db"
+  lunpath="/raid${md}/data/iSCSI_${target_name}"
+  if [ ! -d "${lunpath}" ];then
+    echo "LUN Path isn't exist."
+    return 0
+  fi
+
+  if [ "${lun_name}" != "" ];then
+    lun_list=${lun_name}
+  else
+    lun_list=`${cmdsqlite} ${tmp_iscsi_db} "select name from lun where target='${target_name}'"`
+  fi
+    
+  for lun in ${lun_list}
+  do
+    if [ -f "${lunpath}/${lun}" ];then
+      rm "${lunpath}/${lun}"
+    fi
+  done
+    
+  if [ "`ls ${lunpath}/`" == "" ];then
+    /img/bin/user_folder.sh "del" "iSCSI_${target_name}" "${md}"
+  fi
+}
+
+expand_lun()
+{
+  target_name=$1
+  md=$2
+  lun_name=$3
+    
+  if [ "${md}" == "" ];then
+    md="0"
+  fi
+  
+  lunpath="/raid${md}/data/iSCSI_${target_name}"
+  tmp_iscsi_db="/raid${md}/sys/smb.db"
+  
+  lundata=`$cmdsqlite ${tmp_iscsi_db} "select * from lun where target='${target_name}' and name='${lun_name}'"`
+  if [ "${lundata}" == "" ];then
+    echo "No this LUN name: ${lun_name}"
+    return 0
+  fi
+
+  lundata_size=`echo $lundata | awk -F'|' '{print $5}'`
+  lundata_thin=`echo $lundata | awk -F'|' '{print $3}'`
+  lun_capacity=$(($lundata_size*1024))
+  if [ "$lundata_size" == "16384" ];then
+    lun_capacity=$(($lun_capacity-1))
+  fi
+
+  if [ -f "${lunpath}/${lun_name}" ];then
+    if [ "${lundata_thin}" == "0" ];then
+      ori_capacity=`du -m "${lunpath}/${lun_name}" | awk '{print $1}'`
+      expand_capacity=$((${lun_capacity}-${ori_capacity}))
+      
+      if [ "${expand_capacity}" == "0" ];then
+        echo "Stop to expand, the size is same."
+        return 0
+      fi
+
+      ${fallocate} -o ${ori_capacity}M -l ${expand_capacity}M "${lunpath}/${lun_name}"
+    else
+      ori_capacity=`ls -l "${lunpath}/${lun_name}" | awk '{print $5}'`
+      ori_capacity=$(($ori_capacity/1048576))
+      dd if=/dev/zero of="${lunpath}/${lun_name}" bs=1M count=0 seek=${lun_capacity} skip=${ori_capacity}
+    fi
+  fi
+}
+
+add_acl()
+{
+    acl_iqn_name=`echo $1 | tr [:upper:] [:lower:]`
+    md=$2
+    acl_lunname=$3
+   	
+    tmp_iscsi_db="/raid${md}/sys/smb.db"
+    acl_lunid=""
+    
+    acl_target_iqn=`${cmdsqlite} ${tmp_iscsi_db} "select target from lun where name='${acl_lunname}'"`
+    name=${acl_target_iqn}
+    
+    #get iscsi data
+    iscsi_data=`$cmdsqlite $tmp_iscsi_db "select * from iscsi where name='${acl_target_iqn}'"`
+    chap=`echo $iscsi_data | awk -F'|' '{print $4}'`
+    chap_user=`echo $iscsi_data | awk -F'|' '{print $5}'`
+    chap_pass=`echo $iscsi_data | awk -F'|' '{print $6}'`
+    chap_mutual=`echo $iscsi_data | awk -F'|' '{print $7}'`
+    chap_mutual_user=`echo $iscsi_data | awk -F'|' '{print $8}'`
+    chap_mutual_pass=`echo $iscsi_data | awk -F'|' '{print $9}'`
+    year=`echo $iscsi_data | awk -F'|' '{print $10}'`
+    mon=`echo $iscsi_data | awk -F'|' '{print $11}'`
+	
+    #set iqn
+    set_iqn
+        
+    lun_list=`ls "$FABRIC/$DEF_IQN/tpgt_1/lun/"`
+    for lun in ${lun_list}
+    do
+        if [ -L "$FABRIC/$DEF_IQN/tpgt_1/lun/$lun/lio_${acl_lunname}_port" ];then
+            acl_lunid=`echo $lun|awk -F'_' '{print $2}'`
+        fi
+    done
+    
+    if [ "${acl_lunid}" == "" ];then
+        echo "The lun is not existed in the iscsi, so we can't set the acl"
+        return 1
+    fi
+
+    privilege=`${cmdsqlite} ${tmp_iscsi_db} "select privilege from lun_acl where init_iqn='${acl_iqn_name}' and lunname='${acl_lunname}'"`
+    
+    if [ "${privilege}" == "2" ];then
+      echo "the ACL of ${acl_lunname} is deny."
+      return 1
+    fi
+                            
+    if [ ! -d "$FABRIC/$DEF_IQN/tpgt_1/acls/$acl_iqn_name" ];then
+        mkdir -p "$FABRIC/$DEF_IQN/tpgt_1/acls/$acl_iqn_name"
+    fi
+
+    echo -n "15" > "$FABRIC/$DEF_IQN/tpgt_1/acls/$acl_iqn_name/attrib/dataout_timeout"
+    echo -n "15" > "$FABRIC/$DEF_IQN/tpgt_1/acls/$acl_iqn_name/attrib/nopin_response_timeout"
+    echo -n "15" > "$FABRIC/$DEF_IQN/tpgt_1/acls/$acl_iqn_name/attrib/nopin_timeout"
+    
+    if [ "${chap}" == "1" ];then
+        echo -n ${chap_user} > "$FABRIC/$DEF_IQN/tpgt_1/acls/$acl_iqn_name/auth/userid"
+        echo -n ${chap_pass} > "$FABRIC/$DEF_IQN/tpgt_1/acls/$acl_iqn_name/auth/password"
+    
+        if [ "${chap_mutual}" == "1" ];then
+            echo -n ${chap_mutual_user} > "$FABRIC/$DEF_IQN/tpgt_1/acls/$acl_iqn_name/auth/userid_mutual"
+            echo -n ${chap_mutual_pass} > "$FABRIC/$DEF_IQN/tpgt_1/acls/$acl_iqn_name/auth/password_mutual"
+        fi
+    fi
+    
+    if [ ! -d "$FABRIC/$DEF_IQN/tpgt_1/acls/$acl_iqn_name/lun_${acl_lunid}" ];then
+        mkdir -p "$FABRIC/$DEF_IQN/tpgt_1/acls/$acl_iqn_name/lun_${acl_lunid}"
+        ln -s "$FABRIC/$DEF_IQN/tpgt_1/lun/lun_$acl_lunid" "$FABRIC/$DEF_IQN/tpgt_1/acls/$acl_iqn_name/lun_${acl_lunid}/."
+    fi
+    
+    echo -n ${privilege} > "$FABRIC/$DEF_IQN/tpgt_1/acls/$acl_iqn_name/lun_$acl_lunid/write_protect"
+}
+
+del_acl()
+{
+  acl_iqn_name=$1
+  md=$2
+  acl_lunname=$3
+   	
+  tmp_iscsi_db="/raid${md}/sys/smb.db"
+  acl_lunid=""
+    
+  acl_target_iqn=`${cmdsqlite} ${tmp_iscsi_db} "select target from lun where name='${acl_lunname}'"`
+  name=${acl_target_iqn}
+    
+  #get iscsi data
+  iscsi_data=`$cmdsqlite $tmp_iscsi_db "select * from iscsi where name='${acl_target_iqn}'"`
+  year=`echo $iscsi_data | awk -F'|' '{print $10}'`
+  mon=`echo $iscsi_data | awk -F'|' '{print $11}'`
+	
+  #set iqn
+  set_iqn
+        
+  lun_list=`ls "$FABRIC/$DEF_IQN/tpgt_1/lun/"`
+  for lun in ${lun_list}
+  do
+    if [ -L "$FABRIC/$DEF_IQN/tpgt_1/lun/$lun/lio_${acl_lunname}_port" ];then
+      acl_lunid=`echo $lun|awk -F'_' '{print $2}'`
+    fi
+  done
+    
+  if [ "${acl_lunid}" == "" ];then
+    echo "The lun is not existed in the iscsi, so we can't set the acl"
+    return 1
+  fi
+    
+  if [ -d "$FABRIC/$DEF_IQN/tpgt_1/acls/$acl_iqn_name/lun_${acl_lunid}" ];then
+    rm "$FABRIC/$DEF_IQN/tpgt_1/acls/$acl_iqn_name/lun_${acl_lunid}/lun_${acl_lunid}"
+    rmdir  "$FABRIC/$DEF_IQN/tpgt_1/acls/$acl_iqn_name/lun_${acl_lunid}"
+  fi    
+
+  if [ "`ls "$FABRIC/$DEF_IQN/tpgt_1/acls/$acl_iqn_name" | grep "lun_"`" == "" ];then
+    rmdir "$FABRIC/$DEF_IQN/tpgt_1/acls/$acl_iqn_name"
+  fi    
+}
+
+read_initiator()
+{
+  target_name=$1
+  md=$2
+
+  if [ "${md}" == "" ];then
+    md="0"
+  fi
+  
+  tmp_iscsi_db="/raid${md}/sys/smb.db"
+  
+  #get iscsi data
+  iscsi_data=`$cmdsqlite $tmp_iscsi_db "select * from iscsi where name='${target_name}'"`
+  year=`echo $iscsi_data | awk -F'|' '{print $10}'`
+  mon=`echo $iscsi_data | awk -F'|' '{print $11}'`
+	
+  #set iqn
+  set_iqn
+
+  iqn_acl_list=`ls "$FABRIC/$DEF_IQN/tpgt_1/acls/"`
+  for tiqn in ${iqn_acl_list}
+  do
+    iqn_status=`cat "$FABRIC/$DEF_IQN/tpgt_1/acls/${tiqn}/info" | grep "No active iSCSI Session for Initiator Endpoint"`
+    if [ "${iqn_status}" == "" ];then
+      cat "$FABRIC/$DEF_IQN/tpgt_1/acls/${tiqn}/info" | awk '/^InitiatorName|^Session|Address/ {printf("%s\n", $0)}' | sed 's/TCP.*$//g'
+    fi 
+  done
+}
+
+read_iqn()
+{
+  target_name=$1
+  md=$2
+
+  if [ "${md}" == "" ];then
+    md="0"
+  fi
+  
+  tmp_iscsi_db="/raid${md}/sys/smb.db"
+  
+  #get iscsi data
+  iscsi_data=`$cmdsqlite $tmp_iscsi_db "select * from iscsi where name='${target_name}'"`
+  year=`echo $iscsi_data | awk -F'|' '{print $10}'`
+  mon=`echo $iscsi_data | awk -F'|' '{print $11}'`
+	
+  #set iqn
+  set_iqn
+  
+  echo $DEF_IQN
+}
+
+target_status(){
+  target_name=$1
+  md=$2
+  
+  iscsi_db="/raid${md}/sys/smb.db"
+  iscsi_data=`$cmdsqlite $iscsi_db "select * from iscsi where name='${target_name}'"`
+  
+  if [ "${iscsi_data}" == "" ];then
+    echo "No this target!"
+    exit
+  fi
+  
+  strExec="/bin/ps | grep 'dd if=/dev/zero of=/raid${md}/data/iSCSI_${target_name}' | grep -v 'grep'"
+  dding=`eval ${strExec}`
+      
+  if [ "${dding}" != "" ];then
+    strExec="/bin/ps | grep 'dd if=/dev/zero of=/raid${md}/data/iSCSI_${target_name}' | grep -v 'grep' | awk '{print \$6}' | awk -F'/' '{print \$5}'"
+    lun_name=`eval ${strExec}`
+      
+    lun_db_size=`$cmdsqlite $iscsi_db "select percent from lun where name='${lun_name}'"`
+    strExec="/usr/bin/du /raid${md}/data/iSCSI_${target_name}/${lun_name} |awk '{print \$1}'"
+    lun_real_size=`eval ${strExec}`
+      
+    lun_real_size=$(($lun_real_size*100))
+    lun_db_size=$(($lun_db_size*1024*1024))
+    percent=$(($lun_real_size/$lun_db_size))
+    if [ "${percent}" -gt 100 ];then
+        percent=100
+    fi
+    
+    echo "Building LUN [${lun_name}]-${percent}%"
+    exit
+  else
+    year=`echo $iscsi_data | awk -F'|' '{print $10}'`
+    mon=`echo $iscsi_data | awk -F'|' '{print $11}'`
+    set_iqn
+    
+    if [ ! -f "$FABRIC/$DEF_IQN/tpgt_1/enable" ];then
+      echo "Disabled"
+      exit
+    fi
+  fi
+
+  if [ "`cat $FABRIC/$DEF_IQN/tpgt_1/enable`" == "1" ];then
+    echo "Enabled"
+    exit
+  else
+    echo "Disabled"
+  fi    
+}
+
+isnsregi(){
+  action=$1
+  isns_ip=`$cmdsqlite $confdb "select v from conf where k='isns_ip'"`
+  isns_iscsi_target_ip=""
+  isns_default_target_ip=""
+  modelname=`cat /etc/manifest.txt  | awk '/^type/{print $2}'`
+  entityname=""
+  iscsilist=""
+  
+  if [ "${isns_ip}" == "" ];then
+    return 1
+  fi
+  
+  md_list=`cat /proc/mdstat | awk '/^md6[0-9] :/{print substr($1,3)}' | sort -u`
+  if [ "${md_list}" == "" ];then
+    md_list=`cat /proc/mdstat | awk -F: '/^md[0-9] :/{print substr($1,3)}' | sort -u`
+  fi
+
+  if [ "${ha_enable}" == "1" ];then
+    np_list=`ifconfig|grep HWaddr|awk '{if ($1!="'${ha_heartbeat}'") print $1}'`
+  else
+    np_list=`ifconfig|grep HWaddr|awk '{print $1}'`
+  fi
+
+  defualt_gateway=`ip route|grep "^default"|awk 'NR==1{print $3}'`
+  for np in ${np_list}
+  do
+    PORTAL=`ifconfig ${np} |awk '/inet addr/{print $2}' | awk -F':' '{print $2}'`
+    NETMASK=`ifconfig ${np} |awk '/inet addr/{print $4}' | awk -F':' '{print $2}'`
+    if [ "${PORTAL}" != "" ] && [ "${NETMASK}" != "" ];then
+      ret1=`/bin/ipcalc -n ${PORTAL} ${NETMASK}`
+      ret2=`/bin/ipcalc -n ${isns_ip} ${NETMASK}`
+      ret3=`/bin/ipcalc -n ${defualt_gateway} ${NETMASK}`
+
+      if [ "${ret1}" == "${ret2}" ];then
+        isns_iscsi_target_ip="${PORTAL}"
+        entityname="$modelname-`/img/bin/function/get_interface_info.sh get_mac ${np}|awk -F':' '{print $4$5$6}'`"
+        break
+      fi
+
+      if [ "${ret1}" == "${ret3}" ];then
+        isns_default_target_ip="${PORTAL}"
+      fi
+    fi
+  done
+
+  if [ "${isns_iscsi_target_ip}" == "" ];then
+    if [ "${isns_default_target_ip}" == "" ];then
+      echo "No suitable iSCSI Target IP"
+      return
+    else
+      isns_iscsi_target_ip="${isns_default_target_ip}"
+    fi
+  fi
+  
+  for md in $md_list
+  do
+    mdnum=${md}
+    iscsi_db="/raid${mdnum}/sys/smb.db"
+
+    #get iscsi data
+    iscsi_list=`$cmdsqlite $iscsi_db "select name from iscsi where enabled='1'"`
+    
+    for t_name in ${iscsi_list}
+    do
+      name=$t_name
+
+      #get iscsi data
+      iscsi_data=`$cmdsqlite $iscsi_db "select * from iscsi where name='${name}'"`
+      year=`echo $iscsi_data | awk -F'|' '{print $10}'`
+      mon=`echo $iscsi_data | awk -F'|' '{print $11}'`
+      
+      set_iqn
+      
+      if [ "${action}" == "del" ];then 
+        ${isnsutil} -d -i ${DEF_IQN} -a ${isns_iscsi_target_ip} -p 3260
+      else
+        if [ "${iscsilist}" == "" ];then
+          iscsilist="${DEF_IQN}"
+        else
+          iscsilist="${iscsilist},${DEF_IQN}"
+        fi
+      fi
+    done
+  done
+  
+  if [ "${action}" != "del" ];then 
+    ${isnsutil} -r -i ${iscsilist} -a ${isns_iscsi_target_ip} -p 3260 -e ${entityname}
+  fi
+
+}
+
+####################################################
+#
+####################################################
+add_cron_isns(){
+  check_cron_exit=`cat ${crond_conf} | grep "rc.iscsi"`
+  if [ "${check_cron_exit}" == "" ];then
+    echo "*/30 * * * * /img/bin/rc/rc.iscsi re_isnsregi > /dev/null 2>&1" >> ${crond_conf}
+    /usr/bin/killall crond
+    sleep 1
+    /usr/sbin/crond
+    /usr/bin/crontab ${crond_conf} -u root
+  fi
+}
+
+del_cron_isns(){
+  check_cron_exit=`cat ${crond_conf} | grep "rc.iscsi"`
+  if [ "${check_cron_exit}" != "" ];then
+    cat ${crond_conf} | grep -v "rc.iscsi" > /tmp/crond.conf1
+    cp -f /tmp/crond.conf1 ${crond_conf}
+    /usr/bin/killall crond
+    sleep 1
+    /usr/sbin/crond
+    /usr/bin/crontab ${crond_conf} -u root
+    rm -f /tmp/crond.conf1
+  fi
+}
+
+# get domain
+domain=`$cmdsqlite /etc/cfg/conf.db "select v from conf where k='nic1_domainname'"|awk -F. '{print $1 " " $2 " " $3}'`
+revdomain=`reverse_domain $domain`
+
+case "$1" in
+  boot|start)
+    check_raid
+    start_server
+    ;;
+  stop)
+    stop_server
+    ;;
+  delete)
+    delete_iscsi
+    ;;
+  add)
+    check_raid 
+    add_iscsi
+    ;;
+  add_lun)
+    check_raid
+    add_lun "${name}" "${mdnum}" "${lunname}" 
+    ;;
+  del_lun)
+    del_lun "${name}" "${mdnum}" "${lunname}" 
+    ;;		
+  expand_lun)
+    expand_lun "${name}" "${mdnum}" "${lunname}" 
+    add_iscsi
+    ;;		
+  add_acl)
+    add_acl "${name}" "${mdnum}" "${lunname}"
+    ;;		
+  del_acl)
+    del_acl "${name}" "${mdnum}" "${lunname}"
+    ;;		
+  read_initiator)
+    read_initiator "${name}" "${mdnum}"
+    ;;
+  read_iqn)
+    read_iqn  "${name}" "${mdnum}"
+    ;;
+  target_status)
+    target_status  "${name}" "${mdnum}"
+    ;;
+  isnsregi)
+    isnsregi $2
+    ;;
+  re_isnsregi)
+    isnsregi del
+    sleep 2
+    isnsregi
+    ;;
+  add_cron_isns)
+    add_cron_isns
+    ;;
+  del_cron_isns)
+    del_cron_isns
+    ;;
+  check_table)
+    check_table $2
+    ;;
+  *)
+    echo "Usage: {start|stop|delete|add|add_lun|del_lun|expand_lun|add_acl|del_acl|read_initiator|read_iqn|target_status|isnsregi|re_isnsregi}" >&2
+    exit 1
+    ;;
+esac

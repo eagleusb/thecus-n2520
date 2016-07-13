@@ -1,0 +1,588 @@
+#!/bin/sh
+#
+# Description:  Manages a PostgreSQL Server as an OCF High-Availability
+#               resource
+#
+# Authors:      Serge Dubrouski (sergeyfd@gmail.com) -- original RA
+#               Florian Haas (florian@linbit.com) -- makeover
+#
+# Copyright:    2006-2010 Serge Dubrouski <sergeyfd@gmail.com>
+#                         and other Linux-HA contributors
+# License:      GNU General Public License (GPL)
+#
+###############################################################################
+# Initialization:
+
+: ${OCF_FUNCTIONS_DIR=${OCF_ROOT}/resource.d/heartbeat}
+. ${OCF_FUNCTIONS_DIR}/.ocf-shellfuncs
+
+#
+# Get PostgreSQL Configuration parameter
+#
+get_pgsql_param() {
+    local config_file
+    local param_name
+    local loglevel=err
+
+    if ocf_is_probe; then
+        loglevel=warn
+    fi
+
+    param_name=$1
+ 
+    #Check that config file exists 
+    if [ -n "$OCF_RESKEY_config" ]; then
+        config=$OCF_RESKEY_config
+    else
+        config=$OCF_RESKEY_pgdata/postgresql.conf
+    fi
+
+    if [ ! -f "$config" ]; then
+        ocf_log $loglevel "Cannot find configuration file $config"
+        return
+    fi
+
+    perl_code="if (/^\s*$param_name[\s=]+\s*(.*)$/) {
+       \$dir=\$1;
+       \$dir =~ s/\s*\#.*//;
+       \$dir =~ s/^'(\S*)'/\$1/;
+       print \$dir;}"
+
+    perl -ne "$perl_code" < $config
+}
+
+# Defaults
+OCF_RESKEY_pgctl_default=/usr/bin/pg_ctl
+OCF_RESKEY_psql_default=/usr/bin/psql
+OCF_RESKEY_pgdata_default=/var/lib/pgsql/data
+OCF_RESKEY_pgdba_default=postgres
+OCF_RESKEY_pghost_default=""
+OCF_RESKEY_pgport_default=5432
+OCF_RESKEY_config_default=""
+OCF_RESKEY_start_opt_default=""
+OCF_RESKEY_pgdb_default=template1
+OCF_RESKEY_logfile_default=/dev/null
+OCF_RESKEY_stop_escalate_default=30
+
+: ${OCF_RESKEY_pgctl=${OCF_RESKEY_pgctl_default}}
+: ${OCF_RESKEY_psql=${OCF_RESKEY_psql_default}}
+: ${OCF_RESKEY_pgdata=${OCF_RESKEY_pgdata_default}}
+: ${OCF_RESKEY_pgdba=${OCF_RESKEY_pgdba_default}}
+: ${OCF_RESKEY_pghost=${OCF_RESKEY_pghost_default}}
+: ${OCF_RESKEY_pgport=${OCF_RESKEY_pgport_default}}
+: ${OCF_RESKEY_config=${OCF_RESKEY_config_default}}
+: ${OCF_RESKEY_start_opt=${OCF_RESKEY_start_opt_default}}
+: ${OCF_RESKEY_pgdb=${OCF_RESKEY_pgdb_default}}
+: ${OCF_RESKEY_logfile=${OCF_RESKEY_logfile_default}}
+: ${OCF_RESKEY_stop_escalate=${OCF_RESKEY_stop_escalate_default}}
+
+usage() {
+    cat <<EOF
+	usage: $0 start|stop|status|monitor|meta-data|validate-all|methods
+
+	$0 manages a PostgreSQL Server as an HA resource.
+
+        The 'start' operation starts the PostgreSQL server.
+        The 'stop' operation stops the PostgreSQL server.
+        The 'status' operation reports whether the PostgreSQL is up.
+        The 'monitor' operation reports whether the PostgreSQL is running.
+        The 'validate-all' operation reports whether the parameters are valid.
+        The 'methods' operation reports on the methods $0 supports.
+EOF
+  return $OCF_ERR_ARGS
+}
+
+meta_data() {
+	cat <<EOF
+<?xml version="1.0"?>
+<!DOCTYPE resource-agent SYSTEM "ra-api-1.dtd">
+<resource-agent name="pgsql">
+<version>1.0</version>
+
+<longdesc lang="en">
+Resource script for PostgreSQL. It manages a PostgreSQL as an HA resource.
+</longdesc>
+<shortdesc lang="en">Manages a PostgreSQL database instance</shortdesc>
+
+<parameters>
+<parameter name="pgctl" unique="0" required="0">
+<longdesc lang="en">
+Path to pg_ctl command.
+</longdesc>
+<shortdesc lang="en">pgctl</shortdesc>
+<content type="string" default="${OCF_RESKEY_pgctl_default}" />
+</parameter>
+
+<parameter name="start_opt" unique="0" required="0">
+<longdesc lang="en">
+Start options (-o start_opt in pg_ctl). "-i -p 5432" for example.
+</longdesc>
+<shortdesc lang="en">start_opt</shortdesc>
+<content type="string" default="${OCF_RESKEY_start_opt_default}" />
+
+</parameter>
+<parameter name="ctl_opt" unique="0" required="0">
+<longdesc lang="en">
+Additional pg_ctl options (-w, -W etc..).
+</longdesc>
+<shortdesc lang="en">ctl_opt</shortdesc>
+<content type="string" default="${OCF_RESKEY_ctl_opt_default}" />
+</parameter>
+
+<parameter name="psql" unique="0" required="0">
+<longdesc lang="en">
+Path to psql command.
+</longdesc>
+<shortdesc lang="en">psql</shortdesc>
+<content type="string" default="${OCF_RESKEY_psql_default}" />
+</parameter>
+
+<parameter name="pgdata" unique="0" required="0">
+<longdesc lang="en">
+Path to PostgreSQL data directory.
+</longdesc>
+<shortdesc lang="en">pgdata</shortdesc>
+<content type="string" default="${OCF_RESKEY_pgdata_default}" />
+</parameter>
+
+<parameter name="pgdba" unique="0" required="0">
+<longdesc lang="en">
+User that owns PostgreSQL.
+</longdesc>
+<shortdesc lang="en">pgdba</shortdesc>
+<content type="string" default="${OCF_RESKEY_pgdba_default}" />
+</parameter>
+
+<parameter name="pghost" unique="0" required="0">
+<longdesc lang="en">
+Hostname/IP address where PostgreSQL is listening
+</longdesc>
+<shortdesc lang="en">pghost</shortdesc>
+<content type="string" default="${OCF_RESKEY_pghost_default}" />
+</parameter>
+
+<parameter name="pgport" unique="0" required="0">
+<longdesc lang="en">
+Port where PostgreSQL is listening
+</longdesc>
+<shortdesc lang="en">pgport</shortdesc>
+<content type="integer" default="${OCF_RESKEY_pgport_default}" />
+</parameter>
+
+<parameter name="config" unique="0" required="0">
+<longdesc lang="en">
+Path to the PostgreSQL configuration file for the instance
+</longdesc>
+<shortdesc lang="en">Configuration file</shortdesc>
+<content type="integer" default="${OCF_RESKEY_config_default}" />
+</parameter>
+
+<parameter name="pgdb" unique="0" required="0">
+<longdesc lang="en">
+Database that will be used for monitoring.
+</longdesc>
+<shortdesc lang="en">pgdb</shortdesc>
+<content type="string" default="${OCF_RESKEY_pgdb_default}" />
+</parameter>
+
+<parameter name="logfile" unique="0" required="0">
+<longdesc lang="en">
+Path to PostgreSQL server log output file.
+</longdesc>
+<shortdesc lang="en">logfile</shortdesc>
+<content type="string" default="${OCF_RESKEY_logfile_default}" />
+</parameter>
+
+<parameter name="socketdir" unique="0" required="0">
+<longdesc lang="en">
+Unix socket directory for PostgeSQL
+</longdesc>
+<shortdesc lang="en">socketdir</shortdesc>
+<content type="string" default="" />
+</parameter>
+
+<parameter name="stop_escalate" unique="0" required="0">
+<longdesc lang="en">
+Number of shutdown retries (using -m fast) before resorting to -m immediate
+</longdesc>
+<shortdesc lang="en">stop escalation</shortdesc>
+<content type="integer" default="${OCF_RESKEY_stop_escalation}" />
+</parameter>
+</parameters>
+
+<actions>
+<action name="start" timeout="120" />
+<action name="stop" timeout="120" />
+<action name="status" timeout="60" />
+<action name="monitor" depth="0" timeout="30" interval="30"/>
+<action name="meta-data" timeout="5" />
+<action name="validate-all" timeout="5" />
+<action name="methods" timeout="5" />
+</actions>
+</resource-agent>
+EOF
+}
+
+
+#
+#	Run the given command in the Resource owner environment...
+#
+runasowner() {
+    local quietrun=""
+    [ "x$1" = "x-q" ] && {
+		quietrun="-q"
+		shift 1
+	}
+    
+	ocf_run $quietrun su $OCF_RESKEY_pgdba -c "cd $OCF_RESKEY_pgdata; $@"
+}
+
+#
+# methods: What methods/operations do we support?
+#
+
+pgsql_methods() {
+  cat <<EOF
+	start
+	stop
+	status
+	monitor
+	methods
+	meta-data
+	validate-all
+EOF
+}
+
+
+#pgsql_start: Starts PostgreSQL
+pgsql_start() {
+    local pgctl_options
+    local postgres_options
+
+    if pgsql_status; then
+        ocf_log info "PostgreSQL is already running. PID=`cat $PIDFILE`"
+        return $OCF_SUCCESS
+    fi
+
+    # Remove postmaster.pid if it exists
+    rm -f $PIDFILE
+
+    # Remove backup_label if it exists
+    if [ -f $BACKUPLABEL ]; then
+	ocf_log info "Removing $BACKUPLABEL. The previous backup might have failed."
+	rm -f $BACKUPLABEL
+    fi
+
+    # Check if we need to create a log file
+    if ! check_log_file $OCF_RESKEY_logfile
+    then
+        ocf_log err "PostgreSQL can't write to the log file: $OCF_RESKEY_logfile"
+	return $OCF_ERR_GENERIC
+    fi
+
+    # Check socket directory
+    if [ -n "$OCF_RESKEY_socketdir" ]
+    then
+        check_socket_dir
+    fi
+
+    # Set options passed to pg_ctl
+    pgctl_options="$OCF_RESKEY_ctl_opt -D $OCF_RESKEY_pgdata -l $OCF_RESKEY_logfile"
+
+    # Set options passed to the PostgreSQL server process
+    postgres_options=""
+    if [ -n "$OCF_RESKEY_config" ]; then
+	postgres_options="$postgres_options -c config_file=${OCF_RESKEY_config}"
+    fi
+    if [ -n "$OCF_RESKEY_pghost" ]; then
+	postgres_options="$postgres_options -h $OCF_RESKEY_pghost"
+    fi
+    if [ -n "$OCF_RESKEY_start_opt" ]; then
+	postgres_options="$postgres_options $OCF_RESKEY_start_opt"
+    fi
+
+    # Tack pass-through options onto pg_ctl options
+    if [ -n "$postgres_options" ]; then
+	pgctl_options="$pgctl_options -o '$postgres_options'"
+    fi
+
+    # Invoke pg_ctl
+    runasowner "$OCF_RESKEY_pgctl $pgctl_options start"
+
+    if [ $? -eq 0 ]; then
+	# Probably started.....
+        ocf_log info "PostgreSQL start command sent."
+    else
+	ocf_log err "Can't start PostgreSQL."
+        return $OCF_ERR_GENERIC
+    fi
+
+    while :
+    do
+        pgsql_monitor warn
+        rc=$?
+        if [ $rc -eq 0 ]; then
+            break;
+        fi
+        sleep 1
+	ocf_log debug "PostgreSQL still hasn't started yet. Waiting..."
+    done
+    ocf_log info "PostgreSQL is started."
+
+    return $OCF_SUCCESS
+}
+
+#pgsql_stop: Stop PostgreSQL
+pgsql_stop() {
+    if ! pgsql_status
+    then
+        #Already stopped
+        return $OCF_SUCCESS
+    fi
+
+    # Stop PostgreSQL, do not wait for clients to disconnect
+    runasowner "$OCF_RESKEY_pgctl -D $OCF_RESKEY_pgdata stop -m fast"
+
+    # stop waiting
+    count=0
+    while [ $count -lt $OCF_RESKEY_stop_escalate ]
+    do
+        if ! pgsql_status
+        then
+            #PostgreSQL stopped
+            break;
+        fi
+        count=`expr $count + 1`
+        sleep 1
+    done
+
+    if pgsql_status
+    then
+       #PostgreSQL is still up. Use another shutdown mode.
+       ocf_log info "PostgreSQL failed to stop after ${OCF_RESKEY_stop_escalate}s using -m fast. Trying -m immediate..."
+       runasowner "$OCF_RESKEY_pgctl -D $OCF_RESKEY_pgdata stop -m immediate"
+    fi
+
+    while :
+    do
+        pgsql_monitor
+        rc=$?
+        if [ $rc -eq $OCF_NOT_RUNNING ]; then
+            # An unnecessary debug log is prevented.
+            break;
+        fi
+	sleep 1
+	ocf_log debug "PostgreSQL still hasn't stopped yet. Waiting..."
+    done
+
+    # Remove postmaster.pid if it exists
+    rm -f $PIDFILE
+
+    return $OCF_SUCCESS
+}
+
+#
+# pgsql_status: is PostgreSQL up?
+#
+
+pgsql_status() {
+     if [ -f $PIDFILE ]
+     then
+         PID=`head -n 1 $PIDFILE`
+         kill -s 0 $PID >/dev/null 2>&1 && fuser $OCF_RESKEY_pgdata 2>&1 | grep $PID >/dev/null 2>&1
+         return $?
+     fi
+
+     # No PID file
+     false
+}
+
+#
+# pgsql_monitor
+#
+
+pgsql_monitor() {
+    local loglevel
+    local psql_options
+
+    # Set the log level of the error message
+    loglevel=${1:-err}
+
+    if ! pgsql_status
+    then
+	ocf_log info "PostgreSQL is down"
+	return $OCF_NOT_RUNNING
+    fi
+
+    psql_options="-p $OCF_RESKEY_pgport -U $OCF_RESKEY_pgdba $OCF_RESKEY_pgdb"
+    if [ -n "$OCF_RESKEY_pghost" ]; then
+	psql_options="$psql_options -h $OCF_RESKEY_pghost"
+    else
+       if [ -n "$OCF_RESKEY_socketdir" ]; then
+           psql_options="$psql_options -h $OCF_RESKEY_socketdir"
+       fi
+    fi
+    runasowner -q "$OCF_RESKEY_psql $psql_options -c 'select now();'"
+
+    rc=$?
+    if [ $rc -ne  0 ]; then
+	ocf_log $loglevel "PostgreSQL $OCF_RESKEY_pgdb isn't running"
+        if [ $rc -eq 1 ]; then
+            ocf_log err "Fatal error (out of memory, file not found, etc.) occurred while executing the psql command."
+        elif [ $rc -eq 2 ]; then
+            ocf_log $loglevel "Connection error (connection to the server went bad and the session was not interactive) occurred while executing the psql command."
+        elif [ $rc -eq 3 ]; then
+            ocf_log err "Script error (the variable ON_ERROR_STOP was set) occurred while executing the psql command."
+        fi
+	return $OCF_ERR_GENERIC
+    fi
+
+    return $OCF_SUCCESS
+}
+
+check_binary2() {
+    if ! have_binary "$1"; then
+        ocf_log err "Setup problem: couldn't find command: $1"
+        return 1
+    fi
+    return 0
+}
+
+# Validate most critical parameters
+pgsql_validate_all() {
+    if ! check_binary2 "$OCF_RESKEY_pgctl" ||
+            ! check_binary2 "$OCF_RESKEY_psql" ||
+            ! check_binary2 fuser; then
+        return $OCF_ERR_INSTALLED
+    fi
+
+    if [ -n "$OCF_RESKEY_config" -a ! -f "$OCF_RESKEY_config" ]; then
+        ocf_log err "the configuration file $OCF_RESKEY_config doesn't exist"
+        return $OCF_ERR_INSTALLED
+    fi
+
+    return $OCF_SUCCESS
+}
+
+
+#
+# Check if we need to create a log file
+#
+
+check_log_file() {
+    if [ ! -f "$1" ]
+    then
+        touch $1 > /dev/null 2>&1
+        chown $OCF_RESKEY_pgdba:`getent passwd $OCF_RESKEY_pgdba | cut -d ":" -f 4` $1
+    fi
+
+    #Check if $OCF_RESKEY_pgdba can write to the log file
+    if ! runasowner "test -w $1"
+    then
+        return 1
+    fi
+
+    return 0
+}
+
+#
+# Check socket directory
+#
+check_socket_dir() {
+    if [ ! -d "$OCF_RESKEY_socketdir" ]; then
+        if ! mkdir "$OCF_RESKEY_socketdir"; then
+            ocf_log err "Cannot create directory $OCF_RESKEY_socketdir"
+            exit $OCF_ERR_GENERIC
+        fi
+
+        if ! chown $OCF_RESKEY_pgdba:`getent passwd \
+             $OCF_RESKEY_pgdba | cut -d ":" -f 4` "$OCF_RESKEY_socketdir" 
+        then
+            ocf_log err "Cannot change ownership for $OCF_RESKEY_socketdir"
+            exit $OCF_ERR_GENERIC
+        fi
+
+        if ! chmod 2775 "$OCF_RESKEY_socketdir"; then
+            ocf_log err "Cannot change permissions for $OCF_RESKEY_socketdir"
+            exit $OCF_ERR_GENERIC
+        fi
+    else
+        if ! runasowner "touch $OCF_RESKEY_socketdir/test.$$"; then
+            ocf_log err "$OCF_RESKEY_pgdba cannot create files in $OCF_RESKEY_socketdir"
+            exit $OCF_ERR_GENERIC
+        fi
+        rm $OCF_RESKEY_socketdir/test.$$
+    fi
+}
+
+#
+#   'main' starts here...
+#
+
+
+if [ $# -ne 1 ]
+then
+    usage
+    exit $OCF_ERR_GENERIC
+fi
+
+
+PIDFILE=${OCF_RESKEY_pgdata}/postmaster.pid
+BACKUPLABEL=${OCF_RESKEY_pgdata}/backup_label
+
+case "$1" in
+    methods)    pgsql_methods
+                exit $?;;
+
+    meta-data)  meta_data
+                exit $OCF_SUCCESS;;
+esac
+
+# $OCF_RESKEY_pgdata has to be initialized at this momemnt
+: ${OCF_RESKEY_socketdir=`get_pgsql_param unix_socket_directory`}
+
+pgsql_validate_all
+rc=$?
+
+[ "$1" == "validate-all" ] && exit $rc
+
+if [ $rc -ne 0 ]
+then
+    case "$1" in
+        stop)    exit $OCF_SUCCESS;;
+        monitor) exit $OCF_NOT_RUNNING;;
+        status)  exit $OCF_NOT_RUNNING;;
+        *)       exit $rc;;
+    esac
+fi
+
+US=`id -u -n`
+
+if [ $US != root -a $US != $OCF_RESKEY_pgdba ]
+then
+    ocf_log err "$0 must be run as root or $OCF_RESKEY_pgdba"
+    exit $OCF_ERR_GENERIC
+fi
+
+# What kind of method was invoked?
+case "$1" in
+    status)     if pgsql_status
+                then
+                    ocf_log info "PostgreSQL is up"
+                    exit $OCF_SUCCESS
+                else
+                    ocf_log info "PostgreSQL is down"
+                    exit $OCF_NOT_RUNNING
+                fi;;
+
+    monitor)    pgsql_monitor
+                exit $?;;
+
+    start)      pgsql_start
+                exit $?;;
+
+    stop)       pgsql_stop
+                exit $?;;
+    *)
+                exit $OCF_ERR_UNIMPLEMENTED;;
+esac

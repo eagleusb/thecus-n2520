@@ -1,0 +1,440 @@
+<?
+session_start();
+require_once('../../../function/conf/localconfig.php');
+require_once(INCLUDE_ROOT.'session.php');
+require_once("GlobalVars.html");
+require_once("functions.html");
+require_once(WEBCONFIG);
+$passtmp = AlbumRoot . $_GET['id'] . "/" . fix_post($_GET['album']);
+
+if (GetPassword($passtmp,fix_post($_GET['album'])) != ""){
+	if ($_SESSION['album_pwd'] != 'pass'){
+
+		direct_out("album.html?id=".fix_encode($_GET['id']));
+		exit;
+	}
+}
+//require_once("../setlang/lang.html");
+$words=$session->PageCode("photo");
+$gwords=$session->PageCode("global");
+  function view(){
+	  require_once("HtmlHeader.html");
+	  body();	  
+  }
+$_GET['album']=fix_post(fix_post($_GET['album']));
+$_POST['album']=fix_post(fix_post($_POST['album']));
+   if (User_exist($_GET['id'])){
+	if (Album_exist($_GET['id'],$_GET['album'])){
+	if ($_SESSION['username']==$_GET['id'])$Level="advance";
+	$obj = ScanDirs($_GET['id'],$_GET['album']);
+	$AlbumNum = 0;
+	$obj_num = count($obj);
+	$PageSize = 10 ;
+	$ColNum = 5;
+	$NextPageSize = 10 ;
+	$PageNum = $obj_num / $PageSize;
+	if (($obj_num % $PageSize)!=0)
+		$PageNum=floor($PageNum) + 1;
+	if($PageNum==0)
+		$PageNum=1;
+	$PageIndex=1;	
+
+	if($_GET['Page'])
+	    $PageIndex=$_GET['Page'];
+	if( $PageIndex > $PageNum)
+	    $PageIndex=$PageNum;
+								
+		$From=($PageIndex-1)*$PageSize;
+		$To=$PageIndex*$PageSize-1;
+		if ($To>$obj_num-1)
+		$To=$obj_num-1;
+
+//enian 2008 12 29 check migration exception
+		if($_POST['admin'] != '')
+		{
+			include_once("/var/www/html/inc/function.php");
+			check_system_usermode("/usr/gallery/photo.html?album=".$_GET['album']."&id=".$_GET['id']);
+    }
+//end enian 2008 12 29
+
+  	switch ($_POST['admin']){
+	case 'set_to_cover':
+	     $cover = AlbumRoot . $_SESSION['username'] . "/" . $_POST['album'] . "/"  . "TheCus.cover";
+		 $Desp=ParseObj($cover);
+		 $fp=fopen($cover,"wb");
+		 fwrite($fp,fix_post($_POST['photo'][0]) );
+	     fclose($fp);
+		view();
+		exit;
+	case 'upload_photo':
+		require_once("UploadForm.html");
+		exit;
+		break;
+	case 'confirm_upload':
+		require_once("upload.html");
+		direct_out("photo.html?Page=1&id=" . fix_encode($_SESSION['username']) . "&album=" . Fix_encode($_POST['album']));
+		exit;
+		break;
+	case 'modify_photo':
+		require_once("ModifyPhoto.html");
+		exit;
+		break;
+	case 'confirm_modify':
+			for($i=0;$i<count($_POST['Subject']);$i++)
+			{	
+			  $_POST['target_photo'][$i]=fix_post($_POST['target_photo'][$i]);
+				$PhotoSubject =AlbumRoot ."{$_SESSION['username']}/{$_POST['album']}/{$_POST['target_photo'][$i]}.Subject";
+				$PhotoDesp =AlbumRoot ."{$_SESSION['username']}/{$_POST['album']}/{$_POST['target_photo'][$i]}.Desp";
+				SetObject($PhotoSubject,fix_post($_POST['Subject'][$i]));
+				SetObject($PhotoDesp,fix_post($_POST['Desp'][$i]));	
+			}
+		direct_out("photo.html?Page=1&id=" . Fix_encode($_SESSION['username']) . "&album=" . Fix_encode($_POST['album']));
+		exit;
+	case 'delete_photo':
+		for($i=0;$i<count($_POST['photo']);$i++){
+			$delPath = AlbumRoot . "{$_SESSION['username']}/{$_POST['album']}/";
+			$picName=Fix_post($_POST['photo'][$i] );
+			@unlink("{$delPath}/100x100/{$picName}");
+			@unlink("{$delPath}/300x300/{$picName}");
+			@unlink("{$delPath}/{$picName}");
+			@unlink("{$delPath}/{$picName}.Subject");
+			@unlink("{$delPath}/{$picName}.Desp");
+			if (@($fp = fopen("{$delPath}/TheCus.cover","r")))
+				if($_POST['photo'][$i]==fgets($fp,70))
+				@unlink("{$delPath}/TheCus.cover");
+			@fclose($fp);
+		}
+		direct_out("photo.html?Page=1&id=" . fix_encode($_SESSION['username']) . "&album=" . Fix_encode($_POST['album']));
+		exit;
+		break;
+	default:
+			view();
+			break;
+	}
+	}
+   }
+   else
+       direct_out("iframe_gallery.html");
+?>
+<?function cover($index){?>
+	<tr>
+       		<td><img src="/usr/gallery/img/photo_frame_01.png" width="10" height="9"></td>
+       		<td><img src="/usr/gallery/img/photo_frame_02.png" width="100" height="9"></td>
+       		<td><img src="/usr/gallery/img/photo_frame_03.png" width="9" height="9"></td>
+       	</tr>
+       	<tr>
+       		<td background="/usr/gallery/img/photo_frame_04.png" ><img src="/usr/gallery/img/photo_frame_04.png" width="10" height="100"></td>
+		<td align="center" bgcolor="#FFFFFF">
+			<?
+			$id = Fix_encode($GLOBALS['obj'][$index][1]);
+			$cover = AlbumRoot . $_GET['id'] . "/". $GLOBALS['obj'][$index][1];
+			?>  
+			<a href="PhotoShow.html?id=<?=Fix_encode($_GET['id'])?>&album=<?=Fix_encode($_GET['album'])?>&Page=<?=$index+1?>"><?=GetImgSrc(Fix_encode($_GET['id']),Fix_encode($_GET['album']),$id,"100x100","small")?></a>
+		</td>
+       		<td background="/usr/gallery/img/photo_frame_06.png"><img src="/usr/gallery/img/photo_frame_06.png" width="9" height="100"></td>
+       	</tr>
+       	<tr>
+       		<td><img src="/usr/gallery/img/photo_frame_07.png" width="10" height="9"></td>
+       		<td><img src="/usr/gallery/img/photo_frame_08.png" width="100" height="9"></td>
+       		<td><img src="/usr/gallery/img/photo_frame_09.png" width="9" height="9"></td>
+       	</tr>
+<?}?>
+<?
+	function col_1($row_count){
+		global $ColNum;
+		echo "<tr>"."\r\n";
+		for($i=0;$i<$ColNum;$i++){
+			echo '<td width="137">&nbsp;</td>'."\r\n";
+			echo '<td width="33">&nbsp;</td>'."\r\n";
+		}
+		echo '</tr>'."\r\n";
+	}
+
+	function col_2($row_count){
+		global $ColNum;
+		echo "<tr>\r\n";
+		for($i=0;$i<$ColNum;$i++){
+			echo "<td height=\"121\" align=\"center\" valign=\"bottom\">\r\n";
+			echo "<table width=\"0%\"  border=\"0\" cellpadding=\"0\" cellspacing=\"0\">\r\n";
+			$index=($row_count * $ColNum + $i + ($GLOBALS['PageIndex']-1)*$GLOBALS['PageSize']);
+			if (($index >=$GLOBALS['From']) && ($index<=$GLOBALS['To']))
+				cover($row_count * $ColNum + $i + ($GLOBALS['PageIndex']-1)*$GLOBALS['PageSize']) ;
+			echo "</table>\r\n";
+			echo "</td>\r\n";
+			echo "<td>&nbsp;</td>\r\n";
+		}
+		echo "</tr>\r\n";
+	}
+
+	function col_3($row_count){
+		global $ColNum;
+		echo "<tr>\r\n";
+		for($i=0;$i<$ColNum;$i++){
+			echo '<td height="27" align="center">'."\r\n";
+			echo "\t".'<table width="137"  border="0" cellspacing="0" cellpadding="0">'."\r\n";
+			echo "\t<tr>\r\n";
+			$index=($row_count * $ColNum + $i + ($GLOBALS['PageIndex']-1)*$GLOBALS['PageSize']);
+			if (($index >=$GLOBALS['From']) && ($index<=$GLOBALS['To'])){
+				$index=($row_count * $ColNum + $i + ($GLOBALS['PageIndex']-1)*$GLOBALS['PageSize']);
+				$id = Fix_encode($GLOBALS['obj'][$index][1]);
+				$PhotoSubject =  AlbumRoot . "{$_GET['id']}/{$_GET['album']}/{$GLOBALS['obj'][$index][1]}.Subject";
+				echo '<td height="27" colspan="3" align="center" background="/usr/gallery/img/name_form.png" >' . Fix_UTF8(ParseObj($PhotoSubject),20) . '</td>'."\r\n";
+			} else {
+				echo "<td></td>\r\n";
+			}
+			echo "\t</tr>\r\n";
+			echo "\t</table>\r\n";
+			echo "</td>\r\n";
+			echo "<td>&nbsp;</td>\r\n";
+		}
+		echo "</tr>\r\n";			
+	}
+	function Manage($row_count){
+		global $ColNum;
+		echo "<tr>\r\n";
+   		for($i=0;$i<$ColNum;$i++){
+			echo '<td align="center" valign="bottom" width=137>';
+           	   	$index=($row_count * $ColNum + $i + ($GLOBALS['PageIndex']-1)*$GLOBALS['PageSize']);
+			if (($index >=$GLOBALS['From']) && ($index<=$GLOBALS['To'])){
+		   		if ($GLOBALS['Level']=="advance"){
+					$AlbumIndex=$row_count * $ColNum + $i + ($GLOBALS['PageIndex']-1)*$GLOBALS['PageSize'];
+					$target_album = $GLOBALS['obj'][$AlbumIndex][1]; 
+   					echo '<input type="checkbox" name="photo[]" value="' . $target_album .  '">';
+				} else{
+					echo '&nbsp;';
+				}
+			} else {
+				echo '&nbsp;';
+			}
+			echo "</td>\r\n";
+			echo '<td width="33">&nbsp;</td>'."\r\n";
+		}
+		echo "</tr>\r\n";
+	}
+	function Manage_Option(){
+		global $words;
+		global $obj_num;
+            	echo '<tr align="center" valign="middle">'."\r\n";
+                echo  '<td align="center" valign="middle"><a href="album.html?id=' . fix_encode($_GET['id']) . '"><img src="/usr/gallery/img/button_back.png" title="' . $gwords['back'] . '" border="0"></a></td>'."\r\n";
+   		if ($GLOBALS['Level']=="advance"){
+                echo  '<td align="center" valign="middle"><img src="/usr/gallery/img/button_makecover.png" title="' .$words['set_to_cover']  . '" border="0" style="cursor:pointer;cursor:hand" onclick=\'if(SingleCheck(document.advance)){manage(' . '"set_to_cover"' . ');advance.submit();}else{ alert(' .'"' . $words["AllowOne"] .'"' . ');return false;}\';></td>'."\r\n";
+                echo  '<td><img src="/usr/gallery/img/button_add.png" title="' .$words['upload_photo']  . '" border="0" style="cursor:pointer;cursor:hand" onclick=manage("upload_photo");></td>'."\r\n";
+                echo  '<td><img src="/usr/gallery/img/button_edit.png" title="' .$words['modify_photo']  . '" border="0" style="cursor:pointer;cursor:hand" onclick="return ModifyClick();"></td>'."\r\n";
+                echo  '<td align="center" valign="middle"><img src="/usr/gallery/img/button_del.png" title="' .$words['delete_photo']  . '" border="0" style="cursor:pointer;cursor:hand" onclick="return DelClick();"></td>'."\r\n";
+		}
+		if($obj_num > 0) {
+			echo '<td align="center" valign="middle">'."\r\n";
+			$tmp=$GLOBALS['From']+1;
+                	echo "<a href=\"slideshow.html?id=".Fix_encode($_GET['id'])."&album=".Fix_encode($_GET['album'])."&Page=".$tmp."&slideshow=1\">";
+                	echo "<img src=\"/usr/gallery/img/slideshow.png\" border=\"0\" alt=\"{$words['altStartSlide']}\" />";
+			echo "</td>\r\n";
+		}
+		require_once("HtmlMenu.html");
+		echo "</tr>\r\n";
+	}
+	function Album_Desp(){
+		echo "<tr>\r\n";
+         	echo '<td colspan="10" align="center" valign="bottom">'."\r\n";
+		echo '<table width="80%"  border="0" cellpadding="0" cellspacing="0">'."\r\n";
+            	echo "<tr>\r\n";
+           	echo '<td class="style2" width="600"><div align="left">'."\r\n";
+		$cover = AlbumRoot . $_GET['id'] . "/". $_GET['album'];
+		$CoverDesp=GetDesp($cover,$_GET['album']);
+		echo $CoverDesp;
+		echo '</div></td>';
+	       	echo "</tr>\r\n";
+       	    	echo "</table>\r\n";
+		echo "</td>\r\n";
+		echo "</tr>\r\n";
+	}
+?>
+<?function Paging(){
+	global $words;
+?>
+	<tr align="center"> 
+	<td colspan="10">
+		<table width="20"  border="0" cellspacing="0" cellpadding="0">
+		<tr> 
+		<td align="right">
+		<?$From = floor(( $GLOBALS['PageIndex'] - 1 )/$GLOBALS['NextPageSize']) * $GLOBALS['NextPageSize'] +1 ;?>
+		<?if (( $From -  $GLOBALS['NextPageSize'] ) > 0){?>
+		<a href="photo.html?Page=<?echo $From - $GLOBALS['NextPageSize'];?>&id=<?=Fix_encode($_GET['id'])?>&album=<?=Fix_encode($_GET['album'])?>" onMouseOver="MM_swapImage('pgup_1','','/usr/gallery/img/button_pgup_2.gif',1)" onMouseOut="MM_swapImgRestore()"><img src="/usr/gallery/img/button_pgup_1.gif" name="pgup_1" width="25" height="25" border="0" id="pgup_1" title="<?=$words['PreviousPage']?>"></a>
+		<?}?>
+		</td>
+                <td width="20%" align="center">
+		<?
+                  if($GLOBALS[obj_num]==0) echo "&nbsp;";
+                  else {
+                    for($i=$From ,$j=1;$i <= $GLOBALS['PageNum'] && $j<= $GLOBALS['NextPageSize'] ; $i++,$j++){
+                      if($i!=$GLOBALS[PageIndex]){
+                        echo '<u><a href=photo.html?Page='.$i. '&id='. Fix_encode($_GET['id']) .'&album=' . Fix_encode($_GET['album']) . '>'. $i .'</a></u>&nbsp;' ;	
+                      } else{
+                        echo "{$GLOBALS[PageIndex]}";
+                      }
+                    }
+                  }
+		?>
+		</td>
+                <td align="left">
+			<?if (( $From + $GLOBALS['NextPageSize'] - 1 ) < $GLOBALS['PageNum']) $ActiveNext=true; else  $ActiveNext=false;?>
+			<?if( $ActiveNext){?>
+			<a href="photo.html?Page=<?echo $From + $GLOBALS['NextPageSize'];?>&id=<?=Fix_encode($_GET['id']) .'&album=' . Fix_encode($_GET['album'])?>" onMouseOver="MM_swapImage('pgdn_1','','/usr/gallery/img/button_pgdn_2.gif',1)" onMouseOut="MM_swapImgRestore()"><img src="/usr/gallery/img/button_pgdn_1.gif" name="pgdn_1" width="25" height="25" border="0" id="pgdn_1" title="<?=$words['NextPage']?>"></a>
+			<?}?>
+		</td>
+                </tr>
+                </table>
+	</td>
+        </tr>
+<?}?>
+<?function body(){
+global $words;
+?>
+<style type="text/css">
+<!--
+body,td,th {
+	font-family: Arial, Helvetica, sans-serif;
+}
+.style2 {color: #666666;
+	font-weight: bold;
+	font-size: 11px;
+}
+.style3 {color: #FFFFFF;
+	font-size: 12px;
+}
+.style4 {font-size: 10px}
+body {
+	margin-left: 0px;
+	margin-top: 0px;
+	margin-right: 0px;
+	margin-bottom: 0px;
+	color: #ffffff;
+}
+-->
+</style>
+<body bgcolor="#686868" text="#000000" leftmargin="0" topmargin="0" marginwidth="0" marginheight="0">
+<?if ($GLOBALS['Level']=="advance")echo "<form method=post name=advance><input type=hidden name=album value=\"{$_GET['album']}\">";?>
+<table width="719px" border="0" cellspacing="0" cellpadding="0" align="center" class="outerpage">
+  <? require_once("HtmlBanner.html"); ?>
+  <tr>
+    <td align="center" valign="top">
+        <table width="95%"  border="0" cellpadding="0" cellspacing="0">
+          <tr>
+            <td width="70%" height="26" align="left">
+            <span class="style1"><a href="iframe_gallery.html" target="_self"><?=$words['gallery']?></a> &gt;  <a href="album.html?id=<?=fix_encode($_GET['id'])?>"><?=$_GET['id']?><?=str_replace("\\'","'",$words['owner'])?></a> &gt; <?=$_GET['album']?> </span>
+            </td>
+            <td width="30%" align="right">
+                <table width="10%"  border="0" cellpadding="0" cellspacing="0">
+      			<?Manage_Option()?>
+                </table>
+            </td>
+          </tr>
+        </table>
+        <table width="90%"  border="0" cellpadding="0" cellspacing="0">
+ 		  <?Album_Desp()?>
+	<?
+	  	$row=2;
+		for ($row_count=1;$row_count<=$row;$row_count++){
+			col_1($row_count-1);
+			col_2($row_count-1);
+			col_3($row_count-1);
+			Manage($row_count-1);
+		}
+		col_1("");
+		Paging();
+	?>
+      </table>
+    </td>
+  </tr>
+  <? require_once("HtmlBottom.html"); ?>
+</table>
+<?if ($GLOBALS['Level']=="advance"){echo "\r\n\r\n";Photo_Admin();echo "</form>";}?>
+</body>
+</html>
+<?}?>
+<?function Photo_Admin(){
+global $words;
+$coverpic=file(AlbumRoot . $_SESSION['username']."/".$_GET['album']."/TheCus.cover");
+$coverpic_name=addcslashes($coverpic[0],"\'");
+?>
+<input type=hidden name="admin" value="">
+  <script language=javascript> 
+    function manage(ACT){
+	document.advance.admin.value=ACT;
+	document.advance.submit();
+	}
+	
+    function CheckBoxCheck(form_id){
+      with (form_id) {
+	for (i=0; i<elements.length; i++)
+         if (elements[i].type=="checkbox" && elements[i].checked==true)
+	    return true;
+      }
+    return false;
+   }
+
+    function SingleCheck(form_id){
+      var Single=0;
+      with (form_id) {
+	for (i=0; i<elements.length; i++)
+         if (elements[i].type=="checkbox" && elements[i].checked==true)
+	    Single++;
+      }
+    if (Single==1) return true;
+    else return false;
+   }
+
+    function ModifyLimited(form_id){
+      var counter=0;
+      with (form_id) {
+	for (i=0; i<elements.length; i++)
+         if (elements[i].type=="checkbox" && elements[i].checked==true)
+	     counter++;
+      }
+    if (counter<=10)return true;
+    else{alert("<?=$words['max_modify']?>"); return false;}
+   }
+
+     function ModifyClick(){
+	if(!CheckBoxCheck(document.advance)){
+		alert("<?=$words['AtLeastOne']?>");
+		return false;
+	}
+	if(!ModifyLimited(document.advance)){
+		return false;
+	}
+		manage('modify_photo');
+		document.advance.submit();
+		return true;
+     }
+
+function CheckHasCoverPic(){  
+  with(document.advance){
+  for (i=0; i<elements.length; i++){
+         if (elements[i].type=="checkbox" && elements[i].checked==true){
+           if(elements[i].value=="<?=$coverpic_name?>")
+             return 1;
+         }
+      }  
+  }
+  return 0;
+}
+        function DelClick(){
+          var ret,wording;
+	if(!CheckBoxCheck(document.advance)){
+		alert("<?=$words['AtLeastOne']?>");
+		return false;
+	}
+		ret=CheckHasCoverPic();
+	if(ret == 0){
+	   wording="<?=$words['JsDelConfirm']?>"; 
+	}else{
+	   wording="<?=$words['JsDelConfirm_2']?>"; 
+	}
+	
+	if(confirm(wording)){
+	manage('delete_photo');
+	document.advance.submit();
+	}
+       }
+   </script>
+<?}?>

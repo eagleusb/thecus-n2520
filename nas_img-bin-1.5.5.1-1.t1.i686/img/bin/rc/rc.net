@@ -1,0 +1,3675 @@
+#!/bin/sh
+#==================================================
+#        FILE:  Network setting
+#       USAGE:  boot_step1
+#               boot_step2
+#               get_network_info
+#               get_dhcp_server_info
+#               set_network_info network_info
+#               set_dhcp_server dhcp_server_info
+#               set_link link_info
+#               link_wan_lan
+#               destory_one_link interface
+#               check_wan_lan_same_bond
+#               check_wan_lan_can_bond
+#               check_ha_vip
+#               start_ifplug
+# DESCRIPTION:  set Network/get Network info
+#       NOTES:  none
+#      AUTHOR:  enian
+#     VERSION:  1.0.0
+#     CREATED:  2011/11/30
+#    REVISION:  2011/11/30
+#==================================================
+#==================================================
+#  Constants Defined
+#==================================================
+CONFDB="/etc/cfg/conf.db"
+SQLITE="/usr/bin/sqlite"
+LINKTABLE1="link_base_data"
+LINKTABLE2="link_interface"
+IFCONFIG="/sbin/ifconfig"
+OTHER_NET="/img/bin/rc/rc.tengb"
+LOGEVENT="/img/bin/logevent/event"
+DHCP_FILE_NAME="/var/state/udhcpd_"
+PID_FILE="/var/run/udhcpd_"
+PID_RADVD_FILE="/var/run/radvd_"
+LEASEFILE="/var/lib/misc/udhcpd_"
+RESOLV="/etc/resolv.conf"
+TMPCHECKFILE="/var/tmp/net_init"
+TMPIPV6EN="/var/tmp/ipv6_en"
+LINKING_CMD="/img/bin/8023ad.sh"
+JUMBO_FILE="/tmp/tengb_jumbo"
+ETHTOOL="/sbin/ethtool"
+REBOOT_FLAG="/var/tmp/network_reboot"
+VALIDATE_SCRIPT="/img/bin/function/validate.sh"
+IPV6CHECK="/usr/bin/ipv6check"
+WANFLAG="/tmp/wan_8023_val"
+LOCK_FILE="/tmp/wan.lock"
+IFPLUGD_CMD="/usr/sbin/ifplugd"
+ETHTOOL="/sbin/ethtool"
+ARPING="arping"
+NDISC6="ndisc6"
+ERROR_FILE="/tmp/network_error"
+NAMESERVER_TMP="/tmp/nameserver.tmp"
+
+#==================================================
+#  Variable Defined
+#==================================================
+gTable1Field="(id,mode,ipv4_enable,ipv4_conn_type,ip,netmask,gateway,ipv6_enable,ipv6_conn_type,ipv6,prefix_len,ipv6_gateway,jumbo,desp)"
+gErrorMsg=""
+gNetSqlFile="/tmp/net_sql"
+gLinkSqlFile="/tmp/link_sql"
+
+#==================================================
+#   Include File
+#==================================================
+. /img/bin/function/libnetwork
+. /img/bin/function/vardef.conf
+
+#==================================================
+#  Function Defined
+#==================================================
+#################################################
+#         NAME:  get_one_conf_data
+#  DESCRIPTION:  get one field vaule
+#      PARAM 1:  db field name
+#      PARAM 2:  default value
+#       RETURN:  field value
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+#################################################
+get_one_conf_data(){
+    local fField="$1"
+    local fDefVal="$2"
+    local fVal            #field value
+    local fCount=`${SQLITE} ${CONFDB} "select count(v) from conf where k='${fField}'"` #match field count
+
+    if [ "${fCount}" == "0" ];then
+        fVal=`${SQLITE} ${CONFDB} "insert into conf values('${fField}','${fDefVal}')"`
+        fVal="${fDefVal}"
+    else
+        fVal=`${SQLITE} ${CONFDB} "select v from conf where k='${fField}'"`
+    fi 
+    echo "${fVal}"
+}
+
+##################################################################
+#         NAME:  check_create_db
+#  DESCRIPTION:  check table link_base_data, link_interface exist
+#                create table link_base_data, link_interface
+#      PARAM 1:  none
+#       RETURN:  has create 0/1(no/yes)
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+check_create_db(){
+    local fRet1=1
+    local fRet2=1
+    local fRet
+    local fStr=""
+
+    fRet=`${SQLITE} ${CONFDB} ".table" | grep "${LINKTABLE1}"`
+    if [ "${fRet}" == "" ];then
+         fStr="CREATE TABLE ${LINKTABLE1} (id numeric,mode,ipv4_enable,ipv4_conn_type,ip,netmask,gateway,ipv6_enable,ipv6_conn_type,ipv6,prefix_len,ipv6_gateway,jumbo,desp,v1,v2,v3,v4,v5,v6);"
+    else
+        fRet1=0
+    fi
+
+    fRet=`${SQLITE} ${CONFDB} ".table" | grep "${LINKTABLE2}"`
+    if [ "${fRet}" == "" ];then
+         fStr="${fStr}CREATE TABLE ${LINKTABLE2} (id numeric,mac,v1,v2,v3,v4);"
+    else
+        fRet2=0
+    fi
+
+    if [ "${fRet1}" != 0 ] || [ "${fRet2}" != 0 ];then
+        echo "BEGIN TRANSACTION;${fStr};COMMIT;" | ${SQLITE} ${CONFDB}
+        echo "1"
+    else
+        echo "0"
+    fi
+}
+
+##################################################################
+#         NAME:  get_free_link_id
+#  DESCRIPTION:  get no use link aggregation id
+#      PARAM 1:  none
+#       RETURN:  link aggregation id
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+get_free_link_id(){
+    local fMax=256
+    local fIndex=0
+    local fLinkList
+    local fNumExist
+    local fCount
+
+    fLinkList=`${SQLITE} ${CONFDB} "select id from ${LINKTABLE1}"`
+    if [ "${fLinkList}" != "" ];then
+        for((fCount=0;fCount<$fMax;fCount++))
+        do
+            fNumExist=`echo "${fLinkList}" | awk '/^'$fCount'$/{print $0}'`
+            if [ "${fNumExist}" == "" ];then
+                fIndex=$fCount
+                break
+            fi
+        done
+    fi
+    echo "${fIndex}"
+}
+
+##################################################################
+#         NAME:  trans_data
+#  DESCRIPTION:  trans/new netwrok field for nic1 nic2
+#      PARAM 1:  fTrans : need trans/new or not
+#       RETURN:  none
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+trans_data(){
+    local fTrans=$1
+    local fDHCPList
+    local fList
+    local fField
+    local fVal
+    local fSqlStr
+    local fTmpStr=""
+    local f8023ad
+    local fEth0Mac
+    local fEth1Mac
+    local fHasLink
+    local fEth0Info
+    local fIp
+    local fMask
+    local fGateway
+    local fLinkId
+    local fDHCP
+    local fJumbo
+    local fNewField=("nic1_ipv4_dhcp_server" "nic1_ipv4_default_ip" "nic2_ipv4_default_ip" "nic1_ipv6_addr" "nic1_ipv6_default_addr"  "nic2_ipv6_addr" "nic2_ipv6_default_addr" "nic1_ipv6_prefixlen" "nic2_ipv6_prefixlen" "nic1_startip" "nic1_endip" "nic2_dynamic_gateway" "nic1_ipv6_enable" "nic2_ipv6_enable" "nic1_ipv6_connection_type" "nic2_ipv6_connection_type" "nic1_ipv6_gateway" "nic2_ipv6_gateway" "nic2_ipv4_dhcp_client" "nic1_ipv4_enable" "nic2_ipv4_enable" "nic2_dhcp_server_dns" "nic1_dhcp_server_dns" "nic1_dynamic_gateway" "nic1_desp" "nic2_desp")
+    local fNewFieldVal=("0" "192.168.1.100" "192.168.2.254" "fec0::1" "fec0::1" "fec1::1" "fec1::1" "64" "64" "192.168.1.2" "192.168.1.99" "" "0" "0" "0" "0" "" "" "0" "1" "1" "" "" "" "" "")
+    local fDefaultGateWay="eth0"
+
+    if [ "${fTrans}" != "0" ];then
+        #-----------------------------------
+        # change nic1 dhcp clinet/default ip nic2 default ip 
+        #-----------------------------------
+        for((i=0; i<${#fNewField[@]}; i++))
+        do
+            fTmpStr=`Lnet_insert_cmd_str "0" "${fNewField[$i]}" "${fNewFieldVal[$i]}"`
+            fSqlStr="${fSqlStr}${fTmpStr}"
+        done
+
+        fDHCP=`${SQLITE} ${CONFDB} "select * from conf where k='nic1_dhcp'"`
+        fVal=`echo $fDHCP | awk -F'|' '{print $2}'`
+        fTmpStr=`Lnet_insert_cmd_str "0" "nic1_ipv4_dhcp_client" "$fVal"`
+        fSqlStr="${fSqlStr}${fTmpStr}"
+        fTmpStr=`Lnet_insert_cmd_str "0" "nic1_dns_type" "$fVal"`
+        fSqlStr="${fSqlStr}${fTmpStr}"
+
+        echo "BEGIN TRANSACTION;${fSqlStr}COMMIT;" | ${SQLITE} ${CONFDB}
+
+        #-----------------------------------
+        # change dhcp Server 
+        #-----------------------------------
+        fSqlStr=""
+        fDHCPList=`${SQLITE} ${CONFDB} "select * from conf where k like '%_dhcp' and k<>'nic1_dhcp' and k<>'wireless_dhcp'"`
+        for fList in ${fDHCPList}
+        do
+            if [ "${fList}" != "" ];then
+                fField=`echo $fList | awk -F'|' '{print substr($1,1,length($1)-5)}'`
+                fVal=`echo $fList | awk -F'|' '{print $2}'`
+                fTmpStr=`Lnet_insert_cmd_str "0" "${fField}_ipv4_dhcp_server" "$fVal"`
+                if [ "${fTmpStr}" != "" ];then
+                    fSqlStr="${fSqlStr}${fTmpStr}"
+                fi
+            fi
+        done
+
+        if [ "${fSqlStr}" != "" ];then
+            echo "BEGIN TRANSACTION;${fSqlStr}COMMIT;" | ${SQLITE} ${CONFDB}
+        fi
+
+        #-----------------------------------
+        #  change 802.3ad
+        #-----------------------------------
+        f8023ad=`${SQLITE} ${CONFDB} "select v from conf where k='nic1_mode_8023ad'"`
+        if [ "${f8023ad}" != "" ] && [ "${f8023ad}" != "none" ];then
+            fLinkId=`get_free_link_id`
+            fEth0Info=`${SQLITE} ${CONFDB} "select * from conf where k='nic1_ip' or k='nic1_netmask' or k='nic1_gateway' or k='nic1_jumbo'"`
+            fIp=`echo -e "${fEth0Info}" | awk -F'|' '/^nic1_ip\|/{print $2}'`
+            fMask=`echo -e "${fEth0Info}" | awk -F'|' '/^nic1_netmask\|/{print $2}'`
+            fGateway=`echo -e "${fEth0Info}" | awk -F'|' '/^nic1_gateway\|/{print $2}'`
+            fJumbo=`echo -e "${fEth0Info}" | awk -F'|' '/^nic1_jumbo\|/{print $2}'`
+            fEth0Mac=`${IFCONFIG} eth0 | awk '/ HWaddr /{print $5}'`
+            fEth1Mac=`${IFCONFIG} eth1 | awk '/ HWaddr /{print $5}'`
+            fSqlStr="insert into ${LINKTABLE1}(id,mode,ip,netmask,gateway,ipv6_enable,jumbo,ipv4_conn_type,ipv6_conn_type,ipv4_enable) values('${fLinkId}','${f8023ad}','${fIp}','${fMask}','${fGateway}','0','${fJumbo}','0','0','1');"
+            fSqlStr="${fSqlStr}insert into ${LINKTABLE2}(id,mac) values('${fLinkId}','${fEth0Mac}');"
+            fSqlStr="${fSqlStr}insert into ${LINKTABLE2}(id,mac) values('${fLinkId}','${fEth1Mac}');"
+            fDefaultGateWay="bond${fLinkId}"
+            echo "BEGIN TRANSACTION;${fSqlStr};COMMIT;" | ${SQLITE} ${CONFDB}
+        fi
+        
+        fTmpStr=`Lnet_insert_cmd_str "0" "default_gateway" "${fDefaultGateWay}"`
+        ${SQLITE} ${CONFDB} "${fTmpStr}"
+    fi
+}
+
+##################################################################
+#         NAME:  up_additional
+#  DESCRIPTION:  up additional network
+#      PARAM 1:  none
+#       RETURN:  none
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+up_additional(){
+    ${OTHER_NET} boot
+}
+
+##################################################################
+#         NAME:  up_interface
+#  DESCRIPTION:  up all network interface
+#      PARAM 1:  none
+#       RETURN:  none
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+up_interface(){
+    local DNSType=`${SQLITE} ${CONFDB} "select v from conf where k='nic1_dns_type'"`
+    if [ "${DNSType}" == "1" ];then
+        rm ${RESOLV}
+    fi
+
+    echo "1" > $TMPCHECKFILE
+    Lnet_up_net eth0
+    Lnet_up_net eth1
+    up_additional
+    echo "0" > $TMPCHECKFILE
+}
+
+##################################################################
+#         NAME:  up_link
+#  DESCRIPTION:  up all linking aggregation
+#      PARAM 1:  none
+#       RETURN:  none
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+up_link(){
+    local fSqlStr=""
+    local fEth0Mac
+    local fEth0Bond
+    local f8023Val
+    local fEth="eth0"
+
+    fEth0Mac=`cat ${Lnet_ALL_NET_INTERFACE} | awk -F'|' '/^'${fEth}'\|/{print $3}'`
+    fEth0Bond=`${SQLITE} ${CONFDB} "select id from link_interface where mac='${fEth0Mac}'"`
+    if [ "${fEth0Bond}" == "" ];then
+        f8023Val="none"
+    else
+        f8023Val=`${SQLITE} ${CONFDB} "select mode from link_base_data where id='${fEth0Bond}'"`
+    fi
+
+    fSqlStr=`Lnet_insert_cmd_str "0" "nic1_mode_8023ad" "${f8023Val}"`
+
+    if [ "${fSqlStr}" != "" ];then
+        echo "BEGIN TRANSACTION;${fSqlStr}COMMIT;" | ${SQLITE} ${CONFDB}
+    fi
+
+    ${LINKING_CMD}
+}
+
+##################################################################
+#         NAME:  start_ipv4_dhcp_server
+#  DESCRIPTION:  start one interface ipv4 dhcp server
+#      PARAM 1:  fInterface: interface name
+#       RETURN:  none
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+start_ipv4_dhcp_server(){
+    local fInterface=$1
+    local fIP=$2
+    local fMask=$3
+    local fStartIP=$4
+    local fEndIP=$5
+    local fGateway=$6
+    local fDNS=$7
+    local fDhcpFile="${DHCP_FILE_NAME}${fInterface}.conf"
+    local fPidFile="${PID_FILE}${fInterface}.pid"
+    local fLeaseFile="${LEASEFILE}${fInterface}.leases"
+    local fDNSCount
+
+### write dhcp cnf ###
+    dns1=`echo -e "$fDNS" |awk '{if(NR==1){print $1}}'`
+    dns2=`echo -e "$fDNS" |awk '{if(NR==2){print $1}}'`
+    dns3=`echo -e "$fDNS" |awk '{if(NR==3){print $1}}'`
+
+    echo "start      ${fStartIP}" > $fDhcpFile
+    echo "end        ${fEndIP}" >> $fDhcpFile
+    echo "interface  ${fInterface}" >> $fDhcpFile
+    echo "max_leases  65500" >> $fDhcpFile
+    echo "option     subnet       $fMask" >> $fDhcpFile
+    if [ "${fGateway}" != "" ];then
+        echo "opt        router  $fGateway" >> $fDhcpFile
+    fi
+    if [ "$dns1" != "" ];then
+        echo "opt        dns     $dns1 $dns2" >> $fDhcpFile
+    fi
+    echo "pidfile    ${fPidFile}" >> $fDhcpFile
+    echo "lease_file ${fLeaseFile}" >> $fDhcpFile
+  
+    if [ ! "$dns3" = "" ]; then
+        echo "option     dns     $dns3">> $fDhcpFile
+    fi
+
+### start dhcp ###
+    /usr/sbin/udhcpd $fDhcpFile &
+}
+
+##################################################################
+#         NAME:  start_ipv6_dhcp_server
+#  DESCRIPTION:  start one interface ipv6 dhcp server
+#      PARAM 1:  fInterface: interface name
+#      PARAM 2:  fPrefix: ipv6 Prefix
+#      PARAM 3:  fPrefixLen: Prefix Len
+#       RETURN:  none
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+start_ipv6_dhcp_server(){
+    local fInterface=$1
+    local fPrefix=$2
+    local fPrefixLen=$3
+    local fRadvd="/usr/sbin/radvd"
+    local fRadvdFile="/tmp/radvd_${fInterface}.conf"
+    local fPidFile="${PID_RADVD_FILE}${fInterface}.pid"
+
+### write radvd conf ###  
+    echo -e "interface ${fInterface}\n{"  > $fRadvdFile
+    echo -e "\tAdvSendAdvert on;" >> $fRadvdFile
+    echo -e "\tMinRtrAdvInterval 30;" >> $fRadvdFile
+    echo -e "\tMaxRtrAdvInterval 100;" >> $fRadvdFile
+    echo -e "\tprefix ${fPrefix}/${fPrefixLen}" >> $fRadvdFile
+    echo -e "\t{" >> $fRadvdFile
+    echo -e "\t\tAdvOnLink on;" >> $fRadvdFile
+    echo -e "\t\tAdvAutonomous on;" >> $fRadvdFile
+    echo -e "\t\tAdvRouterAddr on;" >> $fRadvdFile
+    echo -e "\t};\n};" >> $fRadvdFile
+### start radvd ###
+    $fRadvd -C $fRadvdFile -p $fPidFile
+}
+
+##################################################################
+#         NAME:  stop_ipv4_dhcp_server
+#  DESCRIPTION:  stop one interface ipv4 dhcp server
+#      PARAM 1:  fInterface: interface name
+#       RETURN:  none
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+stop_ipv4_dhcp_server(){
+    local fInterface=$1
+    local fPidFile
+    local fPid
+    #-----------------------------------
+    #  stop ipv4 dhcp server
+    #-----------------------------------
+    fPidFile="${PID_FILE}${fInterface}.pid"
+    if [ -f  $fPidFile ];then
+        fPid=`cat ${fPidFile}`
+        kill -9 $fPid
+        rm -f $fPidFile
+    fi
+
+}
+
+##################################################################
+#         NAME:  stop_ipv6_dhcp_server
+#  DESCRIPTION:  stop one interface ipv4 dhcp server
+#      PARAM 1:  fInterface: interface name
+#       RETURN:  none
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+stop_ipv6_dhcp_server(){
+    local fInterface=$1
+    local fPidFile
+    local fPid
+    #-----------------------------------
+    #  stop ipv6 dhcp server
+    #-----------------------------------
+    fPidFile="${PID_RADVD_FILE}${fInterface}.pid"
+    if [ -f  $fPidFile ];then
+        fPid=`cat ${fPidFile}`
+        kill -9 $fPid
+        rm -f $fPidFile
+    fi
+}
+
+##################################################################
+#         NAME:  start_dhcp_server
+#  DESCRIPTION:  start one interface ipv4/ipv6 dhcp server
+#      PARAM 1:  fInterface: interface name
+#       RETURN:  none
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+start_dhcp_server(){
+    local fInterface=$1
+    local findex=$2
+    local fRealInterface="${fInterface}"
+    local fInterInfo
+    local fIPv4DHCPClient
+    local fIPv4IP
+    local fIPv4Mask
+    local fIPv4En
+    local fIPv4StartIP
+    local fIPv4EndIP
+    local fIPv4Gateway
+    local fIPv4DNS
+    local fIPv6DHCPClient
+    local fIPv6En
+    local fIPv6Prefix
+    local fIPv6Len
+    local fNic
+    local fIPv4DHCPEn
+    local fIPv6DHCPEn
+    local fMac
+    local fRet
+
+    fInterface=`Lnet_trans_interface_to_nic "${fInterface}"`
+
+    fNic=`Lnet_get_nic_name "${findex}"`
+
+    fInterInfo=`${SQLITE} ${CONFDB} "select * from conf where k like '${fInterface}%'"`
+    stop_ipv4_dhcp_server "${fRealInterface}"
+    stop_ipv6_dhcp_server "${fRealInterface}"
+    
+    fIPv4DHCPEn=`Lnet_get_net_info "${fInterInfo}" "${fInterface}" "ipv4_dhcp_server"`
+    fIPv6DHCPEn=`Lnet_get_net_info "${fInterInfo}" "${fInterface}" "ipv6_dhcp_server"`
+    fRet=`Lnet_check_vip_interface "${fRealInterface}"`
+
+    if [ "${fRet}" == "0" ];then
+        fRet=`Lnet_check_ha_interface "${fRealInterface}"`
+
+        if [ "${fRet}" == "0" ];then
+            fMac=`${IFCONFIG} ${fRealInterface} | awk '/ HWaddr /{print $5}'`
+            fRet=`${SQLITE} ${CONFDB} "select id from ${LINKTABLE2} where mac='${fMac}'"`
+
+            if [ "${fRet}" == "" ];then
+                if [ "${fIPv4DHCPEn}" == "1" ];then
+                    #-----------------------------------
+                    #  start ipv4 dhcp server
+                    #-----------------------------------
+                    fIPv4En=`Lnet_get_net_info "${fInterInfo}" "${fInterface}" "ipv4_enable"`
+                    if [ "${fIPv4En}" == "1" ];then 
+                        fIPv4DHCPClient=`Lnet_get_net_info "${fInterInfo}" "${fInterface}" "ipv4_dhcp_client"`
+                        if [ "${fIPv4DHCPClient}" == "1" ];then
+                            ${SQLITE} ${CONFDB} "update conf set v='0' where k='${fInterface}_ipv4_dhcp_server'"
+                            ${LOGEVENT} 997 521 warning email "${fNic}" "${fNic}"                    ## DHCP Server ipv4 Disable
+                        else
+                            fIPv4IP=`Lnet_get_net_info "${fInterInfo}" "${fInterface}" "ip"`
+                            fIPv4Mask=`Lnet_get_net_info "${fInterInfo}" "${fInterface}" "netmask"`
+                            fIPv4StartIP=`Lnet_get_net_info "${fInterInfo}" "${fInterface}" "startip"`
+                            fIPv4EndIP=`Lnet_get_net_info "${fInterInfo}" "${fInterface}" "endip"`
+                            fIPv4Gateway=`Lnet_get_net_info "${fInterInfo}" "${fInterface}" "dhcp_server_gateway"`
+                            fIPv4DNS=`get_one_conf_data "${fInterface}_dhcp_server_dns"`
+                            start_ipv4_dhcp_server "${fRealInterface}" "${fIPv4IP}" "${fIPv4Mask}" "${fIPv4StartIP}" "${fIPv4EndIP}" "${fIPv4Gateway}" "${fIPv4DNS}"
+                        fi
+                    else
+                        ${SQLITE} ${CONFDB} "update conf set v='0' where k='${fInterface}_ipv4_dhcp_server'"
+                        ${LOGEVENT} 997 520 warning email "${fNic}" "${fNic}"                    ## DHCP Server ipv4 Disable
+                    fi
+                fi
+    
+                #-----------------------------------
+                #  start ipv6 dhcp server
+                #-----------------------------------
+            
+                if [ "${fIPv6DHCPEn}" == "1" ];then
+                    fIPv6En=`Lnet_get_net_info "${fInterInfo}" "${fInterface}" "ipv6_enable"`
+                    if [ "${fIPv6En}" == "1" ];then
+                        fIPv6DHCPClient=`Lnet_get_net_info "${fInterInfo}" "${fInterface}" "ipv6_connction_type"`
+                        if [ "${fIPv6DHCPClient}" == "1" ];then
+                            ${SQLITE} ${CONFDB} "update conf set v='0' where k='${fInterface}_ipv6_dhcp_server'"
+                            ${LOGEVENT} 997 523 warning email "${fNic}" "${fNic}"                    ## DHCP Server  ipv6 Disable
+                        else
+                            fIPv6Prefix=`Lnet_get_net_info "${fInterInfo}" "${fInterface}" "ipv6_dhcp_server_prefix"`
+                            fIPv6Len=`Lnet_get_net_info "${fInterInfo}" "${fInterface}" "ipv6_dhcp_server_len"`
+                            start_ipv6_dhcp_server "${fRealInterface}" "${fIPv6Prefix}" "${fIPv6Len}"
+                        fi
+                    else
+                        ${SQLITE} ${CONFDB} "update conf set v='0' where k='${fInterface}_ipv6_dhcp_server'"
+                        ${LOGEVENT} 997 522 warning email "${fNic}" "${fNic}"                    ## DHCP Server  ipv6 Disable
+                    fi
+                fi
+            else
+                if [ "${fIPv4DHCPEn}" == "1" ];then
+                    ${SQLITE} ${CONFDB} "update conf set v='0' where k='${fInterface}_ipv4_dhcp_server'"
+                    ${LOGEVENT} 997 526 warning email "${fNic}" "${fNic}"                    ## DHCP Server ipv4 Disable
+                fi
+                if [ "${fIPv6DHCPEn}" == "1" ];then
+                    ${SQLITE} ${CONFDB} "update conf set v='0' where k='${fInterface}_ipv6_dhcp_server'"
+                    ${LOGEVENT} 997 527 warning email "${fNic}" "${fNic}"                    ## DHCP Server ipv6 Disable
+                fi
+            fi
+        else
+            if [ "${fIPv4DHCPEn}" == "1" ];then
+                ${SQLITE} ${CONFDB} "update conf set v='0' where k='${fInterface}_ipv4_dhcp_server'"
+                ${LOGEVENT} 997 524 warning email "${fNic}" "${fNic}"                    ## DHCP Server ipv4 Disable
+            fi
+            if [ "${fIPv6DHCPEn}" == "1" ];then
+                ${SQLITE} ${CONFDB} "update conf set v='0' where k='${fInterface}_ipv6_dhcp_server'"
+                ${LOGEVENT} 997 525 warning email "${fNic}" "${fNic}"                    ## DHCP Server ipv6 Disable
+            fi
+        fi
+    else
+        if [ "${fIPv4DHCPEn}" == "1" ];then
+            ${SQLITE} ${CONFDB} "update conf set v='0' where k='${fInterface}_ipv4_dhcp_server'"
+            ${LOGEVENT} 997 536 warning email "${fNic}" "${fNic}"                    ## DHCP Server ipv4 Disable
+        fi
+        if [ "${fIPv6DHCPEn}" == "1" ];then
+            ${SQLITE} ${CONFDB} "update conf set v='0' where k='${fInterface}_ipv6_dhcp_server'"
+            ${LOGEVENT} 997 537 warning email "${fNic}" "${fNic}"                    ## DHCP Server ipv6 Disable
+        fi
+    fi
+}
+
+##################################################################
+#         NAME:  up_all_dhcp_server
+#  DESCRIPTION:  start all interface ipv4/ipv6 dhcp server
+#      PARAM 1:  none
+#       RETURN:  none
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+up_all_dhcp_server(){
+    local fAllInterface
+    local fIndex
+    local fInterfaceInfo
+    local fInterface
+    local fNic
+    local fRet
+    local fInterInfo
+    local fNic
+    local fNicName
+    local fIPv4DHCPEn
+    local fIPv6DHCPEn
+    local fMac
+
+    fAllInterface=`Lnet_get_all_interface`
+    for fInterfaceInfo in ${fAllInterface}
+    do
+        fInterface=`echo "${fInterfaceInfo}" | awk -F'|' '{print $1}'`
+        fIndex=`echo "${fInterfaceInfo}" | awk -F'|' '{print $2}'`
+        if [ "${fInterface}" != "" ];then
+            start_dhcp_server "${fInterface}" "${fIndex}"
+        fi
+    done
+}
+
+##################################################################
+#         NAME:  set_interface_tmp_file
+#  DESCRIPTION:  record eth0/eth1 info to file
+#      PARAM 1:  none
+#       RETURN:  none
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+set_interface_tmp_file(){
+    local fEth0Mac=`${IFCONFIG} eth0 | awk '/ HWaddr /{print $5}'`
+    local fEth1Mac=`${IFCONFIG} eth1 | awk '/ HWaddr /{print $5}'`
+    
+    echo -e "eth0|1|${fEth0Mac}" > ${Lnet_ALL_NET_INTERFACE}
+    if [ "${fEth1Mac}" != "" ];then
+        echo -e "eth1|2|${fEth1Mac}" >> ${Lnet_ALL_NET_INTERFACE}
+    fi
+}
+
+##################################################################
+#         NAME:  set_tmp_ipv6_en_file
+#  DESCRIPTION:  record has one ipv6 enable/disable to file
+#      PARAM 1:  none
+#       RETURN:  none
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+set_tmp_ipv6_en_file(){
+    local fRet=0
+    local fBondEthMacList=""
+    local fBondEthMac
+    local fEthList
+    local fTmp
+    local fBondIPv6En
+    local fEth
+    local fNic
+    local fSqlCmd=""
+
+    fRet=`${SQLITE} ${CONFDB} "select id from ${LINKTABLE1} where ipv6_enable='1'"`
+    if [ "$fRet" == "" ];then
+        fBondEthMacList=`${SQLITE} ${CONFDB} "select mac from ${LINKTABLE2}"`
+    
+        for fBondEthMac in ${fBondEthMacList}
+        do
+            fTmp=`awk -F'|' '/\|'${fBondEthMac}'$/{print $1}' ${Lnet_ALL_NET_INTERFACE}`
+            fEthList="${fEthList} ${fTmp}"
+        done
+        for fEth in ${fEthList}
+        do
+            fNic=`Lnet_trans_interface_to_nic "${fEth}"`
+            fSqlCmd="${fSqlCmd} and k<>'${fNic}_ipv6_enable'"
+        done
+        
+
+        fRet=`${SQLITE} ${CONFDB} "select v from conf where k like '%_ipv6_enable' and v='1' ${fSqlCmd}"`
+    fi
+
+    if [ "${fRet}" != "" ];then
+        fRet=1
+    else
+        fRet=0
+    fi
+
+    echo "$fRet" > ${TMPIPV6EN}
+}
+
+##################################################################
+#         NAME:  change_vip_bond
+#  DESCRIPTION:  when bond has change will change ha virtual
+#      PARAM 1:  none
+#       RETURN:  none
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+change_vip_bond(){
+    local fRet=0
+    local fFeildList=("ha_virtual_ip" "ha_primary_ip1" "ha_standby_ip1" "ha_indicator_ip")
+    local fDBVal=("" "" "" "")
+    local fCStrVal=("" "" "" "")
+    local fVIPList
+    local fVIPInterface
+    local fVIPEth
+    local fBondId
+    local fSqlCmd=""
+    local fChangeFlag="0"
+    local fIndex
+    local fIndex1
+    local fTmpVal
+    local fNewBondId
+
+    for((fIndex=0;fIndex<${#fFeildList[@]};fIndex++))
+    do
+        fDBVal[$fIndex]=`${SQLITE} ${CONFDB} "select v from conf where k='${fFeildList[$fIndex]}'"`
+        fDBVal[$fIndex]=`echo "${fDBVal[$fIndex]}" | sed 's/|/" "/g'`
+    done
+
+    eval "fVIPList=(\"${fDBVal[0]}\")"
+
+    for((fIndex=0;fIndex<${#fVIPList[@]};fIndex++))
+    do
+        if [ "${fVIPList[$fIndex]}" != "" ];then
+            fVIPInterface=`echo "${fVIPList[$fIndex]}" | awk -F',' '{print $1}'`
+            fVIPBondId=`echo "${fVIPInterface}" | awk '/^bond/{print $0}'`
+            if [ "${fVIPBondId}" != "" ];then
+                fVIPEth=`echo "${fVIPList[$fIndex]}" | awk -F',' '{print $4}'`
+                fNewBondId=`check_bond "${fVIPEth}"`
+                if [ "${fNewBondId}" != "" ];then
+                    if [ "${fVIPBondId}" != "${fNewBondId}" ];then
+                        for((fIndex1=0;fIndex1<${#fDBVal[@]};fIndex1++))
+                        do
+                            fDBVal[$fIndex1]=`echo "${fDBVal[$fIndex1]}" |sed 's/'$fVIPBondId',/'$fNewBondId',/g'`
+                        done
+                        fChangeFlag="1"
+                    fi
+                fi
+            fi
+
+            for((fIndex1=0;fIndex1<${#fCStrVal[@]};fIndex1++))
+            do
+                eval "fTmpVal=(\"${fDBVal[$fIndex1]}\")"
+                if [ "${fCStrVal[$fIndex1]}" != "" ];then
+                    fCStrVal[$fIndex1]="${fCStrVal[$fIndex1]}|${fTmpVal[$fIndex]}"
+                else
+                    fCStrVal[$fIndex1]="${fTmpVal[$Index]}"
+                fi
+            done
+        fi
+    done
+
+    if [ "${fChangeFlag}" == "1" ];then
+        for((fIndex=0;fIndex<${#fFeildList[@]};fIndex++))
+        do
+            fSqlCmd="${fSqlCmd}update conf set v='${fCStrVal[$fIndex]}' where k='${fFeildList[$fIndex]}';"
+        done
+
+        echo "BEGIN TRANSACTION;${fSqlCmd}COMMIT;" | ${SQLITE} ${CONFDB}
+    fi
+}
+
+
+##################################################################
+#         NAME:  set_default_gateway
+#  DESCRIPTION:  setting default gateway
+#      PARAM 1:  none
+#       RETURN:  none
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+set_default_gateway(){
+    local fGatewayType=`${SQLITE} ${CONFDB} "select v from conf where k='default_gateway'"`
+    local fNic
+    local fInfo
+    local fConnType
+    local fInteType
+    local fInteEn
+    local fFiled
+    local fId
+    local fLinkInfo
+    local fIpv4Gateway=""
+    local fIpv6Gateway=""
+    local fExist
+    local fNicName
+    local fIndex
+    local fEth0Id
+    local fChange="0"
+    local fHasHA=`Lnet_check_ha_enable`
+
+#    if [ "${fHasHA}" == "1" ];then
+#        fEth0Id=`check_bond "eth0"`
+#        if [ "${fEth0Id}" == "" ];then
+#            if [ "${fGatewayType}" != "eth0" ];then
+#                fGatewayType="eth0"
+#                fChange="1"
+#            fi
+#        else
+#            if [ "${fGatewayType}" != "${fEth0Id}" ];then
+#                fGatewayType="${fEth0Id}"
+#                fChange="1"
+#            fi
+#        fi
+#        if [ "${fChange}" == "1" ];then
+#            ${SQLITE} ${CONFDB} "update conf set v='${fGatewayType}' where k='default_gateway'"
+#            fNicName=`Lnet_get_nic_name "1"`
+#            ${LOGEVENT} 997 534 warning email "${fNicName}"                    ## no interface default gateway is set none
+#        fi
+#    fi
+
+    if [ "${fGatewayType}" != "" ];then
+        fExist=`${IFCONFIG} -a | grep "${fGatewayType}"`
+        if [ "${fExist}" == "" ];then
+                ${SQLITE} ${CONFDB} "update conf set v='' where k='default_gateway'"
+                ${LOGEVENT} 997 533 warning email "${fNicName}"                    ## no interface default gateway is set none
+        else
+            fRet=`Lnet_check_ha_interface "${fGatewayType}"`
+            fIndex=`awk -F'|' '/^'${fGatewayType}'\|/{print $2}' ${Lnet_ALL_NET_INTERFACE}`
+            fNicName=`Lnet_get_nic_name "${fIndex}"`
+            if [ "${fRet}" != "0" ];then
+                 ${SQLITE} ${CONFDB} "update conf set v='' where k='default_gateway'"
+                 ${LOGEVENT} 997 532 warning email "${fNicName}"                    ## heartbeat default gateway is set none
+            else
+                fInteType=`echo "$fGatewayType" | grep 'eth'`
+
+                if [ "${fInteType}" != "" ];then
+                    fNic=`Lnet_trans_interface_to_nic "${fGatewayType}"`
+                    fInfo=`${SQLITE} ${CONFDB} "select * from conf where k like '${fNic}_%'"`
+            #-----------------------------------
+            #  start ipv4 
+            #-----------------------------------
+                    fConnType=`Lnet_get_net_info "${fInfo}" "${fNic}" "ipv4_dhcp_client"`
+                    fInteEn=`Lnet_get_net_info "${fInfo}" "${fNic}" "ipv4_enable"`
+
+                    if [ "${fInteEn}" == "1" ];then
+                        if [ "${fConnType}" == "0" ];then
+                            fFiled="gateway"
+                        else
+                            fFiled="dynamic_gateway"
+                        fi
+
+                        fIpv4Gateway=`Lnet_get_net_info "${fInfo}" "${fNic}" "${fFiled}"`
+                    fi
+
+            #-----------------------------------
+            #  start ipv6 
+            #-----------------------------------
+                    fInteEn=`Lnet_get_net_info "${fInfo}" "${fNic}" "ipv6_enable"`
+                    fConnType=`Lnet_get_net_info "${fInfo}" "${fNic}" "ipv6_connection_type"`
+                    if [ "${fInteEn}" == "1" ];then
+                        if [ "${fConnType}" == "0" ];then
+                            fIpv6Gateway=`Lnet_get_net_info "${fInfo}" "${fNic}" "ipv6_gateway"`
+                        fi
+                    fi
+                else
+                    fId=${fGatewayType:4}
+                    fLinkInfo=`${SQLITE} $CONFDB "select * from ${LINKTABLE1} where id='${fId}'"`
+                    fInteEn=`echo "${fLinkInfo}" | awk -F'|' '{print $3}'`
+                    if [ "${fInteEn}" == "1" ];then
+                        fIpv4Gateway=`echo "${fLinkInfo}" | awk -F'|' '{print $7}'`
+                    fi
+                    fInteEn=`echo "${fLinkInfo}" | awk -F'|' '{print $8}'`
+                    if [ "${fInteEn}" == "1" ];then
+                        fIpv6Gateway=`echo "${fLinkInfo}" | awk -F'|' '{print $12}'`
+                    fi
+                fi
+
+                if [ "${fIpv4Gateway}" != "" ];then
+                    route add default gw ${fIpv4Gateway} dev ${fGatewayType}
+                fi
+
+                if [ "${fIpv6Gateway}" != "" ];then
+                   ip -6 route add default via ${fIpv6Gateway} metric 1024 dev ${fGatewayType}
+                fi
+            fi
+        fi
+    fi
+
+}
+
+##################################################################
+#         NAME:  get_max_jumbo
+#  DESCRIPTION:  get one interface max jumbo
+#      PARAM 1:  fInterface :network interface
+#       RETURN:  none
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+get_max_jumbo(){
+    local fInterface=$1
+    local fJumbo="9000"
+
+    if [ "${fInterface}" != "eth0" ] && [ "${fInterface}" != "eth1" ];then
+        fJumbo=`awk '/^'${fInterface}' /{print $2}' ${JUMBO_FILE}`
+    fi
+
+    echo "${fJumbo}"
+}
+
+##################################################################
+#         NAME:  get_bond_gateway
+#  DESCRIPTION:  get link aggregation ipv6/ipv4 gateway
+#      PARAM 1:  fInfo : bond info
+#      PARAM 2:  fIndex : info start index
+#       RETURN:  gateway value
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+get_bond_gateway(){
+    local fInfo=$1
+    local fIndex=$2
+    local fIpEn=`echo "${fInfo}" | awk -F'|' '{print $'${fIndex}'}'`
+    local fTmpVal
+
+    if [ "${fIpEn}" == "1" ];then
+        fTmpVal=`echo "${fInfo}" | awk -F'|' '{print $'$(($fIndex + 1))'}'`
+    else
+        fTmpVal=""
+    fi
+
+    echo "${fTmpVal}"
+}
+
+##################################################################
+#         NAME:  get_default_gateway_list
+#  DESCRIPTION:  get all interface ipv6/ipv4 gateway list
+#      PARAM 1:  none
+#       RETURN:  gateway list info
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+get_default_gateway_list(){
+    local fAllInterface
+    local fInterfaceInfo
+    local fInterface
+    local fIndex
+    local fNic
+    local fTmpVal
+    local fTmpStr
+    local fMac
+    local fTmpId
+    local fTmpInfo
+    local fIpConnType
+    local fIpEn
+    local fTmpBond
+
+    fAllInterface=`Lnet_get_all_interface`
+    for fInterfaceInfo in ${fAllInterface}
+    do
+        fInterface=`echo "${fInterfaceInfo}" | awk -F'|' '{print $1}'`
+        fIndex=`echo "${fInterfaceInfo}" | awk -F'|' '{print $2}'`
+        fMac=`${IFCONFIG} ${fInterface} | awk '/ HWaddr /{print $5}'`
+        fTmpId=`${SQLITE} ${CONFDB} "select id from ${LINKTABLE2} where mac='${fMac}'"`
+        if [ "${fTmpId}" == "" ];then
+            fTmpStr="${fTmpStr}default_gateway|info|${fInterface}"
+            fNic=`Lnet_trans_interface_to_nic "${fInterface}"`
+            fTmpInfo=`${SQLITE} ${CONFDB} "select * from conf where k like '${fNic}_%'"`
+            fTmpVal=`Lnet_get_nic_name "${fIndex}"`
+            fTmpStr="${fTmpStr}|${fTmpVal}"
+         #-----------------------------------
+         #  get interface ipv4 gateway 
+         #-----------------------------------
+            fIpEn=`Lnet_get_net_info "${fTmpInfo}" "${fNic}" "ipv4_enable"`
+            fIpConnType=`Lnet_get_net_info "${fTmpInfo}" "${fNic}" "ipv4_dhcp_client"`
+            if [ "${fIpEn}" == "1" ];then
+                if [ "${fIpConnType}" == "1" ];then
+                    fTmpVal=`Lnet_get_net_info "${fTmpInfo}" "${fNic}" "dynamic_gateway"`
+                else
+                    fTmpVal=`Lnet_get_net_info "${fTmpInfo}" "${fNic}" "gateway"`
+                fi
+            else
+                fTmpVal=""
+            fi
+            fTmpStr="${fTmpStr}|${fTmpVal}"
+         #-----------------------------------
+         #  get interface ipv6 gateway 
+         #-----------------------------------
+            fIpEn=`Lnet_get_net_info "${fTmpInfo}" "${fNic}" "ipv6_enable"`
+            fIpConnType=`Lnet_get_net_info "${fTmpInfo}" "${fNic}" "ipv6_connection_type"`
+            if [ "${fIpEn}" == "1" ];then
+                if [ "${fIpConnType}" == "1" ];then
+                    fTmpVal=`ip -6 route | awk '/default/&&/'${fInterface}'/{print $3}'`
+                else
+                    fTmpVal=`Lnet_get_net_info "${fTmpInfo}" "${fNic}" "ipv6_gateway"`
+                fi
+            else
+                fTmpVal=""
+            fi
+            fTmpStr="${fTmpStr}|${fTmpVal}\n"
+        fi
+    done
+
+    fTmpInfo=`${SQLITE} ${CONFDB} "select id,ipv4_enable,gateway,ipv6_enable,ipv6_gateway from ${LINKTABLE1}"`
+    for fTmpBond in ${fTmpInfo}
+    do
+        if [ "${fTmpBond}" != "" ];then
+            fTmpVal=`echo "${fTmpBond}" | awk -F'|' '{print $1}'`
+            fTmpStr="${fTmpStr}default_gateway|info|bond${fTmpVal}"
+            fTmpVal=`get_bond_gateway "${fTmpBond}" "2"`
+            fTmpStr="${fTmpStr}|${fTmpVal}"
+            fTmpVal=`get_bond_gateway "${fTmpBond}" "4"`
+            fTmpStr="${fTmpStr}|${fTmpVal}\n"
+        fi
+    done
+    echo -e "${fTmpStr}"
+}
+
+##################################################################
+#         NAME:  get_network_info
+#  DESCRIPTION:  get all interface networking setting/host name /domain name
+#      PARAM 1:  none
+#       RETURN:  all network info
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+get_network_info(){
+    local fAllInterface
+    local fInterfaceInfo
+    local fInterface
+    local fIndex
+    local fDnsType
+    local fHostField=("nic1_hostname" "nic1_domainname" "winad_wins")
+    local fMachType=`cat /etc/manifest.txt | awk '/^type/{print $2}'`
+    local fHostVal="(${fMachType} '' '')"
+    local fSqlStr
+    local fTmpStr
+    local fTmpVal
+    local DNSType=`${SQLITE} ${CONFDB} "select v from conf where k='nic1_dns_type'"`
+    local fNic
+    local fMac
+    local fTmpIp
+    local fInteField
+    local fDefaultVal
+    local fRet
+    local fBondId
+    local fMinJumbo="1500"
+    local fHA="0"
+    local fBondEthMacList
+    local fBondEthMac
+    local fBondEth
+#    local fField=`echo "${gTable1Field}" | sed 's/[()]//g'`
+    local fField=`echo "${gTable1Field}" | sed 's/[()]//g' | sed 's/,desp//g'`
+    local fBondDesp
+    local fHARole
+    local fHAField
+    local fIpv6
+    local fDefipv6
+    
+    #-----------------------------------
+    #  get host info 
+    #-----------------------------------
+    fSqlStr="host"
+    for((i=0; i<${#fHostField[@]}; i++))
+    do
+        fTmpStr=`get_one_conf_data "${fHostField[$i]}" "${fHostVal[$i]}"`
+        if [ "${fHostField[$i]}" == "winad_wins" ] && [ "${fTmpStr}" != "" ];then
+            for fTmpVal in ${fTmpStr}
+            do
+                fSqlStr="${fSqlStr}|${fTmpVal}"
+            done
+        else 
+            fSqlStr="${fSqlStr}|${fTmpStr}"
+        fi
+    done
+    fSqlStr="${fSqlStr}\n"
+
+    #-----------------------------------
+    #  get DNS info 
+    #-----------------------------------
+    fTmpStr=`get_one_conf_data "nic1_dns_type" "0"`
+    fSqlStr="${fSqlStr}dns|global|${fTmpStr}\n"
+    #-----------------------------------
+    #  get static DNS info 
+    #-----------------------------------
+    fSqlStr="${fSqlStr}dns|static"
+    fTmpStr=`get_one_conf_data "nic1_dns" ""`
+     
+    for fTmpVal in ${fTmpStr}
+    do
+        if [ "${fTmpStr}" != "" ];then
+            fSqlStr="${fSqlStr}|${fTmpVal}"
+        fi
+    done
+
+    fSqlStr="${fSqlStr}\n"
+    #-----------------------------------
+    #  get dymaic DNS info 
+    #-----------------------------------
+    fSqlStr="${fSqlStr}dns|dynamic"
+    fTmpStr=`awk '/nameserver /{print $2}' ${RESOLV}`
+
+    for fTmpVal in ${fTmpStr}
+    do
+        if [ "${fTmpStr}" != "" ];then
+            fSqlStr="${fSqlStr}|${fTmpVal}"
+        fi
+    done
+
+    fSqlStr="${fSqlStr}\n"
+    #-----------------------------------
+    #  get default info 
+    #-----------------------------------
+    fTmpVal=`get_one_conf_data 'default_gateway' 'eth0'`
+    fSqlStr="${fSqlStr}default_gateway|global|${fTmpVal}\n"
+
+    #-----------------------------------
+    #  get interface info 
+    #-----------------------------------
+
+    fAllInterface=`Lnet_get_all_interface`
+    for fInterfaceInfo in ${fAllInterface}
+    do
+        fInterface=`echo "${fInterfaceInfo}" | awk -F'|' '{print $1}'`
+        fIndex=`echo "${fInterfaceInfo}" | awk -F'|' '{print $2}'`
+
+        if [ "${fInterface}" != "" ];then
+         #-----------------------------------
+         #  get interface global info 
+         #-----------------------------------
+            fSqlStr="${fSqlStr}${fInterface}"
+            fTmpVal=`Lnet_get_nic_name "${fIndex}"`                                     #ui nic name
+            fSqlStr="${fSqlStr}|${fTmpVal}"
+            fMac=`${IFCONFIG} ${fInterface} | awk '/ HWaddr /{print $5}'`                     #mac
+            fSqlStr="${fSqlStr}|${fMac}"
+            fTmpVal=`${ETHTOOL} ${fInterface} | awk  '/Link detected:/{printf $3}'`     #link yes/no
+            fSqlStr="${fSqlStr}|${fTmpVal}"
+
+            if [ "${fTmpVal}" == "yes" ];then
+                fTmpVal=`${ETHTOOL} ${fInterface} | awk  '/Speed:/{printf $2}'`
+            else
+                fTmpVal=""
+            fi
+            fNic=`Lnet_trans_interface_to_nic "${fInterface}"`
+            fSqlStr="${fSqlStr}|${fTmpVal}"
+            fTmpVal=`get_max_jumbo "${fInterface}"`
+            fSqlStr="${fSqlStr}|${fMinJumbo}|${fTmpVal}"
+            fTmpVal=`get_one_conf_data "${fNic}_desp" ""`
+            fSqlStr="${fSqlStr}|${fTmpVal}"
+            fTmpVal=`Lnet_check_vip_interface "${fInterface}"`
+
+            if [ "${fTmpVal}" == "1" ];then
+                fTmpVal="vip"
+            else
+                fTmpVal=""
+            fi
+
+            fSqlStr="${fSqlStr}|${fTmpVal}"
+            fRet=`Lnet_check_ha_interface "${fInterface}"`
+
+            if [ "${fRet}" == "0" ];then
+                fSqlStr="${fSqlStr}|"
+                fBondId=`${SQLITE} ${CONFDB} "select id from ${LINKTABLE2} where mac='${fMac}'"` #linking bond
+                if [ "${fBondId}" == "" ];then
+                    fSqlStr="${fSqlStr}|${fBondId}"
+                    fTmpVal=`get_one_conf_data "${fNic}_jumbo" "${fMinJumbo}"`                          #jumbo
+                else
+                    fSqlStr="${fSqlStr}|LINK${fBondId}"
+                    fTmpVal=`${SQLITE} ${CONFDB} "select jumbo from ${LINKTABLE1} where id='${fBondId}'"`
+                fi
+
+                fSqlStr="${fSqlStr}|${fTmpVal}"
+             #-----------------------------------
+             #  get interface ipv4 info 
+             #-----------------------------------
+                fInteField=("${fNic}_ipv4_enable" "${fNic}_ipv4_dhcp_client" "${fNic}_ipv4_default_ip" "${fNic}_ip" "${fNic}_netmask" "${fNic}_gateway")
+    
+                if [ "${fNic}" == "nic1" ];then
+                    fTmpIp="192.168.1.100"
+                elif [ "${fNic}" == "nic2" ];then
+                    fTmpIp="192.168.2.254"
+                else
+                    fTmpIp=`Lnet_get_ipv4 "${fNic}"`
+                    fTmpIp="${fTmpIp}254"
+                fi
+    
+                fDefaultVal=("1" "0" "${fTmpIp}" "${fTmpIp}" "255.255.255.0" "")
+    
+                for((i=0; i<${#fInteField[@]}; i++))
+                do
+                    fTmpVal=`get_one_conf_data "${fInteField[$i]}" "${fDefaultVal[$i]}"`
+                    if [ "${fInteField[$i]}" != "${fNic}_ipv4_default_ip" ];then
+                        fSqlStr="${fSqlStr}|${fTmpVal}"
+                    fi
+                done
+    
+                fTmpVal=`${IFCONFIG} ${fInterface} | awk -F'[: ]' '/ inet addr:/{print $13}'` #real ip
+                if [ "${fTmpVal}" == "" ];then
+                    fTmpVal="0.0.0.0"
+                fi
+                fSqlStr="${fSqlStr}|${fTmpVal}"
+                fTmpVal=`${IFCONFIG} ${fInterface} | awk -F'[: ]' '/ inet addr:/{print $19}'` #real mask
+                if [ "${fTmpVal}" == "" ];then
+                    fTmpVal="0.0.0.0"
+                fi
+                fSqlStr="${fSqlStr}|${fTmpVal}"
+                fTmpVal=`get_one_conf_data "${fNic}_dynamic_gateway" ""`           #dynamic gateway
+                fSqlStr="${fSqlStr}|${fTmpVal}"
+             #-----------------------------------
+             #  get interface ipv6 info 
+             #-----------------------------------
+                fInteField=("${fNic}_ipv6_enable" "${fNic}_ipv6_connection_type" "${fNic}_ipv6_default_addr" "${fNic}_ipv6_addr" "${fNic}_ipv6_prefixlen" "${fNic}_ipv6_gateway")
+                fTmpIp=`Lnet_get_default_ipv6 "${fNic}"`
+                fDefaultVal=("0" "0" "${fTmpIp}" "${fTmpIp}" "64" "")
+
+                for((i=0; i<${#fInteField[@]}; i++))
+                do
+                    fTmpVal=`get_one_conf_data "${fInteField[$i]}" "${fDefaultVal[$i]}"`
+                    if [ "${fInteField[$i]}" != "${fNic}_ipv6_default_addr" ];then
+                        fSqlStr="${fSqlStr}|${fTmpVal}"
+                    fi
+                done
+
+                fDefipv6=`get_one_conf_data "${fNic}_ipv6_default_addr" "${fTmpIp}"`
+                fDefipv6_prefix=`echo ${fDefipv6} | awk -F: '{print $1}'`
+                fIpv6=`${IFCONFIG} ${fInterface} | sed -nr "/.*inet6 addr: (${fDefipv6_prefix}::[0-9]*\/64 .*|${a}.* Scope:Link)/d;s/.*inet6 addr: (.*) .*/\1/p"`
+                if [ "${fIpv6}" == "" ];then
+                    fDefipv6_exist=`${IFCONFIG} | grep "${fDefipv6}/64"`
+                    if [ "${fDefipv6_exist}" != "" ];then
+                        fIpv6="${fDefipv6}/64"
+                    fi
+                fi 
+                
+                fTmpVal=`echo "${fIpv6}" | awk -F'/' '{print $1}'`
+                fSqlStr="${fSqlStr}|${fTmpVal}"
+                fTmpVal=`echo "${fIpv6}" | awk -F'/' '{print $2}'`
+                fSqlStr="${fSqlStr}|${fTmpVal}"
+                fTmpVal=`ip -6 route | awk '/default/&&/'${fInterface}'/{print $3}'`
+                fSqlStr="${fSqlStr}|${fTmpVal}"
+                fSqlStr="${fSqlStr}\n"
+            else
+                fSqlStr="${fSqlStr}|heartbeat||${fMinJumbo}|1|0"
+                fHARole=`${SQLITE} ${CONFDB} "select v from conf where k='ha_role'"`
+                if [ "$fHARole" == "1" ];then
+                    fHAField="ha_standy_ip3"
+                else
+                    fHAField="ha_primary_ip3"
+                fi
+                fTmpVal=`${SQLITE} ${CONFDB} "select v from conf where k='${fHAField}'"` #ha_heartbeat
+                fSqlStr="${fSqlStr}|${fTmpVal}|255.255.255.0||||||||||||\n"
+                fHA="1"
+            fi
+        fi
+    done
+
+    #-----------------------------------
+    #  get bond info 
+    #-----------------------------------
+    fTmpStr=`${SQLITE} ${CONFDB} "select ${fField} from ${LINKTABLE1} order by id"`
+    for fTmpVal in ${fTmpStr}
+    do
+        if [ "${fTmpVal}" != "" ];then
+            fBondId=`echo "${fTmpVal}" | awk -F'|' '{print $1}'`
+            fBondDesp=`${SQLITE} ${CONFDB} "select desp from ${LINKTABLE1} where id='${fBondId}'"` 
+            fSqlStr="${fSqlStr}bond|${fTmpVal}|${fBondDesp}|1500"
+            #fSqlStr="${fSqlStr}bond|${fTmpVal}|1500"
+            fMac=`${IFCONFIG} bond${fBondId} | awk '/ HWaddr /{print $5}'`
+            fSqlStr="${fSqlStr}|${fMac}"
+            fTmpVal=`Lnet_check_vip_interface "bond${fBondId}"`
+
+            if [ "${fTmpVal}" == "1" ];then
+                fTmpVal="vip"
+            else
+                fTmpVal=""
+            fi
+
+            fSqlStr="${fSqlStr}|${fTmpVal}"
+            fRet=`Lnet_check_ha_interface "bond${fBondId}"`
+            if [ "${fRet}" == "1" ];then
+                fSqlStr="${fSqlStr}|heartbeat"
+                fHA="1"
+            else
+                fSqlStr="${fSqlStr}|"
+            fi
+            fBondEthMacList=`${SQLITE} ${CONFDB} "select mac from ${LINKTABLE2} where id='${fBondId}'"`
+
+            for fBondEthMac in ${fBondEthMacList}
+            do
+                if [ "${fBondEthMac}" != "" ];then
+                    fBondEth=`awk -F '|' '/\|'${fBondEthMac}'/{print $1}' ${Lnet_ALL_NET_INTERFACE}`
+                    if [ "${fBondEth}" != "" ];then
+                        fSqlStr="${fSqlStr}|${fBondEth}"
+                    fi
+                fi
+            done
+            fSqlStr="${fSqlStr}\n"
+        fi
+    done
+    #fTmpVal=`get_default_gateway_list`
+    #fSqlStr="${fSqlStr}${fTmpVal}"
+    fSqlStr="${fSqlStr}option|${fHA}"
+    if [ -f "${REBOOT_FLAG}" ];then
+        fSqlStr="${fSqlStr}|1\n"
+    else
+        fSqlStr="${fSqlStr}|0\n"
+    fi
+    echo -e "${fSqlStr}"
+}
+
+##################################################################
+#         NAME:  get_dhcp_server_info
+#  DESCRIPTION:  get all interface dhcp server setting
+#      PARAM 1:  none
+#       RETURN:  all dhcp server info
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+get_dhcp_server_info(){
+    local fAllInterface
+    local fInterfaceInfo
+    local fInterface
+    local fIndex
+    local fRet
+    local fNic
+    local fSqlStr
+    local fTmpVal
+    local fTmpIp
+    local fTmpStartIp
+    local fTmpEndIp
+    local fDefaultVal
+    local fMac
+    local fTmpStr
+    local fHa="0"
+    local fCount
+    local fPara
+    local fHARole
+    local fHAField
+    local fIpv6
+    local fDefipv6
+
+    fAllInterface=`Lnet_get_all_interface`
+    for fInterfaceInfo in ${fAllInterface}
+    do
+        fInterface=`echo "${fInterfaceInfo}" | awk -F'|' '{print $1}'`
+        fIndex=`echo "${fInterfaceInfo}" | awk -F'|' '{print $2}'`
+        if [ "${fInterface}" != "" ];then
+            fNic=`Lnet_trans_interface_to_nic "${fInterface}"`
+            fSqlStr="${fSqlStr}${fInterface}"
+            fTmpVal=`Lnet_get_nic_name "${fIndex}"`                                     #ui nic name
+            fSqlStr="${fSqlStr}|${fTmpVal}"
+            fTmpVal=`get_one_conf_data "${fNic}_desp" ""`
+            fSqlStr="${fSqlStr}|${fTmpVal}"
+            fTmpVal=`Lnet_check_vip_interface "${fInterface}"`
+
+            if [ "${fTmpVal}" == "1" ];then
+                fTmpVal="vip"
+            else
+                fTmpVal=""
+            fi
+
+            fSqlStr="${fSqlStr}|${fTmpVal}"
+            fRet=`Lnet_check_ha_interface "${fInterface}"`
+
+            if [ "${fRet}" == "0" ];then
+                fSqlStr="${fSqlStr}|"
+                fMac=`${IFCONFIG} ${fInterface} | awk '/ HWaddr /{print $5}'`                     #mac
+                fTmpVal=`${SQLITE} ${CONFDB} "select id from ${LINKTABLE2} where mac='${fMac}'"` #linking bond
+                if [ "${fTmpVal}" == "" ];then
+                    fSqlStr="${fSqlStr}|"
+                    fInteField=("${fNic}_ipv4_enable" "${fNic}_ipv4_dhcp_client" "${fNic}_ipv4_dhcp_server" "${fNic}_startip" "${fNic}_endip" "${fNic}_dhcp_server_gateway")
+
+                    if [ "${fNic}" == "nic1" ];then
+                        fTmpIp="192.168.1.100"
+                        fTmpStartIp="192.168.1.1"
+                        fTmpEndIp="192.168.1.99"
+                    elif [ "${fNic}" == "nic2" ];then
+                        fTmpIp="192.168.2.254"
+                        fTmpStartIp="192.168.1.1"
+                        fTmpEndIp="192.168.1.99"
+                    else
+                        fTmpIp=`Lnet_get_ipv4 "${fNic}"`
+                        fTmpIp="${fTmpIp}254"
+                        fTmpStartIp="${fTmpIp}1"
+                        fTmpEndIp="${fTmpIp}99"
+                    fi
+
+                    fDefaultVal=("1" "0" "0" "${fTmpStartIp}" "${fTmpEndIp}" "")
+                    for((i=0; i<${#fInteField[@]}; i++))
+                    do
+                        fTmpVal=`get_one_conf_data "${fInteField[$i]}" "${fDefaultVal[$i]}"`
+                        fSqlStr="${fSqlStr}|${fTmpVal}"
+                        if [ "${fInteField[$i]}" == "${fNic}_ipv4_dhcp_client" ];then
+                            if [ "$fTmpVal" != "1" ];then
+                                fTmpStr=`get_one_conf_data "${fNic}_ipv4_default_ip" "${fTmpIp}"`
+                                fTmpStr=`get_one_conf_data "${fNic}_ip" "${fTmpIp}"`
+                                fTmpVal="${fTmpStr}"
+                                fTmpStr=`get_one_conf_data "${fNic}_netmask" "255.255.255.0"`
+                                fTmpVal="${fTmpVal}|${fTmpStr}"
+                            else
+                                fTmpStr=`${IFCONFIG} ${fInterface} | awk -F'[: ]' '/ inet addr:/{print $13}'` #real ip
+                                if [ "${fTmpStr}" == "" ];then
+                                    fTmpStr="0.0.0.0"
+                                fi
+                                fTmpVal="${fTmpStr}"
+                                fTmpStr=`${IFCONFIG} ${fInterface} | awk -F'[: ]' '/ inet addr:/{print $19}'` #real ip
+                                if [ "${fTmpStr}" == "" ];then
+                                    fTmpStr="0.0.0.0"
+                                fi
+                                fTmpVal="${fTmpVal}|${fTmpStr}"
+                            fi
+                            fSqlStr="${fSqlStr}|${fTmpVal}"
+                        fi
+                    done
+
+                    fTmpVal=`get_one_conf_data "${fNic}_dhcp_server_dns" ""`
+                    fCount=`echo -e "${fTmpVal}" | wc -l`
+                    if [ "$fCount" == "3" ];then
+                        fPara="-e NN"
+                    elif [ "$fCount" == "2" ];then
+                        fPara="-e N"
+                    else
+                        fPara=""
+                    fi
+                    fTmpVal=`echo -e "${fTmpVal}" | sed ${fPara} -e 's/\n/ /g'`
+                    fSqlStr="${fSqlStr}|${fTmpVal}"
+                    fInteField=("${fNic}_ipv6_enable" "${fNic}_ipv6_connection_type" "${fNic}_ipv6_dhcp_server" "${fNic}_ipv6_dhcp_server_prefix" "${fNic}_ipv6_dhcp_server_len")
+                    fTmpIp=`Lnet_get_default_ipv6 "${fNic}"`
+                    fDefaultVal=("0" "0" "0" "" "")
+                    for((i=0; i<${#fInteField[@]}; i++))
+                    do
+                        fTmpVal=`get_one_conf_data "${fInteField[$i]}" "${fDefaultVal[$i]}"`
+                        fSqlStr="${fSqlStr}|${fTmpVal}"
+                        if [ "${fInteField[$i]}" == "${fNic}_ipv6_connection_type" ];then
+                            if [ "$fTmpVal" != "1" ];then
+                                fTmpStr=`get_one_conf_data "${fNic}_ipv6_default_addr" "${fTmpIp}"`
+                                fTmpStr=`get_one_conf_data "${fNic}_ipv6_addr" "${fTmpIp}"`
+                                fTmpVal="${fTmpStr}"
+                                fTmpStr=`get_one_conf_data "${fNic}_ipv6_prefixlen" "64"`
+                                fTmpVal="${fTmpVal}|${fTmpStr}"
+                            else
+                                fDefipv6=`get_one_conf_data "${fNic}_ipv6_default_addr" "${fTmpIp}"`
+                                fDefipv6_prefix=`echo ${fDefipv6} | awk -F: '{print $1}'`
+                                fIpv6=`${IFCONFIG} ${fInterface} | sed -nr "/.*inet6 addr: (${fDefipv6_prefix}::[0-9]*\/64 .*|${a}.* Scope:Link)/d;s/.*inet6 addr: (.*) .*/\1/p"`
+                                if [ "${fIpv6}" == "" ];then
+                                    fDefipv6_exist=`${IFCONFIG} | grep "${fDefipv6}/64"`
+                                    if [ "${fDefipv6_exist}" != "" ];then
+                                        fIpv6="${fDefipv6}/64"
+                                    fi
+                                fi
+                                
+                                fTmpStr=`echo "${fIpv6}" | awk -F'/' '{print $1}'`
+                                fTmpVal="${fTmpStr}"
+                                fTmpStr=`echo "${fIpv6}" | awk -F'/' '{print $2}'`
+                                fTmpVal="${fTmpVal}|${fTmpStr}"
+                            fi
+                            fSqlStr="${fSqlStr}|${fTmpVal}"
+                        fi
+                    done
+                    fSqlStr="${fSqlStr}\n"
+                else
+                    fSqlStr="${fSqlStr}|LINK${fTmpVal}||||||||||||||||\n"
+                fi
+            else
+                fHARole=`${SQLITE} ${CONFDB} "select v from conf where k='ha_role'"`
+                if [ "$fHARole" == "1" ];then
+                    fHAField="ha_standy_ip3"
+                else
+                    fHAField="ha_primary_ip3"
+                fi
+                fTmpVal=`${SQLITE} ${CONFDB} "select v from conf where k='${fHAField}'"` #ha_heartbeat
+                fSqlStr="${fSqlStr}|heartbeat||||$fTmpVal|255.255.255.0||||||||||||\n"
+                fHa="1"
+            fi
+        fi
+    done
+    if [ -f "${REBOOT_FLAG}" ];then
+        fSqlStr="${fSqlStr}option|${fHa}|1\n"
+    else
+        fSqlStr="${fSqlStr}option|${fHa}|0\n"
+    fi
+
+    echo -e "${fSqlStr}"
+}
+
+##################################################################
+#         NAME:  change_ip_format
+#  DESCRIPTION:  change ip str to number
+#      PARAM 1:  fVal : ip value
+#       RETURN:  after change ip value
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+change_ip_format(){
+    local fVal=$1
+    local fTmpStr=""
+    local fTmpVal
+
+    if [ "${fVal}" != "" ];then
+        fVal=`echo "${fVal}" | sed 's/\./" "/g'`
+        eval "fVal=(\"$fVal\")"
+
+        for((j=0;j<${#fVal[@]};j++))
+        do
+            fTmpVal=`expr ${fVal[$j]} + 0 `
+            if [ "$j" == "0" ];then
+               fTmpStr="${fTmpVal}"
+            else
+               fTmpStr="${fTmpStr}.${fTmpVal}"
+            fi
+        done
+    fi
+
+    echo "${fTmpStr}"
+}
+
+##################################################################
+#         NAME:  check_host
+#  DESCRIPTION:  check host/domanin name/wins is OK
+#      PARAM 1:  fData : host data
+#       RETURN:  0/1(ok/fail)
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+check_host(){
+    local fData=$1
+    local fRet="0"
+    local fCheckTag=("" "HOSTNAME" "DOMAIN" "WINS")
+    local fCount
+    fData=`echo "${fData}" | sed 's/|/" "/g'`
+    eval "fData=(\"$fData\")"
+
+    for((fCount=1;fCount<${#fData[@]};fCount++))
+    do
+        if [ $fCount -lt 3 ];then
+            fRet=`${VALIDATE_SCRIPT} "${fCheckTag[$fCount]}" "${fData[$fCount]}"`
+        elif [ $fCount -lt ${#fData[@]} ];then
+            if [ "${fData[$fCount]}" != "" ];then
+                fRet=`${VALIDATE_SCRIPT} "${fCheckTag[3]}" "${fData[$fCount]}"`
+            fi
+        fi
+
+        if [ "${fRet}" != "0" ];then
+            break;
+        fi
+    done
+
+    echo "${fRet}"
+}
+
+##################################################################
+#         NAME:  check_dns
+#  DESCRIPTION:  check dns is OK
+#      PARAM 1:  fData : Dns data
+#       RETURN:  0/1(ok/fail)
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+check_dns(){
+    local fData=$1
+    local fRet="0"
+    local fCount
+
+    fData=`echo "${fData}" | sed 's/|/" "/g'`
+    eval "fData=(\"$fData\")"
+    if [ "${fData[1]}"  != "1" ];then
+        for((fCount=2;fCount<${#fData[@]}; fCount++))
+        do
+            if [ "${fData[$fCount]}" != "" ];then
+                fRet=`${VALIDATE_SCRIPT} "DNS" "${fData[$fCount]}"`
+            fi
+            if [ "${fRet}" != "0" ];then
+                break;
+            fi
+        done
+    fi
+
+    echo "${fRet}"
+}
+
+##################################################################
+#         NAME:  check_default_gateway
+#  DESCRIPTION:  check default gateway interface exist
+#      PARAM 1:  fData : default gateway value
+#      PARAM 2:  fCheckType: interface/bond
+#       RETURN:  0/1(ok/fail)
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+check_default_gateway(){
+    local fVal=$1
+    local fCheckType="$2"
+    local fRet="0"
+    local fTmpStr=""
+
+    if [ "${Val}" != "" ];then
+        fTmpStr=`awk '/^'${fVal}'\|/{print $1}' ${Lnet_ALL_NET_INTERFACE}`
+        if [ "${fTmpStr}" == "" ];then
+            fTmpStr=`echo "${fVal}" | awk '/^bond/{print substr($1,5)}'`
+            if [ "$fTmpStr" != "" ];then
+                if [ "${fCheckType}" != "bond" ];then
+                    fTmpStr=`${SQLITE} ${CONFDB} "select id from ${LINKTABLE1} where id='${fTmpStr}'"`
+                else
+                    fVal="${fVal:4}"
+                    fTmpStr=`echo "${gInfo}" | awk '/^'${fVal}'\|/{print $0}'`
+                fi
+                if [ "${fTmpStr}" == "" ];then
+                    fRet="1"
+                fi
+            else
+                fRet="1"
+            fi
+        fi
+    fi
+    echo "${fRet}"
+}
+
+##################################################################
+#         NAME:  check_ip_same
+#  DESCRIPTION:  check ip is the same as other interface ip
+#      PARAM 1:  fType : ipv4/ipv6
+#      PARAM 2:  fStart: Data info Start Index
+#      PARAM 3:  fEthType: interface/bond
+#       RETURN:  0/1(ok/fail)
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+check_ip_same(){
+    local fType=$1
+    local fStart=$2
+    local fEthType=$3
+    local fRet=0
+    local fDIPIndex=$((${fStart} + 2))
+    local fDSetupIndex=$((${fStart} + 1))
+    local fLEnIndex=$((${fStart} + 1))
+    local fLSetupIndex=$((${fLEnIndex} + 1))
+    local fLIPIndex=$((${fLSetupIndex} + 1))
+    local fIPList
+    local fIPInfo
+    local fIP
+    local fBondIPFiled
+    local fBondEnFiled
+    local fTmpIPList
+    local fEthList
+    local fTmpEth
+    local fExistEth
+    local fNeedCheckEth=""
+    local fAllEthList
+    local fNic
+    local fIsHA
+    local fBondId
+    local fMac
+    local fInfo
+    local fEn
+    local fSetup
+    local fEnField
+    local fSetupField
+    local fIPField
+    local fTmpIP
+    local fIPv6Chk
+    local fBondSetupField
+
+    if [ "fEthType" != "bond" ] && [ "${gData[$fDSetupIndex]}" == "1" ];then
+        echo $fRet
+        return
+    fi
+    #----------------------------------------------------
+    #  get modify ip 
+    #----------------------------------------------------
+    fIPList=`echo "${gInfo}" | awk -F '|' '!/^'${gData[0]}'\|/{if($'${fLEnIndex}'=="1" && $'${fLSetupIndex}'!="1")print $'${fLIPIndex}'}'`
+
+    if [ "$fType" == "ipv6" ];then
+        fBondEnFiled="ipv6_enable"
+        fBondIPFiled="ipv6"
+        fEnField="ipv6_enable"
+        fSetupField="ipv6_connection_type"
+        fIPField="ipv6_addr"
+        fBondSetupField="ipv6_conn_type"
+        fIP="${gData[$fDIPIndex]}"
+    else
+        fBondEnFiled="ipv4_enable"
+        fBondIPFiled="ip"
+        fEnField="ipv4_enable"
+        fSetupField="ipv4_dhcp_client"
+        fBondSetupField="ipv4_conn_type"
+        fIPField="ip"
+        fIP=`change_ip_format "${gData[$fDIPIndex]}"`
+    fi
+    #----------------------------------------------------
+    #  get bonding ip 
+    #----------------------------------------------------
+    if [ "${fEthType}" == "interface" ];then
+        fTmpIPList=`${SQLITE} ${CONFDB} "select ${fBondIPFiled} from ${LINKTABLE1} where ${fBondEnFiled}='1' and ${fBondSetupField}<>'1'"`
+        fIPList="${fIPList} ${fTmpIPList}"
+    fi
+
+    #----------------------------------------------------
+    #  get no change interface ip 
+    #----------------------------------------------------
+    if [ "${fEthType}" == "bond" ];then
+        fEthList=`echo "${gInfo}" | awk -F'|' '{for(i='${gTable1AryCount}'+1;i<=NF;i++)print $i}'`
+    else
+        fEthList=`echo "${gInfo}" | awk -F '|' '{print $1}'`
+    fi
+
+    fAllEthList=`awk -F '|' '{print $1}' ${Lnet_ALL_NET_INTERFACE}`
+
+    for fTmpEth in ${fAllEthList}
+    do
+        if [ "${fTmpEth}" != "" ];then
+            fExistEth=`echo -e "$fEthList" | awk '/'^${fTmpEth}'$/{print $1}'`
+
+            if [ "$fExistEth" == "" ];then
+                fNeedCheckEth="${fNeedCheckEth} ${fTmpEth}"
+            fi
+        fi
+    done
+
+    for fTmpEth in ${fNeedCheckEth}
+    do
+        if [ "${fTmpEth}" != "" ];then
+            fIsHA=`Lnet_check_ha_interface "${fTmpEth}"`
+            if [ "$fIsHA" != "0" ];then
+                continue
+            fi
+
+            fMac=`${IFCONFIG} ${fTmpEth} | awk '/ HWaddr /{print $5}'`                     #mac
+            fBondId=`${SQLITE} ${CONFDB} "select id from ${LINKTABLE2} where mac='${fMac}'"` #linking bond
+            if [ "${fEthType}" == "interface" ];then
+                if [ "$fBondId" != "" ];then
+                    continue
+                fi
+            fi
+            fNic=`Lnet_trans_interface_to_nic "${fTmpEth}"`
+            fInfo=`${SQLITE} ${CONFDB} "select * from conf where k like '${fNic}_%'"`
+            fEn=`Lnet_get_net_info "${fInfo}" "${fNic}" "${fEnField}"`
+            fSetup=`Lnet_get_net_info "${fInfo}" "${fNic}" "${fSetupField}"`
+            fTmpIP=`Lnet_get_net_info "${fInfo}" "${fNic}" "${fIPField}"`
+            if [ "${fEn}" == "1" ] && [ "${fSetup}" != "1" ];then
+                fIPList="${fIPList} ${fTmpIP}"
+            fi
+        fi
+    done
+
+    for fIPInfo in ${fIPList}
+    do
+        if [ "${fIPInfo}" != "" ];then
+            if [ "$fType" == "ipv6" ];then
+                ${IPV6CHECK} -c "${fIPInfo}" "${fIP}"
+                fIPv6Chk=$?
+                if [ "$fIPv6Chk" == "0" ];then
+                    fRet="1"
+                    break
+                fi
+            else
+                fIPInfo=`change_ip_format "${fIPInfo}"`
+                if [ "${fIPInfo}" == "${fIP}" ];then
+                    fRet="1"
+                    break
+                fi
+            fi
+        fi
+    done
+    echo "${fRet}"
+}
+
+##################################################################
+#         NAME:  check_net_ip
+#  DESCRIPTION:  check ip is the same as other interface ip
+#      PARAM 1:  fType : ipv4/ipv6
+#      PARAM 2:  fStart: Data info Start Index
+#      PARAM 3:  fEthType: interface/bond
+#       RETURN:  0/1(ok/fail)
+#       AUTHOR:  enian
+#      CREATED:  20,03,2012
+##################################################################
+check_net_ip(){
+    local fType=$1
+    local fStart=$2
+    local fEthType=$3
+    local fLEnIndex=${fStart}
+    local fLSetupIndex=$((${fLEnIndex} + 1))
+    local fLIPIndex=$((${fLSetupIndex} + 1))
+    local fRet="0"
+    local fNetRet
+    local fNickName
+    local fInfo
+    local fIpv6File
+    local fIpv6Val
+    local fEthList=""
+    local fDataCount
+    local fIndex
+    local fNowBondList
+    local fBond
+    local fSameIPMac
+    local fTmpMac
+    local fIsSelf
+
+
+    if [ "${fEthType}" == "bond" ];then
+        fNowBondList=`${IFCONFIG} | awk '/^bond/{print $1}'`
+        for fBond in ${fNowBondList}
+        do
+            if [ "${fBond}" != "" ];then
+                fEthList="${fEthList}${fBond},${gData[$fLIPIndex]} "
+            fi
+        done 
+        fDataCount=${#gData[@]}
+        for((fIndex=$gTable1AryCount;fIndex<${fDataCount};fIndex++))
+        do
+            fEthList="${fEthList}${gData[$fIndex]},${gData[$fLIPIndex]} "
+        done
+    else
+        fEthList="${gData[0]},${gData[$fLIPIndex]}"
+    fi
+
+    for fInfo in ${fEthList}
+    do
+        if [ "${fInfo}" != "" ];then
+            eval "fInfo=(`echo "$fInfo" | sed 's/,/ /g'`)"
+            if [ "${gData[$fLEnIndex]}" != "0" ] && [ "${gData[$fLSetupIndex]}" != "1" ];then
+                if [ ${fType} == "ipv6" ];then
+                    fIpv6File=`printf "${Lnet_IPV6PATH}/disable_ipv6" ${fInfo[0]}`
+                    fIpv6Val=`cat ${fIpv6File}`
+                    if [ "${fIpv6Val}" == "1" ];then
+                        echo 0 > ${fIpv6File}
+                        sleep 2
+                    fi
+
+                    fNetRet="1"
+                    fSameIPMac=`${NDISC6} -1 -r 2 -w 100 -q ${fInfo[1]} ${fInfo[0]}`
+                    for fTmpMac in ${fSameIPMac}
+                    do
+                        if [ "${fTmpMac}" != "" ];then
+                            fIsSelf=`awk '/\|'${fTmpMac}'$/' ${Lnet_ALL_NET_INTERFACE}`
+                            if [ "${fIsSelf}" == "" ];then
+                                fNetRet="0"
+                                break;
+                            fi
+                        fi
+                    done
+
+                    if [ "${fIpv6Val}" == "1" ];then
+                        echo 1 > ${fIpv6File}
+                    fi
+                else
+                    ${ARPING} -f -c 1 -w 1 -I ${fInfo[0]} ${fInfo[1]} > /dev/null 2>&1
+                    fNetRet=$?
+                fi
+                if [ "${fNetRet}" == "0" ];then
+                    if [ "${fEthType}" != "bond" ];then
+                        fIndex=`awk -F'|' '/^'${fInfo[0]}'\|/{print $2}' ${Lnet_ALL_NET_INTERFACE}`
+                        fNickName=`Lnet_get_nic_name "${fIndex}"`
+                    else
+                        fNickName="LINK$((${gData[0]}+1))"
+                    fi
+    
+                    echo "${fNickName},${fInfo[1]}" >> ${ERROR_FILE}
+                    break
+                fi
+             fi
+         fi
+    done
+
+}
+##################################################################
+#         NAME:  check_same_segment
+#  DESCRIPTION:  check ip is in same segment
+#      PARAM 1:  fIP1 : 1st ipv4 value
+#      PARAM 2:  fMask1: 1st mask value
+#      PARAM 3:  fIP2: 2st ipv4 value
+#       RETURN:  0/1(ok/fail)
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+check_same_segment(){
+    local fIP1=$1
+    local fMask1=$2
+    local fIP2=$3
+    local fRet="0"
+    local fNetworkId1
+    local fENNetworkId1
+    local fCount
+
+    fIP1=`echo "${fIP1}" | sed 's/\./" "/g'`
+    eval "fIP1=(\"$fIP1\")"
+    fMask1=`echo "${fMask1}" | sed 's/\./" "/g'`
+    eval "fMask1=(\"$fMask1\")"
+    fIP2=`echo "${fIP2}" | sed 's/\./" "/g'`
+    eval "fIP2=(\"$fIP2\")"
+    
+    for((fCount=0;fCount<${#fIP1[@]};fCount++))
+    do
+        if [ "${fIP1[$fCount]}" != "" ] && [ "${fIP2[$fCount]}" != "" ] && [ "${fMask1[$fCount]}" != "" ];then
+            fIP1[$fCount]=`expr ${fIP1[$fCount]} + 0 `
+            fMask1[$fCount]=`expr ${fMask1[$fCount]} + 0 `
+            fIP2[$fCount]=`expr ${fIP2[$fCount]} + 0 `
+            fNetworkId1=$((${fIP1[$fCount]}&${fMask1[$fCount]}))
+            fENNetworkId1=$((${fNetworkId1}|(255^${fMask1[$fCount]})))
+            if [ $fNetworkId1 -le ${fIP2[$fCount]} ] && [ ${fENNetworkId1} -ge ${fIP2[$fCount]} ];then
+                continue
+            else
+                fRet="1"
+                break
+            fi
+        else
+            fRet="1"
+            break
+        fi
+    done
+    
+    echo "${fRet}"
+}
+
+##################################################################
+#         NAME:  check_prefix_gateway
+#  DESCRIPTION:  check ipv6 gateway is in same segment
+#      PARAM 1:  fIP1 : 1st ipv6 value
+#      PARAM 2:  fMask1: 1st prefix len value
+#      PARAM 3:  fIP2: 2st ipv6 value
+#       RETURN:  0/1(ok/fail)
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+check_prefix_gateway(){
+    local fIP1=$1
+    local fPrefixLen=$2
+    local fIP2=$3
+    local fPrefix1
+    local fPrefix2
+    local fRet="0"
+
+    fIP1=`${IPV6CHECK} -p $fIP1`
+    fIP2=`${IPV6CHECK} -p $fIP2`
+    fPrefixLen=`expr $fPrefixLen / 4`
+    fPrefix1="${fIP1:0:$fPrefixLen}"
+    fPrefix2="${fIP2:0:$fPrefixLen}"
+    if [ "$fPrefix1" != "$fPrefix2" ];then
+        fRet="1"
+    fi
+
+    echo "${fRet}"
+}
+
+##################################################################
+#         NAME:  check_gateway
+#  DESCRIPTION:  check ipv6/ipv4 gateway is in same segment
+#      PARAM 1:  fIPType : ipv6/ipv4
+#      PARAM 2:  fIP: ipv6/ipv4 value
+#      PARAM 3:  fMask: ipv6 prefix len/ipv4 mask value
+#      PARAM 4:  fGateway: ipv6/ipv4 gateway value
+#       RETURN:  0/1(ok/fail)
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+check_gateway(){
+    local fIPType=$1
+    local fIP=$2
+    local fMask=$3
+    local fGateway=$4
+    local fRet="0"
+
+    if [ "${fGateway}" != "" ];then
+        if [ "${fIPType}" == "ipv6" ];then
+            fRet=`check_prefix_gateway "${fIP}" "${fMask}" "${fGateway}"`
+        else
+            fRet=`check_same_segment "${fIP}" "${fMask}" "${fGateway}"`
+        fi
+    fi
+
+    echo "${fRet}"
+}
+
+##################################################################
+#         NAME:  check_ip_format
+#  DESCRIPTION:  check ipv6/ipv4 format is ok
+#      PARAM 1:  fStart : Global data ipv6/ipv4 data Start index
+#      PARAM 2:  fEnd: Global data ipv6/ipv4 data End Index
+#      PARAM 3:  fCheckType: dhcp/interface/bond
+#       RETURN:  0/1(ok/fail)
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+check_ip_format(){
+    local fStart=$1
+    local fEnd=$2
+    local fCheckType=$3
+    local fIPType=$4
+    local fRet="0"
+    local fNextStart
+    local fGatewayIndex=$fEnd
+    local fCount
+    local fIPv6DhcpPre
+    local fStr
+
+    if [ "${fCheckType}" != "dhcp" ];then
+        fNextStart=$(($fStart+1))
+    else
+        fNextStart=$fStart
+    fi
+
+    fIPv6DhcpPre=$(($fStart+1))
+
+    for((fCount=$fNextStart;fCount<=$fEnd;fCount++))
+    do
+       if [ "${fCheckType}" != "dhcp" ];then
+           if [ "$fCount" == "$fNextStart" ] && [ "${gData[$fCount]}" != "0" ];then
+               break
+           fi
+       fi
+        #----------------------------------------------------
+        #  check ipv6/ipv6 mask/ipv4/ipv4 mask/gateway format 
+        #----------------------------------------------------
+        if [ "$fCount" != "$fNextStart" ];then
+            if [ "$fCount" == ${fGatewayIndex} ] && [ "${gData[$fCount]}" == "" ];then
+                continue
+            fi
+            
+            if [ "${fCheckType}" == "dhcp" ] && [ "ipv6" == "${fIPType}" ] && [ "${fIPv6DhcpPre}" == "${fCount}" ];then
+                fStr=`echo "${gData[$fCount]}" | awk '{print substr($0,length($0)-1)}'`
+                if [ "${fStr}" != "::" ];then
+                  fRet="1"
+                else
+                  gData[$fCount]="${gData[$fCount]}0"
+                fi
+            fi
+            if [ "${fRet}" == "0" ];then
+                fRet=`${VALIDATE_SCRIPT} "${gField[$fCount]}" "${gData[$fCount]}"`
+
+                if [ "${fRet}" != "0" ];then
+                   break
+                fi
+           else
+               break
+           fi
+        fi
+    done
+
+    echo "$fRet"
+}
+
+##################################################################
+#         NAME:  check_eth_info
+#  DESCRIPTION:  check network info is ok
+#      PARAM 1:  fStart : Global data ipv6/ipv4 data Start index
+#      PARAM 2:  fEnd: Global data ipv6/ipv4 data End Index
+#      PARAM 3:  fIPType: ipv4/ipv6
+#      PARAM 4:  fIPType: interface/bond
+#       RETURN:  0/1(ok/fail)
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+check_eth_info(){
+    local fStart=$1
+    local fEnd=$2
+    local fIPType=$3
+    local fEthType=$4
+    local fRet="0"
+    local fSameIP
+    local fGatewayIndex=${fEnd}
+    local fIPIndex
+    local fMaskIndex
+
+    if [ "${gData[$fStart]}" == "1" ];then
+        #----------------------------------------------------
+        #  check ipv6/ipv6 mask/ipv4/ipv4 mask/gateway format 
+        #----------------------------------------------------
+        fRet=`check_ip_format "${fStart}" "${fEnd}" "${fEthType}" "${fIPType}"`
+
+        #----------------------------------------------------
+        #  check ip duplicate 
+        #----------------------------------------------------
+        if [ "${fRet}" == "0" ];then
+            fRet=`check_ip_same "${fIPType}" "${fStart}" "${fEthType}"`
+            if [ "${fRet}" == "0" ];then
+                check_net_ip "${fIPType}" "${fStart}" "${fEthType}"
+                #----------------------------------------------------
+                #  check gateway in segment
+                #----------------------------------------------------
+                fIPIndex=$((${fStart} + 2))
+                fMaskIndex=$((${fIPIndex} + 1))
+                fRet=`check_gateway "${fIPType}" "${gData[$fIPIndex]}" "${gData[$fMaskIndex]}" "${gData[$fGatewayIndex]}"`
+            fi
+        fi
+    fi
+
+    echo "${fRet}"
+}
+
+##################################################################
+#         NAME:  check_interface_info
+#  DESCRIPTION:  check interface data is ok
+#      PARAM 1:  fData1 : one interface all network data
+#      PARAM 2:  fEthType: interface/bond
+#       RETURN:  0/1(ok/fail)
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+check_interface_info(){
+    local fEthType=$2
+    local fRet="0"
+    local fIPv4Start
+    local fIPv4End
+    local fIPv6Start
+    local fIPv6End
+    
+    gData=$1
+    gData=`echo "${gData}" | sed 's/|/" "/g'`
+    eval "gData=(\"$gData\")"
+    if [ "${fEthType}" == "bond" ];then
+        gField=("" "" "" "" "IPV4" "IPV4_MASK" "IPV4" "" "" "IPV6" "IPV6_LEN" "IPV6")
+        fIPv4Start=2
+        fIPv4End=6
+        fIPv6Start=7
+        fIPv6End=11
+    else
+        gField=("" "" "" "IPV4" "IPV4_MASK" "IPV4" "" "" "IPV6" "IPV6_LEN" "IPV6")
+        fIPv4Start=1
+        fIPv4End=5
+        fIPv6Start=6
+        fIPv6End=10
+    fi
+    fRet=`check_eth_info ${fIPv4Start} ${fIPv4End} "ipv4" "${fEthType}"`
+
+    if [ "${fRet}" == "0" ];then
+        fRet=`check_eth_info ${fIPv6Start} ${fIPv6End} "ipv6" "${fEthType}"`
+    fi
+
+    echo "${fRet}"
+}
+
+##################################################################
+#         NAME:  check_ha_data_interface 
+#  DESCRIPTION:  check ha data interface has change 
+#      PARAM 1:  fEth : Ethernet name 
+#       RETURN:  0/1(ok/fail)
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+check_ha_data_interface(){
+    local fEth=$1
+    local fLockEth="eth0"
+    local fRet="0"
+    local fHaEnable=`Lnet_check_ha_enable`
+    
+    if [ "${fHaEnable}" == "1" ];then
+        if [ "${fEth}" == "${fLockEth}" ];then
+            fRet="1"
+        fi
+    fi
+
+    echo "${fRet}"
+}
+
+##################################################################
+#         NAME:  check_network_values
+#  DESCRIPTION:  check all network data is ok
+#      PARAM 1:  fInfo : all network data
+#       RETURN:  0/1(ok/fail)
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+check_network_values(){
+    local fInfo="$1"
+    local fData
+    local fType
+    local fIsEth
+    local fGateway
+    local fRet="0"
+    local fRetFile="/tmp/net_ret"
+
+    if [ ! -f ${LOCK_FILE} ];then
+        rm ${fRetFile} 2>/dev/null
+        touch ${LOCK_FILE}
+#        for fData in $fInfo
+        echo -e "${fInfo}" | \
+        while read fData
+        do
+            fType=`echo "$fData" | awk -F'|' '{print $1}'`
+    
+            case "$fType" in
+                'host')
+                    fRet=`check_host "${fData}"`
+                    ;;
+                'dns')
+                    fRet=`check_dns "${fData}"`
+                    ;;
+                'gateway')
+                    fGateway=`echo "$fData" | awk -F'|' '{print $2}'`
+                    fRet=`check_default_gateway "${fGateway}" "interface"`
+                    ;;
+                *)
+                    if [ "${fData}" != "" ];then
+                        fIsEth=`echo "$fType" | awk '/^eth/||/^geth/{print $0}'`
+                        
+                        if [ "$fIsEth" != "" ];then
+                            fRet=`Lnet_check_vip_interface "${fType}"`
+                            if [ "${fRet}" == "0" ];then
+                                fRet=`check_interface_info "$fData" "interface"`
+                            fi
+                        else
+                            fRet="1"
+                        fi
+                    fi
+                    ;;
+            esac
+    
+            if [ "${fRet}" != "0" ];then
+                echo ${fRet} > "${fRetFile}"
+                break
+            fi
+        done
+        if [ -f "${fRetFile}" ];then
+           fRet=`cat "${fRetFile}"`
+        fi
+    else
+        fRet="2"
+    fi
+
+    echo "${fRet}"
+}
+
+##################################################################
+#         NAME:  update_host
+#  DESCRIPTION:  update host/domain/wins
+#      PARAM 1:  fData : host data
+#       RETURN:  update db cmd value
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+update_host(){
+    local fData=$1
+    local fField=("" "nic1_hostname" "nic1_domainname" "winad_wins")
+    local fSqlStr=""
+    local fTmpVal=""
+    local fCount
+
+    fData=`echo "${fData}" | sed 's/|/" "/g'`
+    eval "fData=(\"$fData\")"
+
+    for((fCount=1;fCount<${#fData[@]}; fCount++))
+    do
+        if [ $fCount -lt 3 ];then
+            fTmpVal=`Lnet_insert_cmd_str "1" "${fField[$fCount]}" "${fData[$fCount]}"`
+            fSqlStr="${fSqlStr}${fTmpVal}"
+            fTmpVal=""
+        elif [ $fCount -lt ${#fData[@]} ];then
+            if [ "${fData[$fCount]}" != "" ];then
+                fTmpVal="${fTmpVal}${fData[$fCount]}\n"
+            fi
+        fi
+    done
+    
+    echo "${fData[1]}.${fData[2]}" > /etc/HOSTNAME
+    echo -e "BEGIN TRANSACTION;update smb_global set v='${fTmpVal}' where k='wins server';COMMIT;" | ${SQLITE} /raid/sys/smb.db
+    fTmpVal=`Lnet_insert_cmd_str "1" "${fField[3]}" "${fTmpVal}"`
+ 
+    fSqlStr="${fSqlStr}${fTmpVal}"
+    echo -e "${fSqlStr}"
+}
+
+##################################################################
+#         NAME:  update_dns
+#  DESCRIPTION:  update dns
+#      PARAM 1:  fData : dns data
+#       RETURN:  update db cmd value
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+update_dns(){
+    local fData=$1
+    local fTmpVal=""
+    local fSqlStr=""
+    local fCount
+    local fDomain
+    local fChangeHost
+
+    fData=`echo "${fData}" | sed 's/|/" "/g'`
+    eval "fData=(\"$fData\")"
+    fTmpVal=`Lnet_insert_cmd_str "1" "nic1_dns_type" "${fData[1]}"`
+    fSqlStr="${fSqlStr}${fTmpVal}"
+    fTmpVal=""
+    if [ "${fData[1]}" != "1" ];then
+        rm ${RESOLV}
+        rm ${NAMESERVER_TMP}
+        
+        for((fCount=2;fCount<${#fData[@]}; fCount++))
+        do
+            if [ "${fData[$fCount]}" != "" ];then
+                fTmpVal="${fTmpVal}${fData[$fCount]}\n"
+                echo "nameserver ${fData[$fCount]}" >> ${NAMESERVER_TMP}
+            fi
+        done
+
+        fTmpVal=`Lnet_insert_cmd_str "1" "nic1_dns" "${fTmpVal}"`
+        fChangeHost=`echo ${gInfo} | awk '/^host\|/${print $0}'`
+        if [ "${fChangeHost}" != "" ];then
+            fDomain=`echo ${gInfo} | awk '/^host\|/${print $3}'`
+        else
+            fDomain=`${SQLITE} ${CONFDB} "select v from conf where k='nic1_domainname'"`
+        fi
+        if [ "${fDomain}" != "" ];then
+            echo "search $fDomain" >> $RESOLV
+        fi
+
+        if [ -f "${NAMESERVER_TMP}" ] && [ "`cat ${NAMESERVER_TMP}`" != "" ];then
+            cat ${NAMESERVER_TMP} >> ${RESOLV}
+            rm ${NAMESERVER_TMP}
+        fi
+        
+    fi
+
+    fSqlStr="${fSqlStr}${fTmpVal}"
+    echo -e "${fSqlStr}"
+}
+
+##################################################################
+#         NAME:  set_eth_info_db
+#  DESCRIPTION:  update one interface network ipv4/ipv6 data
+#      PARAM 1:  fStart : Global data ipv6/ipv4 data Start index
+#      PARAM 2:  fEnd: Global data ipv6/ipv4 data End Index
+#      PARAM 3:  fType: interface/dhcp
+#      PARAM 4:  fIPType: ipv4/ipv6
+#       RETURN:  update db cmd value
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+set_eth_info_db(){
+    local fStart=$1
+    local fEnd=$2
+    local fType=$3
+    local fIPType=$4
+    local fTmpVal=""
+    local fSqlStr=""
+    local fNextStart
+    local fVal
+    local fCount
+    
+    fTmpVal=`Lnet_insert_cmd_str "1" "${gField[$fStart]}" "${gData[$fStart]}"`
+    fSqlStr="${fSqlStr}${fTmpVal}"
+
+    if [ "${gData[$fStart]}" == "1" ];then
+        fNextStart=$(($fStart+1))
+        for((fCount=$fNextStart;fCount<=$fEnd; fCount++))
+        do
+             if [ "${fIPType}" == "ipv4" ];then
+                 fVal=`change_ip_format "${gData[$fCount]}"`
+             else
+                 fVal="${gData[$fCount]}"
+             fi
+
+             fTmpVal=`Lnet_insert_cmd_str "1" "${gField[$fCount]}" "${fVal}"`
+             fSqlStr="${fSqlStr}${fTmpVal}"
+
+             if [ "${fType}" == "interface" ];then
+                 if [ "$fCount" == "$fNextStart" ] && [ "${gData[$fCount]}" != "0" ];then
+                     break
+                 fi
+             fi
+        done
+    fi
+
+   echo "${fSqlStr}"
+}
+
+##################################################################
+#         NAME:  set_eth_info_db
+#  DESCRIPTION:  update one interface network ipv4/ipv6/jumbo data
+#      PARAM 1:  gData :  one interface network data
+#       RETURN:  update db cmd value
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+update_ethernet(){
+    local fTmpVal=""
+    local fSqlStr=""
+    local fNic
+    gData=$1
+
+    gData=`echo "${gData}" | sed 's/|/" "/g'`
+    eval "gData=(\"$gData\")"
+    fNic=`Lnet_trans_interface_to_nic "${gData[0]}"`
+    gField=("" "${fNic}_ipv4_enable" "${fNic}_ipv4_dhcp_client" "${fNic}_ip" "${fNic}_netmask" "${fNic}_gateway" "${fNic}_ipv6_enable" "${fNic}_ipv6_connection_type" "${fNic}_ipv6_addr" "${fNic}_ipv6_prefixlen" "${fNic}_ipv6_gateway" "${fNic}_jumbo" "${fNic}_desp")
+
+    fTmpVal=`set_eth_info_db 1 5 "interface" "ipv4"`
+    fSqlStr="${fSqlStr}${fTmpVal}"
+    fTmpVal=`set_eth_info_db 6 10 "interface" "ipv6"`
+    fSqlStr="${fSqlStr}${fTmpVal}"
+    fTmpVal=`Lnet_insert_cmd_str "1" "${gField[11]}" "${gData[11]}"`
+    fSqlStr="${fSqlStr}${fTmpVal}"
+    fTmpVal=`Lnet_insert_cmd_str "1" "${gField[12]}" "${gData[12]}"`
+    fSqlStr="${fSqlStr}${fTmpVal}"
+    echo "${fSqlStr}"
+}
+
+##################################################################
+#         NAME:  set_network_info
+#  DESCRIPTION:  update all network data
+#      PARAM 1:  fInfo : all network data
+#       RETURN:  update network info db
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+set_network_info(){
+    local fInfo="$1"
+    local fData
+    local fType
+    local fIsEth
+    local fGateway
+    local fSqlStr=""
+    local fTmpStr
+
+#    for fData in $fInfo
+    echo -e "${fInfo}" | \
+    while read fData
+    do
+        
+        fType=`echo "$fData" | awk -F'|' '{print $1}'`
+        case "$fType" in
+            'host')
+                fTmpStr=`update_host "${fData}"`
+                ;;
+            'dns')
+                fTmpStr=`update_dns "${fData}"`
+                ;;
+            'gateway')
+                fGateway=`echo "$fData" | awk -F'|' '{print $2}'`
+                fTmpStr=`Lnet_insert_cmd_str "1" "default_gateway" "${fGateway}"`
+                ;;
+            *)
+                fIsEth=`echo "$fType" | awk '/^eth/||/^geth/{print $0}'`
+                if [ "$fIsEth" != "" ];then
+                    fTmpStr=`update_ethernet "$fData"`
+                fi
+                ;;
+        esac
+        if [ "${fData}" != "" ];then
+            echo "${fTmpStr}" >> ${gNetSqlFile}
+        fi
+#        fSqlStr="${fSqlStr}${fTmpStr}"
+    done
+    fSqlStr=`cat ${gNetSqlFile}`
+    echo -e "BEGIN TRANSACTION;${fSqlStr}COMMIT;" | ${SQLITE} ${CONFDB}
+    touch "${REBOOT_FLAG}"
+}
+
+##################################################################
+#         NAME:  check_eth_status
+#  DESCRIPTION:  check ethernet is enable/disable/hearbeat/linking
+#      PARAM 1:  fIPType : ipv4/ipv6
+#      PARAM 2:  findex : global data index for ethernet enable
+#       RETURN:  0/1(ok/fail)
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+check_eth_status(){
+    local fIPType=$1
+    local findex=$2
+    local fNic
+    local fRet="0"
+    local fEn
+    local fSetup
+    local fInterface="${gData[0]}"
+    local fMac
+    local fBondId
+
+    fNic=`Lnet_trans_interface_to_nic "${fInterface}"`
+
+    if [ "${fIPType}" == "ipv6" ];then
+        fField=("${fNic}_ipv6_enable" "${fNic}_ipv6_connection_type")
+    else
+        fField=("${fNic}_ipv4_enable" "${fNic}_ipv4_dhcp_client")
+    fi
+
+    fEn=`${SQLITE} ${CONFDB} "select v from conf where k='${fField[0]}'"`
+    fSetup=`${SQLITE} ${CONFDB} "select v from conf where k='${fField[1]}'"`
+
+    if [ "${gData[${findex}]}" == "1" ];then
+        if [ "${fEn}" != "1" ] || [ "${fSetup}" == "1" ];then
+            fRet="1"
+         fi
+    fi
+
+    if [ "${fRet}" == "0" ];then
+        fRet=`Lnet_check_vip_interface "${fInterface}"`
+        if [ "${fRet}" == "0" ];then
+            fRet=`Lnet_check_ha_interface "${fInterface}"`
+            if [ "${fRet}" == "0" ];then
+                fMac=`${IFCONFIG} ${fInterface} | awk '/ HWaddr /{print $5}'` 
+                fBondId=`${SQLITE} ${CONFDB} "select id from ${LINKTABLE2} where mac='${fMac}'"` #linking bond
+                if [ "${fBondId}" != "" ];then
+                    fRet="1"
+                fi
+            fi
+        fi
+    fi
+
+    echo "${fRet}"
+}
+
+##################################################################
+#         NAME:  check_ip_range
+#  DESCRIPTION:  check dhcp server ipv4 range in semgement
+#      PARAM 1:  fIP : network ipv4 ip
+#      PARAM 2:  fMask : network ipv4 mask
+#      PARAM 3:  fLowIP : network low ipv4 
+#      PARAM 4:  fHighIP : network high ipv4
+#       RETURN:  0/1(ok/fail)
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+check_ip_range(){
+    local fIP=$1
+    local fMask=$2
+    local fLowIP=$3
+    local fHighIP=$4
+    local fIPAry=("${fLowIP}" "${fHighIP}")
+    local fRet="0"
+    local fIndex
+
+    for((fIndex=0;fIndex<${#fIPAry[@]};fIndex++))
+    do
+        fRet=`check_same_segment "${fIP}" "${fMask}" "${fIPAry[$fIndex]}"`
+        if [ "${fRet}" != "0" ];then
+            break
+        fi
+    done
+    echo "${fRet}"
+}
+
+##################################################################
+#         NAME:  check_dhcp_info
+#  DESCRIPTION:  check dhcp server all setting
+#      PARAM 1:  fInfo : all dhcp server data
+#       RETURN:  0/1(ok/fail)
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+check_dhcp_info(){
+    local fInfo="$1"
+    local fRet="0"
+    local fEth
+    local fData
+    local fIPv4Start="1"
+    local fIPv6Start="5"
+    local fIPv4Count="3"
+    local fIPv6Count="2"
+    local fStartAry=("${fIPv4Start}" "${fIPv6Start}")
+    local fCountAry=("${fIPv4Count}" "${fIPv6Count}")
+    local GatewayIndex=("4" "6")
+    local fIPTypeAry=("ipv4" "ipv6")
+    local fDbField
+    local fDns
+    local fIP
+    local fMask
+    local fNic
+    local fLow
+    local fHigh
+    local fIndex1
+    local fIndex2
+
+    if [ ! -f ${LOCK_FILE} ];then
+        touch ${LOCK_FILE}
+        if [ -f "${REBOOT_FLAG}" ];then
+            fRet="1"
+        else
+            for fData in $fInfo
+            do
+                fEth=`echo "$fData" | awk -F'|' '/^eth/||/^geth/{print $1}'`
+                if [ "$fEth" != "" ];then
+                    gData=`echo "${fData}" | sed 's/|/" "/g'`
+                    eval "gData=(\"$gData\")"
+                    gField=("" "" "IPV4" "IPV4" "IPV4" "" "IPV6" "IPV6_LEN")
+        
+                    for((fIndex1=0;fIndex1<${#fStartAry[@]};fIndex1++))
+                    do  
+                        if [ "${gData[${fStartAry[$fIndex1]}]}" == "1" ];then
+                            fRet=`check_eth_status "${fIPTypeAry[$fIndex1]}" "${fStartAry[$fIndex1]}"`
+                            if [ "$fRet" == "0" ];then
+                                fRet=`check_ip_format "${fStartAry[$fIndex1]}" "$((${fStartAry[$fIndex1]}+${fCountAry[$fIndex1]}))" "dhcp" "${fIPTypeAry[$fIndex1]}"`
+                                if [ "${fRet}" == "0" ];then
+                                    fNic=`Lnet_trans_interface_to_nic "${fEth}"`
+        
+                                    if [ "${fIPTypeAry[$fIndex1]}" == "ipv6" ];then
+                                        fDbField=("${fNic}_ipv6_addr" "${fNic}_ipv6_prefixlen")
+                                    else
+                                        fDbField=("${fNic}_ip" "${fNic}_netmask")
+                                    fi
+        
+                                    fIP=`${SQLITE} ${CONFDB} "select v from conf where k='${fDbField[0]}'"`
+                                    fMask=`${SQLITE} ${CONFDB} "select v from conf where k='${fDbField[1]}'"`
+                                    if [ "${fIPTypeAry[$fIndex1]}" != "ipv6" ];then
+                                        fRet=`check_gateway "${fIPTypeAry[$fIndex1]}" "${fIP}" "${fMask}" "${gData[${GatewayIndex[${fIndex1}]}]}"`
+                                    fi
+        
+                                    if [ "${fRet}" == "0" ] && [ "${fIPTypeAry[$fIndex1]}" == "ipv4" ];then
+                                        fLow=$((${fStartAry[$fIndex1]}+1))
+                                        fHigh=$((${fStartAry[$fIndex1]}+2))
+                                        fRet=`check_ip_range "${fIP}" "${fMask}" "${gData[${fLow}]}" "${gData[${fHigh}]}"`
+        
+                                        if [ "${fRet}" == "0" ];then
+                                            for((fIndex2=8;fIndex2<${#gData[@]};fIndex2++))
+                                            do
+                                                fDnsType=`echo "${gData[fIndex2]}" | awk '{print substr($0,1,4)}'`
+                                                case "$fDnsType" in
+                                                    'v4d_')
+                                                        fDns=`echo "${gData[fIndex2]}" | awk '{print substr($0,5)}'`
+                                                        fRet=`${VALIDATE_SCRIPT} "IPV4" "${fDns}"`
+                                                        ;;
+                                                    *)
+                                                        fRet="1"
+                                                        ;;
+                                                esac
+                                                if [ "${fRet}" != "0" ];then
+                                                    break
+                                                fi
+                                            done
+                                        fi
+                                    fi
+                                 fi
+                             fi
+                        fi
+        
+                        if [ "${fRet}" != "0" ];then
+                            break
+                        fi
+                    done
+                else
+                   fRet="1"
+                fi
+        
+                if [ "${fRet}" != "0" ];then
+                    break
+                fi
+            done
+        fi
+    else
+        fRet="2"
+    fi
+
+    echo "${fRet}"
+}
+
+##################################################################
+#         NAME:  change_range_role
+#  DESCRIPTION:  when low ip > high ip , will change
+#      PARAM 1:  fLowIndex : global Data low ip index
+#      PARAM 2:  fHighIndex : global Data high ip index
+#       RETURN:  none
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+change_range_role(){
+    local fLowIndex=$1
+    local fHighIndex=$2
+    local fLowIP
+    local fHighIP
+    local fTmpIP
+    local fIndex
+
+    fLowIP=`echo "${gData[$fLowIndex]}" | sed 's/\./" "/g'`
+    eval "fLowIP=(\"$fLowIP\")"
+    fHighIP=`echo "${gData[$fHighIndex]}" | sed 's/\./" "/g'`
+    eval "fHighIP=(\"$fHighIP\")"
+
+    for((fIndex=0;fIndex<${#fLowIP[@]};fIndex++))
+    do
+        if [ ${fLowIP[$fIndex]} -gt ${fHighIP[$fIndex]} ];then
+            fTmpIP=${gData[${fLowIndex}]}
+            gData[${fLowIndex}]=${gData[${fHighIndex}]}
+            gData[${fHighIndex}]=$fTmpIP
+            break
+        fi
+    done
+}
+
+##################################################################
+#         NAME:  set_dhcp_server
+#  DESCRIPTION:  update dhcp info and start/stop dhcp server
+#      PARAM 1:  fInfo : all dhcp server info
+#       RETURN:  none
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+set_dhcp_server(){
+    local fInfo="$1"
+    local fData
+    local fIsEth
+    local fSqlStr=""
+    local fTmpVal
+    local fNic
+    local fDataLen
+    local fDnsType
+    local fDns=""
+    local fIndex
+    local fLowIndex=2
+    local fHighIndex=3
+    local fCount
+
+    for fData in $fInfo
+    do
+        fIsEth=`echo "$fData" | awk -F'|' '/^eth/||/^geth/{print $1}'`
+
+        if [ "$fIsEth" != "" ];then
+            fSqlStr=""
+            fTmpVal=""
+            fDns=""
+            gData=`echo "${fData}" | sed 's/|/" "/g'`
+            eval "gData=(\"$gData\")"
+            change_range_role "$fLowIndex" "${fHighIndex}"
+            fNic=`Lnet_trans_interface_to_nic "${gData[0]}"`
+            gField=("" "${fNic}_ipv4_dhcp_server" "${fNic}_startip" "${fNic}_endip" "${fNic}_dhcp_server_gateway" "${fNic}_ipv6_dhcp_server" "${fNic}_ipv6_dhcp_server_prefix" "${fNic}_ipv6_dhcp_server_len" "${fNic}_dhcp_server_dns")
+            fTmpVal=`set_eth_info_db 1 4 "dhcp" "ipv4"`
+            fSqlStr="${fSqlStr}${fTmpVal}"
+            fTmpVal=`set_eth_info_db 5 7 "dhcp" "ipv6"`
+            fSqlStr="${fSqlStr}${fTmpVal}"
+
+            for((fCount=8;fCount<${#gData[@]};fCount++))
+            do
+                fDnsType=`echo "${gData[$fCount]}" | awk '{print substr($0,1,4)}'`
+                case "$fDnsType" in
+                    'v4d_')
+                        fTmpVal=`echo "${gData[$fCount]}" | awk '{print substr($0,5)}'`
+                        fDns="${fDns}${fTmpVal}\n"
+                        ;;
+                    *)
+                        ;;
+                esac
+            done
+
+            if [ "${fDns}" != "" ] && [ "${gData[1]}" == "1" ];then
+                 fTmpVal=`Lnet_insert_cmd_str "1" "${gField[8]}" "${fDns}"`
+                 fSqlStr="${fSqlStr}${fTmpVal}"
+            fi
+
+            echo -e "BEGIN TRANSACTION;${fSqlStr}COMMIT;" | ${SQLITE} ${CONFDB}
+            fIndex=`cat ${Lnet_ALL_NET_INTERFACE} | awk -F'|' '/^'${gData[0]}'\|/{print $2}'`
+            if [ "$fIndex" != "" ];then
+                start_dhcp_server  "${gData[0]}" "${fIndex}"
+            fi
+        fi
+    done
+}
+
+
+##################################################################
+#         NAME:  check_bond_other
+#  DESCRIPTION:  check bond other condition
+#      PARAM 1:  fInfo : one linking aggregation info
+#       RETURN:  0/1(ok/fail)
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+check_bond_other(){
+    local fData=$1
+    local fDataAry
+    local fRet="0"
+    local fHasSame
+    local fCount
+    local fInfoLen
+    local fEthCount
+
+    fDataAry=`echo "${fData}" | sed 's/|/" "/g'`
+    eval "fDataAry=(\"$fDataAry\")"
+    fInfoLen=${#fDataAry[@]}
+    fEthCount=$((${fInfoLen} - ${gTable1AryCount}))
+
+    #----------------------------------------------------
+    #  check interface count 
+    #----------------------------------------------------
+    if [ ${fEthCount} -ge 2 ];then
+        for((fCount=${gTable1AryCount};fCount<${fInfoLen};fCount++))
+        do
+            if [ "${fDataAry[$fCount]}" != "" ];then
+            #----------------------------------------------------
+            #  check has the same bond id 
+            #----------------------------------------------------
+                fHasSame=`echo -e "${gInfo}" | awk '/^'${fDataAry[0]}'\|/{print $0}' |wc -l `
+                if [ "${fHasSame}" != "1" ];then
+                    fRet="1"
+                    break
+                fi
+
+            #----------------------------------------------------
+            #  check other bond has the same interface 
+            #----------------------------------------------------
+                fHasSame=`echo -e "${gInfo}" | awk '(!/^'${fDataAry[0]}'\|/)&&(/\|'${fDataAry[$fCount]}'\|/){print $0}'`
+                if [ "${fHasSame}" != "" ];then
+                    fRet="1"
+                    break
+                fi
+            fi
+        done
+    else
+        fRet="1"
+    fi
+
+    echo "${fRet}"
+}
+
+##################################################################
+#         NAME:  check_vip_bond
+#  DESCRIPTION:  check wan bond status
+#      PARAM 1:  none
+#       RETURN:  0/1(ok/fail)
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+check_vip_bond(){
+    local fOldEth
+    local fOldEthId
+    local fOldEthData
+    local fMac
+    local fBondEthCount
+    local fHasMatch
+    local fField=`echo "${gTable1Field}" | sed 's/[()]//g'`
+    local fIPv6Chk
+    local fData
+    local fDataAry
+    local fHasEth
+    local fCount
+    local fInfoLen
+    local fEthCount
+    local fRet="0"
+    local fHasHa=`Lnet_check_ha_enable`
+    local fVIPList=`${SQLITE} ${CONFDB} "select v from conf where k='ha_virtual_ip'"`
+    local fVIPData
+    local fVIPEth
+    local fBondEth
+    local fVIPBondId
+
+    fVIPList=`echo "${fVIPList}" | sed 's/|/ /g'`
+
+    #----------------------------------------------------
+    #  check ha enable wan setting 
+    #----------------------------------------------------
+    if [ "${fHasHa}" == "1" ];then
+        for fVIPData in ${fVIPList}
+        do
+            if [ "${fVIPData}" != "" ];then
+                fVIPEth=`echo "${fVIPData}" | awk -F',' '{print $1}'`
+                fVIPBondId=`echo "${fVIPEth}" | awk '/^bond/{print $0}'`
+
+                if [ "${fVIPBondId}" != "" ];then
+                    fVIPEth=`echo "${fVIPData}" | awk -F',' '{print $4}'`
+                fi
+
+                fOldEthId=`check_bond ${fVIPEth}`
+
+                if [ "${fOldEthId}" != "" ];then
+                    fOldEth="1"
+                    fOldEthId="${fOldEthId:4}"
+                else
+                    fOldEth="0"
+                fi
+
+                fData=`echo "${gInfo}" | awk '/\|'${fVIPEth}'\|/||/\|'${fVIPEth}'$/{print $0}'`
+                if [ "${fData}" == "" ];then
+                    fHasEth="0"
+                else
+                    fHasEth="1"
+                    fDataAry=`echo "${fData}" | sed 's/|/" "/g'`
+                    eval "fDataAry=(\"$fDataAry\")"
+                    fInfoLen=${#fDataAry[@]}
+                    fEthCount=$((${fInfoLen} - ${gTable1AryCount}))
+                fi
+
+                #----------------------------------------------------
+                #  check interface has change status
+                #----------------------------------------------------
+                if [ "${fHasEth}" == "${fOldEth}" ];then
+                    if [ "${fOldEthId}" != "" ];then
+                        fOldEthData=`${SQLITE} ${CONFDB} "select ${fField} from ${LINKTABLE1} where id='${fOldEthId}'"`
+                        fOldEthData=`echo "${fOldEthData}" | sed 's/|/" "/g'`
+                        eval "fOldEthData=(\"$fOldEthData\")"
+                        for((fCount=1;fCount<${gTable1AryCount};fCount++))
+                        do
+                            if [ "${fCount}" == "4" ] || [ "${fCount}" == "5" ] || [ "${fCount}" == "6" ] || [ "${fCount}" == "10" ];then
+                                fDataAry[$fCount]=`change_ip_format "${fDataAry[$fCount]}"`
+                                fOldEthData[$fCount]=`change_ip_format "${fOldEthData[$fCount]}"`
+                            fi
+                            if [ "${fCount}" == "9" ] || [ "${fCount}" == "11" ];then
+                                if [ "${fDataAry[$fCount]}" != "" ] || [ "${fOldEthData[$fCount]}" != "" ];then
+                                    ${IPV6CHECK} -c "${fDataAry[$fCount]}" "${fOldEthData[$fCount]}"
+                                    fIPv6Chk=$?
+                                    if [ "$fIPv6Chk" != "0" ];then
+                                        fRet="1"
+                                        break
+                                    fi
+                                fi
+                             else
+                                if [ "${fDataAry[$fCount]}" != "${fOldEthData[$fCount]}" ];then
+                                    fRet="1"
+                                    break
+                                fi
+                             fi
+                        done
+
+                        if [ "${fRet}" == "0" ];then
+                            fBondEthCount=`${SQLITE} ${CONFDB} "select count(*) from ${LINKTABLE2} where id='${fOldEthId}'"`
+                            if [ "${fBondEthCount}" == "${fEthCount}" ];then
+                                for((fCount=${gTable1AryCount};fCount<${fInfoLen};fCount++))
+                                do
+                                    fMac=`awk -F'|' '/^'${fDataAry[$fCount]}'\|/{print $3}' ${Lnet_ALL_NET_INTERFACE}`
+                                    fHasMatch=`${SQLITE} ${CONFDB} "select id from ${LINKTABLE2} where id='${fOldEthId}' and mac='${fMac}'"`
+                                    if [ "${fHasMatch}" == "" ];then
+                                        fRet="1"
+                                        break
+                                    fi
+                                done
+                            else
+                                fRet="1"
+                            fi
+                        fi
+                    fi
+                else
+                    fRet="1"
+                fi
+
+                if [ "${fRet}" != "0" ];then
+                    break
+                fi
+            fi
+        done
+    fi
+
+    echo "${fRet}"
+}
+
+##################################################################
+#         NAME:  check_bond_id
+#  DESCRIPTION:  check bond id is continuous
+#      PARAM 1:  fInfo : all linking aggregation info
+#       RETURN:  0/1(ok/fail)
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+check_bond_id(){
+    local fInfo="$1"
+    local fTotalId
+    local fTotalRecordCount
+    local fIndex
+    local fRet="0"
+    local fHasMatch
+
+    fTotalId=`echo -e "${fInfo}" | awk -F'|' '{if($1!="gateway" && $1 !="") print $1}'`
+    fTotalRecordCount=`echo -e "${fInfo}" | awk -F'|' '{if($1!="gateway" && $1 !="")print $1}' | wc -l`
+
+    for((Index=0;Index<$fTotalRecordCount;Index++))
+    do
+        fHasMatch=`echo "${fTotalId}" | awk '/^'${Index}'$/{print $0}'`
+        if [ "${fHasMatch}" == "" ];then
+            fRet="1"
+            break
+        fi
+    done
+    
+    echo "${fRet}"
+}
+
+##################################################################
+#         NAME:  check_link_info
+#  DESCRIPTION:  check all linking aggregation is ok
+#      PARAM 1:  fInfo : all linking aggregation info
+#       RETURN:  none
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+check_link_info(){
+    local fInfo="$1"
+    local fData
+    local fType
+    local fIsEth
+    local fGateway
+    local fRet="0"
+    local fRetFile="/tmp/link_ret"
+
+    if [ ! -f ${LOCK_FILE} ];then
+        rm ${fRetFile}
+        touch ${LOCK_FILE}
+        fRet=`check_bond_id "${fInfo}"`
+        if [ "$fRet" == "0" ];then
+#            for fData in $fInfo
+            echo -e "${fInfo}" | \
+            while read fData
+            do
+                fType=`echo "$fData" | awk -F'|' '{print $1}'`
+    
+                case "$fType" in
+                    'gateway')
+                        fGateway=`echo "$fData" | awk -F'|' '{print $2}'`
+                        fRet=`check_default_gateway "${fGateway}" "bond"`
+                        ;;
+                    *)
+                        if [ "$fData" != "" ];then
+                            fId=`echo "$fData" | awk -F'|' '{print $1}'`
+                            fRet=`${VALIDATE_SCRIPT} "ISNUM" "${fId}"`
+                            if [ "$fId" != "" ];then
+                                fRet=`check_interface_info "$fData" "bond"`
+                                if [ "$fRet" == "0" ];then
+                                    fRet=`check_bond_other "$fData"`
+                                fi
+                            else
+                                fRet="1"
+                                break
+                            fi
+                        fi
+                        ;;
+                esac
+        
+                if [ "${fRet}" != "0" ];then
+                    echo ${fRet} > "${fRetFile}"
+                    break
+                fi
+            done
+
+            if [ -f "${fRetFile}" ];then
+                fRet=`cat "${fRetFile}"`
+            fi
+            if [ "${fRet}" == "0" ];then
+                fRet=`check_vip_bond`
+            fi
+        fi
+    else
+        fRet="2"
+    fi
+
+    echo "${fRet}"
+}
+##################################################################
+#         NAME:  update_link_interface
+#  DESCRIPTION:  assemble linking aggregation info sqlite cmd
+#      PARAM 1:  fData : one linking aggregation info
+#       RETURN:  linking aggregation info sqlite cmd
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+update_link_interface(){
+    local fData="$1"
+    local fId
+    local fRet
+    local fSqlStr=""
+    local fTmpVal
+    local fTmpStr
+
+    local fTable2Field="(id,mac)"
+    local fInfoLen
+    local fDataAry
+    local fCount
+    local fMac
+    local fGateway
+
+    fId=`echo "$fData" | awk -F'|' '{print $1}'`
+    fRet=`${VALIDATE_SCRIPT} "ISNUM" "${fId}"`
+
+    if [ "${fRet}" == "0" ];then
+       fDataAry=`echo "${fData}" | sed 's/|/" "/g'`
+       eval "fDataAry=(\"$fDataAry\")"
+       fInfoLen=${#fDataAry[@]}
+       fTmpVal=`echo "${fData}" | awk -F'|' '{for(i=1;i<='$gTable1AryCount';i++)
+                                              {
+                                                  if(i>4 && i<8){
+                                                      if($i != ""){
+                                                          arylen=split($i,ipary,".");
+                                                          for(j=1;j<=arylen;j++){
+                                                              if(ipary[j]!=""){
+                                                                  ipval=ipary[j]+0;
+                                                              }
+                                                              if(j==1){
+                                                                  val=sprintf("%d",ipval);
+                                                              }else{
+                                                                  val=sprintf("%s.%d",val,ipval);
+                                                              }
+                                                          }
+                                                      }else{
+                                                          val=$i;
+                                                      }
+                                                  }else{
+                                                      val=$i;
+                                                  }
+                                                  if(i==1)
+                                                      str=sprintf("'\''%s'\''",val);
+                                                  else
+                                                      str=sprintf("%s,'\''%s'\''",str,val);
+                                                  }
+                                             print str}'`
+        fTmpStr="insert into ${LINKTABLE1}${gTable1Field} values(${fTmpVal});"
+        fSqlStr="${fSqlStr}${fTmpStr}"
+
+        for((fCount=${gTable1AryCount};fCount<${fInfoLen};fCount++))
+        do
+             if [ "${fDataAry[$fCount]}" != "" ];then
+                 if [ "${fDataAry[$fCount]}" == "eth0" ];then
+                     fmode=`echo "$fData" | awk -F'|' '{print $2}'`
+                     fTmpStr=`Lnet_insert_cmd_str "1" "nic1_mode_8023ad" "${fmode}"`
+                     fSqlStr="${fSqlStr}${fTmpStr}"
+                     echo "1" > "${WANFLAG}"
+                 fi
+                 fMac=`awk -F'|' '/^'${fDataAry[$fCount]}'\|/{print $3}' ${Lnet_ALL_NET_INTERFACE}`
+                 fTmpStr="insert into ${LINKTABLE2}${fTable2Field} values('${fId}','${fMac}');"
+                 fSqlStr="${fSqlStr}${fTmpStr}"
+             fi
+        done
+    fi
+
+    echo "${fSqlStr}"
+}
+
+##################################################################
+#         NAME:  set_link_info
+#  DESCRIPTION:  update linking aggregation db
+#      PARAM 1:  fInfo : all linking aggregation info
+#       RETURN:  none
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+set_link_info(){
+    local fInfo="$1"
+    local fSqlStr=""
+    local fGateway
+    local fType
+    local fData
+    local fTmpStr
+
+    ${SQLITE} ${CONFDB} "delete from ${LINKTABLE1}"
+    ${SQLITE} ${CONFDB} "delete from ${LINKTABLE2}"
+
+#    for fData in $fInfo
+    echo -e "${fInfo}" | \
+    while read fData
+    do
+        fType=`echo "$fData" | awk -F'|' '{print $1}'`
+        case "$fType" in
+            'gateway')
+                fGateway=`echo "$fData" | awk -F'|' '{print $2}'`
+                fTmpStr=`Lnet_insert_cmd_str "1" "default_gateway" "${fGateway}"`
+                ;;
+            *)
+                if [ "${fData}" != "" ];then
+                    fTmpStr=`update_link_interface "${fData}"`
+                fi
+                ;;
+        esac
+        
+        if [ "${fData}" != "" ];then
+            echo "${fTmpStr}" >> ${gLinkSqlFile}
+        fi
+        #fSqlStr="${fSqlStr}${fTmpStr}"
+    done
+    fSqlStr=`cat ${gLinkSqlFile}`
+    fWanFlag=`cat ${WANFLAG}`
+    if [ "${fWanFlag}" != "1" ];then
+        fTmpStr=`Lnet_insert_cmd_str "1" "nic1_mode_8023ad" "none"`
+        fSqlStr="${fSqlStr}${fTmpStr}"
+    fi
+
+    echo -e "BEGIN TRANSACTION;${fSqlStr}COMMIT;" | ${SQLITE} ${CONFDB}
+    rm ${WANFLAG}
+    touch "${REBOOT_FLAG}"
+}
+
+##################################################################
+#         NAME:  destory_one_link
+#  DESCRIPTION:  delete someone interface linking aggregation
+#      PARAM 1:  fEth : interface name
+#      PARAM 2:  fDeleteDb : delete db
+#       RETURN:  none
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+destory_one_link(){
+    local fEth=$1
+    local fDeleteDb=$2
+    local fId=`check_bond ${fEth}`
+    local fMac
+    local fEthList=""
+    local fMacList
+    local fOneEth
+    local fHasCon
+    
+    if [ "${fId}" != "" ];then
+        fId="${fId:4}"
+        fMacList=`${SQLITE} ${CONFDB} "select mac from ${LINKTABLE2} where id='${fId}'"`
+
+        for fMac in ${fMacList}
+        do
+            if [ "${fMac}" != "" ];then
+                fOneEth=`awk -F'|' '/\|'${fMac}'$/{print $1}' ${Lnet_ALL_NET_INTERFACE}`
+                fEthList="${fEthList} ${fOneEth}"
+            fi
+        done
+        if [ "${fDeleteDb}" != "no" ];then
+            ${SQLITE} ${CONFDB} "delete from ${LINKTABLE1} where id='${fId}'"
+            ${SQLITE} ${CONFDB} "delete from ${LINKTABLE2} where id='${fId}'"
+        fi
+        for fOneEth in ${fEthList}
+        do
+             if [ "${fOneEth}" != "" ];then
+                 fHasCon=`${ETHTOOL} ${fOneEth} | awk -F ': ' '/Link detected: /{print $2}'`
+                 if [ "${fHasCon}" == "yes" ];then
+                     touch `printf $SYS_ETH_UP_FLAG ${fOneEth}`
+                     touch `printf $SYS_ETH_DOWN_FLAG ${fOneEth}`
+                 fi
+
+                 ifenslave -d bond${fId} ${fOneEth}
+
+                 if [ "${fHasCon}" == "yes" ];then
+                     sleep 1
+                     touch `printf $SYS_ETH_UP_FLAG ${fOneEth}`
+                     touch `printf $SYS_ETH_DOWN_FLAG ${fOneEth}`
+                     Lnet_up_net ${fOneEth} "yes"
+                 fi
+             fi
+        done
+
+        rmmod bond${fId}
+    fi
+}
+
+##################################################################
+#         NAME:  link_wan_lan
+#  DESCRIPTION:  link wan and lan
+#      PARAM 1:  fUBond:update wan linking data (yes/no)
+#       RETURN:  none
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+##################################################################
+link_wan_lan(){
+    local fUBond=$1
+    local fWanId=`check_bond eth0`
+    local fLanId=`check_bond eth1`
+    local fNic="nic1"
+    local fInfo=`${SQLITE} ${CONFDB} "select * from conf where k like '${fNic}%'"`
+    local fIpv4En=`Lnet_get_net_info "${fInfo}" "${fNic}" "ipv4_enable"`
+    local fIp=`Lnet_get_net_info "${fInfo}" "${fNic}" "ip"`
+    local fMask=`Lnet_get_net_info "${fInfo}" "${fNic}" "netmask"`
+    local fGateway=`Lnet_get_net_info "${fInfo}" "${fNic}" "gateway"`
+    local fIpv6En=`Lnet_get_net_info "${fInfo}" "${fNic}" "ipv6_enable"`
+    local fAddr=`Lnet_get_net_info "${fInfo}" "${fNic}" "ipv6_addr"`
+    local fLen=`Lnet_get_net_info "${fInfo}" "${fNic}" "ipv6_prefixlen"`
+    local fIpv6Gateway=`Lnet_get_net_info "${fInfo}" "${fNic}" "ipv6_gateway"`
+    local fJumbo=`Lnet_get_net_info "${fInfo}" "${fNic}" "jumbo"`
+    local fWanMac
+    local fLanMac
+    local fId
+    local fSqlStr
+    f8023ad=`${SQLITE} ${CONFDB} "select v from conf where k='nic1_mode_8023ad'"`
+    local fField="(id,mode,ipv4_enable,ipv4_conn_type,ip,netmask,gateway,ipv6_enable,ipv6_conn_type,ipv6,prefix_len,ipv6_gateway,jumbo)"
+
+    if [ "${fUBond}" != "yes" ];then
+        if [ "${fLanId}" == "" ] || [ "${fLanId}" == "${fWanId}" ];then
+            if [ "${fWanId}" != "" ];then
+                destory_one_link "eth0"
+            fi
+
+            fId=`get_free_link_id`
+            fWanMac=`awk -F'|' '/^eth0\|/{print $3}' ${Lnet_ALL_NET_INTERFACE}`
+            fLanMac=`awk -F'|' '/^eth1\|/{print $3}' ${Lnet_ALL_NET_INTERFACE}`
+    
+            fSqlStr="insert into ${LINKTABLE1}${fField} values('${fId}','${f8023ad}','${fIpv4En}','0','${fIp}','${fMask}','${fGateway}','${fIpv6En}','0','${fAddr}','${fLen}','${fIpv6Gateway}','${fJumbo}');"
+            fSqlStr="${fSqlStr}insert into ${LINKTABLE2}(id,mac) values('${fId}','${fWanMac}');"
+            fSqlStr="${fSqlStr}insert into ${LINKTABLE2}(id,mac) values('${fId}','${fLanMac}');"
+            
+        fi
+    else
+        if [ "${fWanId}" != "" ];then
+            destory_one_link "eth0" "no"
+            fSqlStr="update ${LINKTABLE1} set ip='${fIp}',netmask='${fMask}' where id='${fWanId:4}';"
+        fi
+    fi
+    
+    if [ "${fSqlStr}" != "" ];then
+        echo "BEGIN TRANSACTION;${fSqlStr};COMMIT;" | ${SQLITE} ${CONFDB}
+    fi
+}
+
+#################################################
+#         NAME:  check_wan_lan_same_bond
+#  DESCRIPTION:  check wan lan in same bond 
+#      PARAM 1:  none
+#       RETURN:  0/1(no/yes)
+#       AUTHOR:  enian
+#      CREATED:  08,12,2011
+#################################################
+check_wan_lan_same_bond(){
+    local fWanId=`check_bond eth0`
+    local fLanId=`check_bond eth1`
+    local fRet="0"
+    if [ "${fLanId}" != "${fWanId}" ] || ([ "${fLanId}" == "" ] && [ "${fWandId}" == "" ]);then
+        fRet="1"
+    fi
+
+    echo "${fRet}"
+}
+
+#################################################
+#         NAME:  check_wan_lan_can_bond
+#  DESCRIPTION:  check wan lan can bond 
+#      PARAM 1:  none
+#       RETURN:  0/1(no/yes)
+#       AUTHOR:  enian
+#      CREATED:  08,12,2011
+#################################################
+check_wan_lan_can_bond(){
+    local fWanId=`check_bond eth0`
+    local fLanId=`check_bond eth1`
+    local fRet="0"
+    if [ "${fLanId}" != "" ] && [ "${fLanId}" != "${fWanId}" ];then
+        fRet="1"
+    fi
+
+    echo "${fRet}"
+}
+
+#################################################
+#         NAME:  modify_hosts 
+#  DESCRIPTION:  modify /etc/hosts 
+#      PARAM 1:  none
+#       RETURN:  none 
+#       AUTHOR:  enian
+#      CREATED:  29,12,2011
+#################################################
+modify_hosts(){
+    local fIP=""
+    local fIPv4Type=""
+    local fEth0IsBond=""
+    local fHost
+    local fDomain
+
+    fHost=`${SQLITE} ${CONFDB} "select v from conf where k='nic1_hostname'"`
+    fDomain=`${SQLITE} ${CONFDB} "select v from conf where k='nic1_domainname'"`
+                            
+    fEth0IsBond=`check_bond "eth0"`
+    if [ "${fEth0IsBond}" != "" ];then
+        fIPv4Type=`${SQLITE} ${CONFDB} "select ipv4_conn_type from link_base_data where id='${fEth0IsBond:4}'"`
+        fIP=`${SQLITE} ${CONFDB} "select ip from link_base_data where id='${fEth0IsBond:4}'"`
+    else
+        fIP=`${SQLITE} ${CONFDB} "select v from conf where k='nic1_ip'"`
+        fIPv4Type=`${SQLITE} ${CONFDB} "select v from conf where k='nic1_ipv4_dhcp_client'"`
+    fi
+ 
+    if [ "${fIPv4Type}" == "0" ];then
+        echo "127.0.0.1         localhost" > /etc/hosts
+        echo "${fIP}             ${fHost}.${fDomain}       ${fHost}" >> /etc/hosts
+    fi
+}
+
+#################################################
+#         NAME:  start_ifplug
+#  DESCRIPTION:  start monitor interface 
+#      PARAM 1:  none
+#       RETURN:  none 
+#       AUTHOR:  enian
+#      CREATED:  03,01,2012
+#################################################
+start_ifplug(){
+    local fAllEth
+    local fOneEth
+    local fHasOK=""
+    local fIsHearbeat
+    local fIsBond
+    local fRet
+    /bin/rm /tmp/*_down_flag
+    /bin/rm /tmp/*_up_flag
+    fAllEth=`cat "${Lnet_ALL_NET_INTERFACE}" | awk -F'|' '{print $1}'`
+    for fOneEth in $fAllEth
+    do
+        if [ "${fOneEth}" != "" ];then
+            fIsHearbeat=`Lnet_check_ha_interface "${fOneEth}"`
+            fIsBond=`check_bond ${fOneEth}`
+            if [ "${fIsHearbeat}" != "1" ] && [ "${fIsBond}" == "" ];then
+                fHasOK=`${ETHTOOL} ${fOneEth} | awk -F ': ' '/Link detected: /{print $2}'`
+                if [ "${fHasOK}" != "yes" ];then
+                    ${IFCONFIG} ${fOneEth} down
+                fi
+            elif [ "${fIsHearbeat}" != "1" ] && [ "${fIsBond}" != "" ];then
+                fRet=`check_bond_link "${fIsBond}"`
+                if [ "${fRet}" == "1" ];then
+                    ${IFCONFIG} ${fIsBond} down
+                fi
+            fi
+            sleep 3
+            ${IFPLUGD_CMD} -fwI -u1 -d5 -p -i $fOneEth
+        fi
+    done
+}
+
+#################################################
+#         NAME:  shutdown_network
+#  DESCRIPTION:  shut down network 
+#      PARAM 1:  none
+#       RETURN:  none 
+#       AUTHOR:  enian
+#      CREATED:  03,01,2012
+#################################################
+shutdown_network(){
+    local fAllBond
+    local fAllEth
+    local fOneBond
+    local fOneEth
+
+    fAllBond=`${IFCONFIG} -a | awk '/^bond/{print $1}'`
+    for fOneBond in $fAllBond
+    do
+        if [ "${fOneBond}" != "" ];then
+            ${IFCONFIG} ${fOneBond} 0 down
+            rmmod ${fOneBond}
+            sleep 1
+        fi
+    done
+
+    fAllEth=`cat "${Lnet_ALL_NET_INTERFACE}" | awk -F'|' '{print $1}'`
+    for fOneEth in $fAllEth
+    do
+        if [ "${fOneEth}" != "" ];then
+            touch `printf $SYS_ETH_DOWN_FLAG ${fOneEth}`
+            ${IFCONFIG} ${fOneEth} 0 down
+            sleep 1
+        fi
+    done
+
+}
+
+#################################################
+#         NAME:  check_ha_vip
+#  DESCRIPTION:  check interface is vip 
+#      PARAM 1:  interface
+#       RETURN:  none 
+#       AUTHOR:  enian
+#      CREATED:  28,03,2012
+#################################################
+check_ha_vip(){
+    local fEth=$1
+    local fBondId
+    local fRet="0"
+    local fRealEth="${fEth}"
+
+    fBondId=`check_bond "${fEth}"`
+    if [ "${fBondId}" != "" ];then
+        fRealEth="${fBondId}"
+    fi
+
+    fRet=`Lnet_check_vip_interface "${fRealEth}"`
+
+    echo "${fRet}"
+}
+
+#################################################
+#         NAME:  change_default_gw 
+#  DESCRIPTION:  change_default_gw 
+#      PARAM 1:  none
+#       RETURN:  none
+#       AUTHOR:  enian
+#      CREATED:  03,01,2012
+#################################################
+change_default_gw(){
+    local fOrgEth=$1
+    local fAfterEth=$2
+    local fDefaultGW=`${SQLITE} ${CONFDB} "select v from conf where k='default_gateway'"`
+    local fGWVal
+    local fEthType
+    local fAfterNic
+    local fAfterDhcp
+    
+    if [ "${fDefaultGW}" == "${fOrgEth}" ];then
+        if [ "${fAfterEth}" != "" ];then
+            ${SQLITE} ${CONFDB}  "update conf set v='${fAfterEth}' where k='default_gateway'"
+            route del default gw 0.0.0.0
+            fEthType=`echo "${fAfterEth}" | grep 'bond'`
+            if [ "${fEthType}" != "" ];then
+                fGWVal=`${SQLITE} ${CONFDB} "select gateway from link_base_data where id='${fAfterEth:4}'"`
+            else
+                fAfterNic=`Lnet_trans_interface_to_nic "${fAfterEth}"`
+                fAfterDhcp=`${SQLITE} ${CONFDB} "select v from conf where k='${fAfterNic}_ipv4_dhcp_client'"`
+                if [ "${fAfterDhcp}" == "1" ];then
+                    fGWVal=`${SQLITE} ${CONFDB} "select v from conf where k='${fAfterNic}_dynamic_gateway'"`
+                else
+                    fGWVal=`${SQLITE} ${CONFDB} "select v from conf where k='${fAfterNic}_gateway'"`
+                fi
+            fi
+            if [ "${fGWVal}" != "" ];then
+                route add default gw ${fGWVal} dev ${fAfterEth}
+            fi
+        fi
+    fi
+}
+
+#################################################
+#         NAME:  check_bond_link
+#  DESCRIPTION:  check bond be link
+#      PARAM 1:  interface
+#       RETURN:  none
+#       AUTHOR:  enian
+#      CREATED:  28,03,2012
+#################################################
+check_bond_link(){
+    local fBondId=$1
+    local fEth
+    local fMacList
+    local fMac
+    local fRet="1"
+    local fMatch
+
+    fMacList=`${SQLITE} ${CONFDB} "select mac from link_interface where id='${fBondId:4}'"`
+    for fMac in ${fMacList}
+    do
+        fEth=`awk -F'|' '/\|'${fMac}'$/{print $1}' ${Lnet_ALL_NET_INTERFACE}`
+        if [ "${fEth}" != "" ];then
+           fMatch=`${ETHTOOL} ${fEth} | awk  '/Link detected:/{print $3}'`
+           if [ "${fMatch}" == "yes" ];then
+               fRet="0"
+               break
+           fi
+        fi
+    done
+
+    echo "${fRet}"
+}
+
+################################################
+#         NAME:  up_one_bond
+#  DESCRIPTION:  up one bond
+#      PARAM 1:  interface
+#       RETURN:  none
+#       AUTHOR:  enian
+#      CREATED:  28,03,2012
+#################################################
+up_one_bond(){
+    local fBondId=$1
+    local fDefGw=$2
+    local fIPv4En
+    local fMask
+    local fData
+    local fIsUp=`${ETHTOOL} ${fBondId} | awk  '/Link detected:/{printf $3}'`
+
+    if [ "${fIsUp}" == "no" ];then
+        fData=`${SQLITE} ${CONFDB} "select ipv4_enable,ip,netmask,gateway,ipv6_enable,ipv6,prefix_len,ipv6_gateway  from link_base_data where id='${fBondId:4}'"`
+        fData=`echo "${fData}" | sed 's/|/" "/g'`
+        eval "fData=(\"$fData\")"
+
+        if [ "${fData[0]}" == "1" ];then
+            Lnet_up_ipv4_static "${fBondId}" "${fData[1]}" "${fData[2]}"
+        fi
+        if [ "${fData[4]}" == "1" ];then
+            Lnet_up_ipv4_static "${fBondId}" "${fData[5]}" "${fData[6]}" "${fData[7]}"
+        fi
+        if [ "$fDefGw" == "${fBondId}" ];then
+            if [ "${fData[3]}" != "" ];then
+                route del default gw ${fData[3]} ${fBondId}
+                route add default gw ${fData[3]} ${fBondId}
+            fi
+        fi
+        /img/bin/ipchg.sh "${fBondId}" "${fData[1]}"
+    fi
+
+}
+
+case "$1" in
+    'boot_step1')
+        killall -9 ifplugd
+        sleep 3
+        Ret=`check_create_db`
+        trans_data "${Ret}"
+        set_interface_tmp_file
+        up_interface
+        ;;
+    'boot_step2')
+        up_link
+        up_all_dhcp_server
+        modify_hosts
+        set_default_gateway
+        set_tmp_ipv6_en_file
+        change_vip_bond
+        ;;
+    'get_network_info')
+        get_network_info "interface"
+        ;;
+    'get_dhcp_server_info')
+        get_dhcp_server_info
+        ;;
+    'set_network_info')
+        gInfo=$2
+        rm ${ERROR_FILE} 2>/dev/null
+        Ret=`check_network_values "$2"`
+
+        if [ "${Ret}" == "0" ];then
+            gErrorMsg=`cat ${ERROR_FILE} 2>/dev/null`
+            if [ "${gErrorMsg}" != "" ];then
+                gErrorMsg=`echo "${gErrorMsg}" | sed 'H;$!d;g;s/\n/\|/g'`
+                Ret="3${gErrorMsg}"
+            fi
+            if [ "${Ret}" == "0" ];then
+                rm -rf ${gNetSqlFile}
+                set_network_info "$2"
+            fi
+        fi
+
+        if [ "$Ret" != "2" ];then
+            rm ${LOCK_FILE}
+        fi
+
+        echo $Ret
+        ;;
+    'set_dhcp_server')
+        Ret=`check_dhcp_info "$2"`
+        if [ "${Ret}" == "0" ];then 
+            set_dhcp_server  "$2"
+        fi
+
+        if [ "$Ret" != "2" ];then
+            rm ${LOCK_FILE}
+        fi
+
+        echo $Ret
+        ;;
+    'set_link')
+        gInfo=$2
+        rm ${ERROR_FILE} 2>/dev/null
+        gTable1Ary=`echo "${gTable1Field}" | sed 's/,/" "/g'`
+        eval "gTable1Ary=(\"$gTable1Ary\")"
+        gTable1AryCount=${#gTable1Ary[@]}
+        
+        Ret=`check_link_info "$2"`
+        if [ "${Ret}" == "0" ];then 
+            gErrorMsg=`cat ${ERROR_FILE} 2>/dev/null`
+            if [ "${gErrorMsg}" != "" ];then
+                gErrorMsg=`echo "${gErrorMsg}" | sed 'H;$!d;g;s/\n/\|/g'`
+                Ret="3${gErrorMsg}"
+            fi
+            if [ "${Ret}" == "0" ];then
+                rm -rf ${gLinkSqlFile}
+                set_link_info  "$2"
+            fi
+        fi
+
+        if [ "$Ret" != "2" ];then
+            rm ${LOCK_FILE}
+        fi
+
+        echo $Ret
+        ;;
+    'link_wan_lan')
+        UBond=$2
+        link_wan_lan "$UBond"
+        ;;
+    'up_one_interface')
+        Eth=$2
+        touch `printf $SYS_ETH_UP_FLAG ${Eth}` 
+        Lnet_up_net "${Eth}" "yes"
+        ;;
+    'destory_one_link')
+        Eth=$2
+        destory_one_link "${Eth}"
+        ;;
+    'check_wan_lan_same_bond')
+        Ret=`check_wan_lan_same_bond`
+        exit ${Ret}
+        ;;
+    'check_wan_lan_can_bond')
+        Ret=`check_wan_lan_can_bond`
+        exit ${Ret}
+        ;;
+    'check_ha_vip')
+        Ret=`check_ha_vip "$2"`
+        exit ${Ret}
+        ;;
+    'start_ifplug')
+        start_ifplug
+        ;;
+    'shutdown_network')
+        shutdown_network
+        ;;
+    'start_dhcp_server')
+        DEth=$2
+        DIndex=$3
+        if [ "$DIndex" != "" ];then
+            start_dhcp_server  "${DEth}" "${DIndex}"
+        fi
+        ;;
+    'stop_dhcp_server')
+        DEth=$2
+        stop_ipv4_dhcp_server "${DEth}"
+        stop_ipv6_dhcp_server "${DEth}"
+        ;;
+    'change_default_gw')
+        change_default_gw "$2" "$3"
+        ;; 
+    'check_bond_link')
+        check_bond_link "$2"
+        ;; 
+    'up_one_bond')
+        up_one_bond "$2" "$3"
+        ;; 
+    *)
+        echo "Usage: $0 {boot_step1|boot_step2|get_network_info|get_dhcp_server_info|set_network_info network_info|set_dhcp_server dhcp_server_info|set_link link_info|link_wan_lan|destory_one_link interface|check_wan_lan_same_bond|check_ha_vip|start_ifplug}"
+        ;;
+esac
+

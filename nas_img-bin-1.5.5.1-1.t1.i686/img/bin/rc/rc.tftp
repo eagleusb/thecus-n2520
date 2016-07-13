@@ -1,0 +1,293 @@
+#!/bin/sh
+#################################################
+##      Vars defined
+#################################################
+has_event=$2
+sqlite="/usr/bin/sqlite"
+db="/etc/cfg/conf.db"
+string_cmd="/usr/bin/specstr_handle"
+smb_conf="/etc/samba/smb.conf"
+pidnum=$( /bin/ps | grep -v grep | grep opentftpd | awk '{ printf("%s\n",$1) }' | sort | head -1 | awk '{ print $1 }' )
+conf_file="/tmp/tftpd.ini"
+tmp_file="/tmp/tmp_all_ip"
+tftp_cmd="/usr/sbin/opentftpd"
+check_port="/img/bin/check_port.sh"
+get_interface_info="/img/bin/function/get_interface_info.sh"
+logevent="/img/bin/logevent/event"
+READ=1
+WRITE=2
+get_ip=""
+get_ipv6=""
+save_ip=""
+save_ipv6=""
+
+sqlcmd="select v from conf where k='ha_enable'"
+ha_enable=`${sqlite} ${db} "${sqlcmd}"`
+
+#################################################
+##       Check Raid Mount First
+#################################################
+check_raid(){
+    sys_path=`/bin/ls -l /raid/sys | awk -F' ' '{printf $11}'`
+    data_path=`/bin/ls -l /raid/data | awk -F' ' '{printf $11}'`
+    if [ "$sys_path" == "" ] || [ "$data_path" == "" ];then
+        echo "Your Master RAID link is not exist"
+        exit
+    fi
+}
+
+#################################################
+##       Get db info
+#################################################
+get_db_info(){
+    enable=`${sqlite} ${db} "select v from conf where k='tftpd_enabled'"`
+    port=`${sqlite} ${db} "select v from conf where k='tftpd_port'"`
+    folder=`${sqlite} ${db} "select v from conf where k='tftpd_folder'"`
+    interface=`${sqlite} ${db} "select v from conf where k='tftpd_ip'"`
+    folder_perssion=`${sqlite} ${db} "select v from conf where k='tftpd_permission'"`
+    overwreite=`${sqlite} ${db} "select v from conf where k='tftpd_overwrite'"`
+}
+
+#################################################
+##       Get folder path
+#################################################
+get_folder_path(){
+    awk_folder=`${string_cmd} "awk" "${folder}"`
+    cmd="cat ${smb_conf} | awk -F 'path = /' '/path =/&&/\/${awk_folder}$/{printf(\"/%s\",substr(\$2,1,length(\$2)))}'"
+    folder_path=`eval ${cmd}`
+    if [ "${folder_path}" == "" ];then
+        ############################################################
+        #	Stackable folder
+        ############################################################
+        cmd="cat ${smb_conf} | awk -F 'path = /' '/path =/&&/\/${awk_folder}\/data$/{printf(\"/%s\",substr(\$2,1,length(\$2)))}'"
+        folder_path=`eval ${cmd}`
+        ############################################################
+    fi
+    
+    if [ -d "${folder_path}" ];then
+        echo "${folder_path}"
+    fi
+}
+
+#################################################
+##       assemble opentftp conf
+#################################################
+assembe_conf(){
+  echo -e "[LISTEN-ON]" 
+  ip_count=`echo "$ip" | awk -F',' '{print NF}'`
+  for ((p=1;p<=$ip_count;p++))
+  do
+    strExec="echo '$ip' | awk -F',' '{print \$$p}'"
+    save_ip=`eval $strExec`
+    if [ "$save_ip" != "" ];then
+      echo -e "$save_ip:$port"
+    fi
+    
+    strExec="echo '$ipv6' | awk -F',' '{print \$$p}'"
+    save_ipv6=`eval $strExec`
+    if [ "$save_ipv6" != "" ];then
+      echo -e "IPv6=${save_ipv6}"
+    fi
+  done
+    
+  echo -e "[HOME]"
+  echo -e "${folder_path}"
+  echo -e "[LOGGING]"
+  echo -e "[ALLOWED-CLIENTS]"
+  echo -e "[TFTP-OPTIONS]"
+  echo -e "username=nobody"
+  echo -e "timeout=10"
+  echo -e "blksize=65464"
+  if [ "$(($folder_perssion & $READ))" != "0" ];then
+    echo -e "Read=Y"
+  else
+    echo -e "Read=N"
+  fi
+  if [ "$(($folder_perssion & $WRITE))" != "0" ];then
+    echo -e "Write=Y"
+  else
+    echo -e "Write=N"
+  fi
+  if [ "$overwreite" == "1" ];then
+    echo -e "Overwrite=Y"
+  else
+    echo -e "Overwrite=N"
+  fi
+}
+
+get_interface_ip(){
+    ip=""
+    ipv6=""
+    interface_count=`echo "$interface" | awk -F'|' '{print NF}'`
+    for ((i=1;i<=$interface_count;i++))
+    do
+        strExec="echo '$interface' | awk -F'|' '{print \$$i}'| awk -F'-' '{print \$2}'"
+        mac=`eval $strExec`
+        strExec="echo '$interface' | awk -F'|' '{print \$$i}'| awk -F'-' '{print \$1}'"
+        db_eth_net=`eval $strExec`
+        get_eth_num=`echo "$db_eth_net" | awk -F':' '{print $2}'`
+        
+        eth_net=`ifconfig |grep "${mac}"|awk -F' ' 'NR==1{print $1}'`
+        if [ "${eth_net}" == "" ];then
+            continue
+        fi
+        
+        if [ "${get_eth_num}" != "" ];then
+            eth_net="${eth_net}:${get_eth_num}"
+        fi
+        
+        #if db's interface bond is not existed, then skip the interface of same mac address 
+        if [ "`echo $db_eth_net | grep '^bond'`" != "" ] && [ "`echo $eth_net | grep '^bond'`" == "" ];then
+          continue
+        fi
+        
+        get_ip=`$get_interface_info get_ip $eth_net`
+        get_ipv6=`$get_interface_info get_ipv6 $eth_net`
+        interface_name="${eth_net} $interface_name"
+        
+        if [ "$ip" == "" ];then
+            ip="${get_ip}"
+        else
+            ip="${get_ip},${ip}"
+        fi
+        
+        if [ "$ipv6" != "" ];then
+            ipv6="${get_ipv6}"
+        else
+            ipv6="${get_ipv6},${ipv6}"
+        fi   
+    done
+}
+
+#################################################
+##       Start tftp
+#################################################
+start_tftp(){
+  get_db_info
+  
+  if [ "${enable}" == "1" ];then
+    echo "Start TFTP"
+    
+    folder_path=`get_folder_path`
+    if [ "${folder_path}" == "" ];then
+      if [ "$has_event" != "no" ];then
+        $logevent 997 654 error email
+      fi
+      echo "folder is not exist"
+      exit 2
+    fi
+    interface_name=""
+    
+    get_interface_ip
+    
+    if [ "$ip" == "" ];then
+      if [ "$has_event" != "no" ];then
+        $logevent 997 657 error email
+      fi
+      echo "no ip"
+      exit 7  
+    fi
+    
+    ${check_port} ${port} u "${interface_name}" tftp
+    port_exist=$?
+
+    if [ "$port_exist" != "0" ];then
+      if [ "$port_exist" == "4" ];then
+        echo "port is < 1024"
+        exit 5
+      elif [ "$port_exist" == "5" ];then
+        echo "port is reserved by system"
+        exit 6
+      else
+        if [ "$has_event" != "no" ];then
+          $logevent 997 655 error email
+        fi
+        echo "port is using"
+        exit 3
+      fi
+    fi
+    
+    echo "Assemble TFPT conf"
+    assembe_conf > ${conf_file}
+    echo "Execute TFPT"
+    ${tftp_cmd} -i ${conf_file}
+    ret=$?
+    if [ "$ret" != "0" ];then      
+      if [ "$has_event" != "no" ];then
+        $logevent 997 656 error email
+      fi
+      echo "tftp start fail"
+      exit 1
+    else
+      #str="$logevent 997 442 info email \"$ip\" \"$port\" '$folder'"
+      #eval $str
+      echo "tftp start success"
+    fi    
+  else
+    echo "TFTP is Disable"
+  fi
+}
+
+#################################################
+#       Stop tftp
+#################################################
+stop_tftp(){  
+  kill $pidnum  
+  while [ true ]
+  do
+    pidnum=$( /bin/ps | grep -v grep | grep opentftpd | awk '{ print $1 }' | head -1 )
+    if [ -z "$pidnum" ]
+      then
+      break
+    fi
+  done
+  #logevent
+  echo "Server opentftp stopped"
+}
+
+#################################################
+##       Main
+#################################################
+
+case "$1"
+in
+   boot|start)
+           check_raid
+           if [ -z "$pidnum" ]
+           then
+             start_tftp
+             RETVAL=0
+           else
+             echo "Server opentftp is already running - Try restart"
+             RETVAL=1
+           fi                
+           ;;
+   stop)   
+           if [ -z "$pidnum" ]
+           then
+             echo "Server opentftp is not running"
+             RETVAL=0
+           else
+             stop_tftp
+             RETVAL=0
+           fi                
+           ;;
+   restart)
+           check_raid
+           if [ -z "$pidnum" ]
+           then
+             echo "Server opentftp is not running"
+             start_tftp
+           else
+             stop_tftp
+             start_tftp
+           fi
+           RETVAL=0                   
+           ;;
+   *)
+           echo "Usage: $0 { start | stop | restart | boot}"
+           RETVAL=1
+           ;;
+esac
+echo $RETVAL
+exit $RETVAL

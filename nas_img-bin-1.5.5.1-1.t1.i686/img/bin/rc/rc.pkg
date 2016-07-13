@@ -1,0 +1,149 @@
+#!/bin/sh
+raid_name="raid"
+tmp_lang="/tmp/lang"
+sqlite="/usr/bin/sqlite"
+mod_path="/var/tmp/modules"
+pkg_rawdata="/var/www/html/language/rawdata"
+lang_path="/var/www/html/language/language.db"
+
+#if [ ! -d '/raid/sys' ];then
+#  exit
+#fi
+
+#[ -d /raid/data ] || exit
+
+mod_list=`ls /opt/`
+
+boot(){
+  if [ ! -d "${mod_path}" ];then
+    mkdir -p "${mod_path}"
+  fi
+
+  if [ ! -e "${tmp_lang}" ];then
+    /usr/bin/sqlite /etc/cfg/conf.db "select v from conf where k='admin_lang'" > ${tmp_lang}
+  fi 
+
+  for mod in ${mod_list}
+  do
+    #Fix the module can't disable after reboot. (issue 4099)
+    local status=`cat "/opt/${mod}/module_status" 2> /dev/null`
+    if [ -f "/opt/${mod}/shell/module.rc" ];then
+      if [ "${status}" != "0" ];then  
+        if [ -d "/opt/${mod}/www" ];then
+          /bin/ln -fs "/opt/${mod}" "${mod_path}/${mod}"
+        fi
+        
+        /opt/${mod}/shell/module.rc boot
+      fi
+    fi
+  done
+}
+
+start(){
+  if [ ! -d "${mod_path}" ];then
+    mkdir -p "${mod_path}"
+  fi
+
+  for mod in ${mod_list}
+  do
+    #Fix the module can't disable after reboot. (issue 4099)
+    local status=`cat "/opt/${mod}/module_status" 2> /dev/null`
+    if [ -f "/opt/${mod}/shell/module.rc" ];then
+      if [ "${status}" != "0" ];then  
+        if [ -d "/opt/${mod}/www" ];then
+          /bin/ln -fs "/opt/${mod}" "${mod_path}/${mod}"
+        fi
+
+        /opt/${mod}/shell/module.rc start
+      fi
+    fi
+  done
+}
+
+stop(){
+  for mod in ${mod_list}
+  do
+    if [ -f "/opt/${mod}/shell/module.rc" ];then
+      if [ -d "/opt/${mod}/www" ];then
+        rm "${mod_path}/${mod}"
+      fi
+
+      /opt/${mod}/shell/module.rc stop
+    fi
+  done
+}
+
+restart(){
+    stop
+    start
+}
+
+insert_treeid(){
+    file="$1"
+
+    v=`cat "${pkg_rawdata}/${file}"`
+    cateid=`echo ${v} | awk -F'|' '{print $1}'`
+    value=`echo ${v} | awk -F'|' '{print $2}'`
+    fun=`echo ${v} | awk -F'|' '{print $3}'`
+    status=`echo ${v} | awk -F'|' '{print $4}'`
+
+    if [ "${cateid}" != "" ] && [ "${value}" != "" ] && [ "${fun}" != "" ] && [ "${status}" != "" ];then
+        ${sqlite} ${lang_path} "INSERT OR ABORT INTO treemenu (treeid,cateid,value,fun,status) values ((SELECT max(treeid) + 1 FROM treemenu), ${cateid}, '${value}', '${fun}', ${status})"
+    fi
+}
+
+treeid_add(){
+    pkg_name="$1"
+
+    if [ "${pkg_name}" == "" ];then
+        pkg_list=`ls ${pkg_rawdata} | grep "pkg$"`
+        echo "${pkg_list}" | \
+        while read pkg
+        do
+            insert_treeid "${pkg}"
+        done
+    else
+        if [ -f "${pkg_rawdata}/${pkg_name}.pkg" ];then
+            insert_treeid "${pkg_name}.pkg"
+        fi
+    fi
+}
+
+treeid_del(){
+    pkg_name="$1"
+    if [ -f "${pkg_rawdata}/${pkg_name}.pkg" ];then
+        v=`cat "${pkg_rawdata}/${pkg_name}.pkg"`
+        value=`echo ${v} | awk -F'|' '{print $2}'`
+        fun=`echo ${v} | awk -F'|' '{print $3}'`
+        ${sqlite} ${lang_path} "delete from treemenu where fun='${fun}'"
+        /var/www/html/utility/del_old_lang.sh "index" "${value}"
+    fi
+}
+
+case "$1" in
+  boot)
+    boot
+    ;;
+  start)
+    start
+    ;;
+  stop)
+    stop
+    ;;
+  restart)
+    restart
+    ;;
+  treeid_add)
+    treeid_add "$2"
+    ;;
+  treeid_del)
+    treeid_del "$2"
+    ;;
+  *)
+    echo $"Usage: $0 {boot|start|stop|restart|install|update|uninstall|enable|restore}"
+    exit 1
+esac
+
+exit 0
+
+

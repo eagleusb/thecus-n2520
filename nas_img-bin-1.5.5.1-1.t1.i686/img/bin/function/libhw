@@ -1,0 +1,175 @@
+#!/bin/sh
+#==================================================
+#         FILE:  libhw
+#        USAGE:  none
+#  DESCRIPTION:  get hardware information 
+#        NOTES:  none
+#       AUTHOR:  Dane 
+#      VERSION:  1.0.0
+#      CREATED:  2012/06/11 
+#     REVISION:
+#==================================================
+
+
+#################################################
+#         NAME:  Lhw_get_cpu_info
+#  DESCRIPTION:  get cpu information
+#       RETURN:  cpu model name
+#       AUTHOR:  Dane
+#      CREATED:  2012/06/11  
+#################################################
+Lhw_get_cpu_info() {
+    local Lhw_fCpuInfo=""
+    local SOC=`/img/bin/check_service.sh "soc"`
+
+    if [ "${SOC}" == "ppc" ];then
+        Lhw_fCpuInfo=`cat /proc/cpuinfo |grep "cpu"|head -n 1|awk -F': ' '{print $2}'`
+    else
+        Lhw_fCpuInfo=`cat /proc/cpuinfo |grep "model name"|head -n 1|awk -F': ' '{print $2}'`
+    fi
+    
+    echo ${Lhw_fCpuInfo}
+}
+
+#################################################
+#         NAME:  Lhw_get_mem_size
+#  DESCRIPTION:  get memory size
+#       RETURN:  memory size MB
+#       AUTHOR:  Dane
+#      CREATED:  2012/06/11  
+#################################################
+Lhw_get_mem_size() {
+    local Lhw_fMemSize="`expr $(awk '/MemTotal/ {print $2}' /proc/meminfo) / 1024`"
+
+    reserved_mem=`/img/bin/check_service.sh reserved_mem`
+    if [ "${reserved_mem}" != "" ] && [ "${reserved_mem}" != "0" ];then
+        echo "${Lhw_fMemSize} MB [System will take ${reserved_mem}MB for XBMC media function if installed]"
+    else
+        echo "${Lhw_fMemSize} MB"
+    fi
+}
+
+#################################################
+#         NAME:  Lhw_get_bios_version
+#  DESCRIPTION:  get bios version
+#       RETURN:  bios version 
+#       AUTHOR:  Dane
+#      CREATED:  2012/06/11  
+#################################################
+Lhw_get_bios_version() {
+    local Lhw_fBiosVersion=`dmidecode -s bios-version|sed '/^#.*/d'`
+    
+    echo ${Lhw_fBiosVersion}
+}
+
+#################################################
+#         NAME:  Lhw_get_nic_hwinfo
+#  DESCRIPTION:  get network device model name
+#      PARAM 1:  Lhw_fNic: interface name
+#       RETURN:  cpu model name
+#       AUTHOR:  Dane
+#      CREATED:  2012/06/11   
+#################################################
+Lhw_get_nic_hwinfo() {
+    local Lhw_fNic="$1"
+    local Lhw_fNicSlot=`ethtool -i ${Lhw_fNic} | grep bus-info |grep -o '[0-9a-f]\{2\}:[0-9a-f]\{2\}\.[0-7]\{1\}'`
+    local Lhw_fNicDevinfo
+    
+    if [ "$Lhw_fNicSlot" == "" ]
+    then
+    	return
+    fi
+    Lhw_fNicDevinfo=`lspci |grep ${Lhw_fNicSlot}|awk -F ': ' '{printf $2}'`
+    echo ${Lhw_fNicDevinfo}
+}
+
+#################################################
+#         NAME:  Lhw_get_sata_controller
+#  DESCRIPTION:  get sata controller information
+#       RETURN:  All sata controller information
+#       AUTHOR:  Dane
+#      CREATED:  2012/06/11  
+#################################################
+Lhw_get_sata_controller() {
+    local Lhw_fSataSlot=`lspci |grep -i sata|grep -o '[0-9a-f]\{2\}:[0-9a-f]\{2\}\.[0-9a-f]\{1\}'`
+    local Lhw_fPreSlot="" 
+    local Lhw_fSataController=""
+    local Lhw_fTempSata=""
+
+    for Sata in ${Lhw_fSataSlot}
+    do
+        if [ "${Sata}" != "" ] && [ "${Lhw_fPreSlot}" != "${Sata}" ]
+        then
+            Lhw_fTempSata=`lspci |grep ${Sata}|awk -F ': ' '{printf $2}'|sed 's/\,//g'` 
+            Lhw_fSataController="${Lhw_fSataController}${Lhw_fTempSata}\n"
+        fi
+        Lhw_fPreSlot=${Sata}
+    done
+    echo -e $Lhw_fSataController
+}
+
+#################################################
+#         NAME:  Lhw_get_usb_dev
+#  DESCRIPTION:  get usb device model name
+#       RETURN:  usb device name and vesion
+#       AUTHOR:  Dane
+#      CREATED:  2012/06/11   
+#################################################
+Lhw_get_usb_dev() {
+    local Lhw_fUsbSlot
+    local Lhw_fUsbDev
+    local Lhw_fUsbVersion
+    local Lhw_fAllUsb=`ls -l /sys/bus/usb/drivers/usb|grep -o ' usb[0-9]\+ '`
+    local Lhw_fOutput=""
+    for usb in $Lhw_fAllUsb
+    do
+        Lhw_fUsbSlot=`ls -l /sys/bus/usb/drivers/usb|grep " ${usb} "|grep -o '[0-9a-f]\{2\}:[0-9a-f]\{2\}\.[0-9a-f]\{1\}\/usb'|sed 's/\/.*//'`
+        Lhw_fUsbDev=`lspci |grep ${Lhw_fUsbSlot}|awk -F ': ' '{printf $2}'`
+        Lhw_fUsbVersion=`cat /sys/bus/usb/drivers/usb/${usb}/version|sed 's/\s//g'`
+        echo "${Lhw_fUsbDev},${Lhw_fUsbVersion};"
+    done
+}
+
+
+#################################################
+#         NAME:  Lhw_get_mptinfo
+#  DESCRIPTION:  get LSI SATA controller model  
+#       RETURN:  SATA controller model
+#       AUTHOR:  Dane
+#      CREATED:  2012/06/11  
+#################################################
+Lhw_get_mptinfo() {
+    local Lhw_fInfo=`lspci |grep -i " SCSI controller: LSI "|awk -F': ' '{print $2}'`
+
+    echo ${Lhw_fInfo}
+}
+
+#################################################
+#         NAME:  Lhw_check_dom
+#  DESCRIPTION:  check dom
+#       RETURN:  single dom or dual dom 
+#       AUTHOR:  Dane
+#      CREATED:  2012/06/11  
+#################################################
+Lhw_check_dom() {
+    hdparm /dev/sdaab >/dev/null 2>&1
+    if [ $? == 0 ]
+    then
+        echo "Dual DOM"
+    else
+        echo "Single DOM"
+    fi
+}
+
+#################################################
+#         NAME:  Lhw_check_oled
+#  DESCRIPTION:  get OLED information
+#       RETURN:  pic version and agent version
+#       AUTHOR:  Dane
+#      CREATED:  2012/06/11  
+#################################################
+Lhw_check_oled() {
+    local Lhw_oled=`cat /tmp/oled/PIC24F_OK`
+    
+    echo ${Lhw_oled}
+}

@@ -1,0 +1,106 @@
+#! /bin/sh
+#
+# portmap       Start/Stop RPC portmapper
+#
+# chkconfig: 345 13 87
+# description: The portmapper manages RPC connections, which are used by \
+#              protocols such as NFS and NIS. The portmap server must be \
+#              running on machines which act as servers for protocols which \
+#              make use of the RPC mechanism.
+# processname: portmap
+
+portmap_path="/usr"
+rc_path="/img/bin/rc"
+
+. ${rc_path}/functions
+
+sqlite="/usr/bin/sqlite"
+confdb="/etc/cfg/conf.db"
+
+# This is an interactive program, we need the current locale
+[ -f /etc/profile.d/lang.sh ] && . /etc/profile.d/lang.sh
+# We can't Japanese on normal console at boot time, so force LANG=C.
+if [ "$LANG" = "ja" -o "$LANG" = "ja_JP.eucJP" ]; then
+    if [ "$TERM" = "linux" ] ; then
+        LANG=C
+    fi
+fi
+
+prog="portmap"
+
+# Check that networking is up.
+
+[ -f ${portmap_path}/portmap ] || exit 0
+
+[ -f /etc/sysconfig/$prog ] && . /etc/sysconfig/$prog
+
+RETVAL=0
+
+start() {
+        echo -n $"Starting $prog: "
+        ${portmap_path}/portmap $PMAP_ARGS
+        RETVAL=$?
+        echo
+        [ $RETVAL -eq 0 ] && touch /var/lock/subsys/portmap
+	return $RETVAL
+}
+
+
+stop() {
+        echo -n $"Stopping $prog: "
+        killproc portmap
+        RETVAL=$?
+        echo
+        [ $RETVAL -eq 0 ] && rm -f /var/lock/subsys/portmap
+	return $RETVAL
+}
+
+restart() {
+  	${portmap_path}/pmap_dump > /var/run/portmap.state
+	stop
+	start
+	${portmap_path}/pmap_set < /var/run/portmap.state
+	rm -f /var/run/portmap.state
+}
+
+## retrieve sqlite upnp setting
+get_nfs_setting() {
+	#echo "$sqlite"
+	sqlcmd="select v from conf where k='nfsd_nfsd'"
+	#echo "${sqlite} ${confdb} \"${sqlcmd}\""
+	${sqlite} ${confdb} "${sqlcmd}"
+}
+
+able=`get_nfs_setting`
+if [ "${able}" != "1" ]
+then
+	if [ "$1" != "boot" ];then
+		stop
+		echo "NFS is disable, not running ..."
+	fi
+	exit
+fi
+
+# See how we were called.
+case "$1" in
+  start|boot)
+	start
+	;;
+  stop)
+	stop
+	;;
+  status)
+	status portmap
+	;;
+  restart|reload)
+	restart
+	;;
+  condrestart)
+	[ -f /var/lock/subsys/portmap ] && restart || :
+	;;
+  *)
+	echo $"Usage: $0 {start|stop|status|restart|reload|condrestart}"
+	exit 1
+esac
+
+exit $?

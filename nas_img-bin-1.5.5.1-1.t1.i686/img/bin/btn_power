@@ -1,0 +1,11 @@
+#!/bin/sh
+
+Poweroff=`/img/bin/check_service.sh poweroff`
+
+if [ "$Poweroff" = "pic" ];then
+    /img/bin/pic.sh POWER_OFF "" ""
+elif [ "$Poweroff" = "sys" ];then
+    /img/bin/sys_halt
+else
+    echo "Unknow power off command!"
+fi

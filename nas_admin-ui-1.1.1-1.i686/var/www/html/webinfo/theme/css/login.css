@@ -1,0 +1,166 @@
+
+body,td,th {
+	 font-family:Tahoma, Arial, "Times New Roman"; 
+}
+body {
+	background-color: #000000; 
+	margin-left: 0px;
+	margin-top: 0px;
+	margin-right: 0px;
+	margin-bottom: 0px;  
+	height:100%; 
+} 
+.tb_login {
+	background-image: url(/theme/images/login/bg.png);
+	height: 630px;
+	background-repeat:repeat-x;
+	background-position: center center; 
+}
+
+.module_list {
+	font-size: 12px;
+	font-family: Tahoma, Arial, "Times New Roman";
+	width:375px;
+	height: 291px;
+	overflow:auto;
+}
+
+.module_list_bg {
+	background-image: url(/theme/images/login/module_04.png);
+	background-color: #AAB3B6;
+	background-repeat:repeat-x;
+	background-position: center center;
+}
+
+.td_login {
+	padding-top:120px;
+}
+.top_logo{
+	position:absolute;
+	left: 10px;
+	top: 10px;   
+}
+.right_logo{
+	position:absolute;
+	right:60px;
+	top: 100px;   
+}
+
+.login_wd { 
+	FONT-SIZE: 12px; COLOR: #ffffff; font-family:Tahoma, Arial, "Times New Roman";
+	TEXT-DECORATION: none; 
+	font-weight:normal;
+}
+
+.login_wd_title { 
+	FONT-SIZE: 12px; COLOR: #ffffff; font-family:Tahoma, Arial, "Times New Roman"; 
+	font-weight: bold; 
+}
+a.login_wd:link {
+	color: #FFFFFF;   
+	font-weight:normal;
+	TEXT-DECORATION: none; 
+}
+
+a.login_wd:hover {
+	color: #FFFFFF;   
+	font-weight: bold;
+	TEXT-DECORATION: none; 
+}
+a.login_wd:visited {
+	color: #FFFFFF;   
+	font-weight:normal;
+	TEXT-DECORATION: none; 
+} 
+.login_table {
+	background-image: url(/theme/images/login/login_04.png);
+	font-size: 12px;
+	color: #CCC;
+	font-family: Tahoma, Arial, "Times New Roman";
+}
+
+.login_textfield {
+	font-family: Tahoma, Arial, "Times New Roman";
+	font-size: 12px;
+	color: #2D383E;
+	background-color: #D2DCE1;
+	margin: 2px;
+	padding-left: 2px;
+	clear: left;
+	float: none;
+	height: 20px;
+	width: 150px;
+	margin-top:2px;
+}
+.login_bt {
+	font-family: Tahoma, Arial, "Times New Roman";
+	font-size: 12px;
+	color: #333;
+	background-image: url(/theme/images/login/login_btn.png);
+	width: 80px;
+	height: 22px;
+}  
+#btntd{  
+background:url('/theme/images/login/butn.png'); 
+}
+
+#multi_logon{
+    background-color:black;
+    border:1px solid #FFFFFF;
+    color:#FF0000;
+    font-size:14px;
+    padding:7px;
+    width:400px;
+}
+
+#switch_txt{
+	font-size:10;
+	color:white;  
+	padding-left:70;
+}
+a #switch_img{
+	cursor:pointer;
+	text-decoration:none;
+	color:black;
+}
+a:hover #switch_img{
+	text-decoration:none;
+	color:black;
+}
+#switch_img{
+	text-decoration:none;
+	background:url(/theme/images/login/switch.png) no-repeat;
+	width:124;
+	height:40; 
+	/*padding-left:10;*/
+	padding-top:15;	
+	font-size:12;   
+	text-align:center;
+}
+
+
+#switch_btn{ 
+ 	position:absolute;  
+	z-index:999;
+	bottom:20%;
+	left:100;
+}
+
+#browser_limit{
+	color:white;
+	font-size:12;
+	position:absolute;
+	margin:0px -200px; 
+	bottom:10px;
+	left: 50%;
+	text-align:center;
+	z-index:998;
+}
+
+#browser_limit_html{
+	color:white;
+	font-size:12;
+	text-align:center;
+	z-index:998;
+}
+

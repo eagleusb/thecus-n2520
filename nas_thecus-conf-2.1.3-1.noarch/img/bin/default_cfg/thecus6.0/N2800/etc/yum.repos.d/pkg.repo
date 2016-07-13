@@ -1,0 +1,5 @@
+[pkg]
+name= pkg repository server for NAS
+baseurl=http://ftp.thecus.com/ThecusOS/release/6.0/t3
+gpgcheck=0
+enabled=1

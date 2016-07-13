@@ -1,0 +1,68 @@
+#!/bin/sh
+############################################
+# Array number
+# number 1 ~ 3 is mbtype 
+# last number is sd card number
+###########################################
+arch=`/img/bin/check_service.sh "arch"`
+if [ "$arch" != "x86_64" ];then
+	T_SD_vendor[5081]='058f'          #sd vendor id
+	T_SD_product[5081]='6366'         #sd prdocut id
+	T_SD_bus[5081]='1'                #sd bus
+	T_SD_port[5081]='1'               #sd port
+else
+        T_SD_vendor[7001]='058f'          #sd vendor id
+	T_SD_product[7001]='6366'         #sd prdocut id
+	T_SD_bus[7001]='2'                #sd bus
+	T_SD_port[7001]='5'               #sd port
+fi
+
+THECUSIO="/proc/thecus_io"
+LIB_sd_card_count=`/img/bin/check_service.sh sd_copy`
+LIB_sd_para_type=`echo "${LIB_sd_card_count}" | grep "[^0-9]"`
+LIB_sd_mbtype=`awk -F' ' '/^MBTYPE/{printf($2)}' $THECUSIO`
+LIB_sd_total_disk_dev=""
+LIB_sd_sys_path="/sys"
+
+
+#######################################
+# function :check has sd card device
+# para : none
+# return : total disk name
+#######################################
+check_sd_card_dev(){
+	if [ "${LIB_sd_para_type}" == "" ];then
+		if [ "${LIB_sd_card_count}" != 0 ];then
+			LIB_sd_total_disk_dev=""
+		
+			for((i=1 ; i<=${LIB_sd_card_count} ; i++))
+			do
+				str=""
+				vendor_file=`find $LIB_sd_sys_path | grep "\/usb${T_SD_bus[${LIB_sd_mbtype}${i}]}\/${T_SD_bus[${LIB_sd_mbtype}${i}]}-${T_SD_port[${LIB_sd_mbtype}${i}]}\/idVendor"`
+				product_file=`find $LIB_sd_sys_path | grep "\/usb${T_SD_bus[${LIB_sd_mbtype}${i}]}\/${T_SD_bus[${LIB_sd_mbtype}${i}]}-${T_SD_port[${LIB_sd_mbtype}${i}]}\/idProduct"`
+			
+				if [ "$vendor_file" != "" ] && [ "$product_file" != "" ];then
+					vendor_id=`cat "$vendor_file"`
+					product_id=`cat "$product_file"`
+
+					if [ "${vendor_id}" == "${T_SD_vendor[${LIB_sd_mbtype}${i}]}" ] && [ "${product_id}" == "${T_SD_product[${LIB_sd_mbtype}${i}]}" ];then
+						if [ "$arch" == "x86_64" ];then
+							str="awk '/ Model:Card  Reader /&&/ Disk:/{print substr(\$3,6)}' /proc/scsi/scsi"
+						else
+							str="cat /proc/scsi/scsi | awk '/ Removable:1 / && / Bus:${T_SD_bus[${LIB_sd_mbtype}${i}]} / && / Port:${T_SD_port[${LIB_sd_mbtype}${i}]}/{print substr(\$3,6)}'"
+						fi
+						if [ "$str" != "" ];then
+							disk_dev=`eval "$str"`
+							if [ "$disk_dev" != "" ];then
+								LIB_sd_total_disk_dev="$LIB_sd_total_disk_dev $disk_dev"
+							fi
+						fi
+					fi
+				fi
+			done
+		fi
+
+	fi
+	echo "$LIB_sd_total_disk_dev"
+}
+

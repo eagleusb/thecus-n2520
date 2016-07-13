@@ -1,0 +1,361 @@
+#!/bin/sh
+#==================================================
+#        FILE:  rc.webdav
+#       USAGE:  start|stop|restart|reload|boot
+# DESCRIPTION:  
+#       NOTES:  none
+#      AUTHOR:  
+#     VERSION:  1.0.0
+#     CREATED:  
+#    REVISION:  
+#==================================================
+
+#==================================================
+#  Variable Defined
+#==================================================
+webdav_enable=""
+webdav_port=""
+webdav_ssl_enable=""
+webdav_ssl_port=""
+webdav_browser_view=""
+
+tmp_conf_file="/etc/httpd/conf/httpd_webdav.conf"
+tmp_ssl_file="/tmp/ssl_webdav.conf"
+httpd_cmd="/usr/sbin/httpd -f ${tmp_conf_file}"
+
+sqlite_cmd="/usr/bin/sqlite3"
+conf_db="/etc/cfg/conf.db"
+
+#################################################
+#         NAME:  check_env
+#  DESCRIPTION:  check sysconf and RAID is exist
+#      PARAM 1:  None
+#       RETURN:  $?
+#       AUTHOR:  Chris
+#      CREATED:  2013/08/23
+#################################################
+check_env(){
+    ## Check sysconf setting
+    webdav=`/img/bin/check_service.sh webdav`
+    if [ "${webdav}" == "0" ]; then
+        exit 0
+    fi
+
+    ## Check RAID is exist
+    sys_path=`/bin/ls -l /raid/sys | awk -F' ' '{printf $11}'`
+    data_path=`/bin/ls -l /raid/data | awk -F' ' '{printf $11}'`
+    if [ "$sys_path" == "" ] || [ "$data_path" == "" ];then
+        echo "Your Master RAID link is not exist"
+        exit 1
+    fi
+}
+
+
+
+#################################################
+#         NAME:  assemble_conf
+#  DESCRIPTION:  execute assemble_httpd_webdav_conf.sh
+#      PARAM 1:  None
+#       RETURN:  $?
+#       AUTHOR:  Chris
+#      CREATED:  2013/08/05
+#################################################
+assemble_conf(){
+    /img/bin/assemble_httpd_webdav_conf.sh
+    echo $?
+}
+
+#################################################
+#         NAME:  start_webdav
+#  DESCRIPTION:  Start WebDAV Service
+#      PARAM 1:  None
+#       RETURN:  $?
+#       AUTHOR:  Chris
+#      CREATED:  2013/08/05
+#################################################
+start_webdav(){
+    assemble_conf
+
+    ## Clean httpd log file and create link to NULL
+    rm -f /var/log/httpd/access_webdav_log
+    rm -f /var/log/httpd/error_webdav_log
+    ln -sf /dev/null /var/log/httpd/access_webdav_log
+    ln -sf /dev/null /var/log/httpd/error_webdav_log
+    
+    ## Check WebDAV httpd.conf is assemble sucess ?
+    if [ -f "${tmp_conf_file}" ];then
+        
+        ## Check WebDAV is running ? 
+        isRunning=`ps | grep $tmp_conf_file | grep -v grep | wc -l`
+        if [ ${isRunning} -gt 0 ];then
+            ## If is running , execute restart
+            ${httpd_cmd} -k restart
+        else
+            ${httpd_cmd} -k start
+        fi
+        ret=$?
+        
+        ## Check execute start/restart result
+        if [ "${ret}" == "0" ];then
+            echo "Start WebDAV service Sucess"
+            exit 0
+        else
+            rm -f ${tmp_conf_file}
+            echo "Start WebDAV service fail"
+            exit 1
+        fi
+    else
+        echo "Assemble WebDAV http.conf fail"
+        exit 1
+    fi
+}
+
+#################################################
+#         NAME:  stop_webdav
+#  DESCRIPTION:  Stop WebDAV Service
+#      PARAM 1:  None
+#       RETURN:  1(Fail) / 0(Sucess)
+#       AUTHOR:  Chris
+#      CREATED:  2013/08/05
+#################################################
+stop_webdav(){
+    ## Stop webdav apache
+    ${httpd_cmd} -k stop
+    sleep 3
+    
+    ## Check WebDAV process is exist ?
+    isRunning=`ps | grep $tmp_conf_file | grep -v grep | wc -l`
+    if [ ${isRunning} -gt 0 ];then
+        
+        ## Force kill all process
+        rm -f ${tmp_conf_file} ${tmp_ssl_file}
+        ps | grep $tmp_conf_file | grep -v grep | awk '{print $1'} | xargs kill -9
+
+        ## CHeck again
+        isRunning=`ps | grep $tmp_conf_file | grep -v grep | wc -l`
+        if [ ${isRunning} -gt 0 ];then
+            echo "WebDAV Stop Fail"
+            exit 1
+        else
+            echo "WebDAV Stop Sucess"
+            exit 0
+        fi
+        
+    else
+        echo "WebDAV Stop Sucess"
+        exit 0
+    fi
+}
+
+#################################################
+#         NAME:  restart_webdav
+#  DESCRIPTION:  Restart WebDAV Service (-k restart)
+#      PARAM 1:  None
+#       RETURN:  1(Fail) / 0(Sucess)
+#       AUTHOR:  Chris
+#      CREATED:  2013/08/05
+#################################################
+restart_webdav(){
+    assemble_conf
+    # Check WebDAV httpd.conf is assemble sucess ?
+    if [ -f "${tmp_conf_file}" ];then
+        ${httpd_cmd} -k restart
+        ret=$?
+        
+        ## Check execute restart result
+        if [ "${ret}" == "0" ];then
+            echo "Restart WebDAV service Sucess"
+            exit 0
+        else
+            rm -f ${tmp_conf_file}
+            echo "Restart WebDAV service fail"
+            exit 1
+        fi
+    else
+        echo "Assemble WebDAV http.conf fail"
+        exit 1
+    fi
+}
+
+#################################################
+#         NAME:  reload_webdav
+#  DESCRIPTION:  Reload WebDAV Service (-k graceful)
+#      PARAM 1:  None
+#       RETURN:  1(Fail) / 0(Sucess)
+#       AUTHOR:  Chris
+#      CREATED:  2013/08/05
+#################################################
+reload_webdav(){
+    assemble_conf
+    
+    # Check WebDAV httpd.conf is assemble sucess ?
+    if [ -f "${tmp_conf_file}" ];then
+        ${httpd_cmd} -k graceful
+        ret=$?
+        
+        ## Check execute graceful result
+        if [ "${ret}" == "0" ];then
+            echo "Reload WebDAV service Sucess"
+            exit 0
+        else
+            rm -f ${tmp_conf_file}
+            echo "Reload WebDAV service fail"
+            exit 1
+        fi
+    else
+        echo "Assemble WebDAV http.conf fail"
+        exit 1
+    fi
+}
+
+#################################################
+#         NAME:  get_one_conf_data
+#  DESCRIPTION:  get one field vaule
+#      PARAM 1:  db field name
+#      PARAM 2:  default value
+#       RETURN:  field value
+#       AUTHOR:  Chris
+#      CREATED:  2013/08/05
+#################################################
+get_one_conf_data(){
+    local fField="$1"
+    local fDefVal="$2"
+    local fVal            #field value
+    local fCount=`${sqlite_cmd} ${conf_db} "SELECT COUNT(v) FROM conf WHERE k='${fField}'"` #match field count
+
+    if [ "${fCount}" == "0" ];then
+        fVal="${fDefVal}"
+        ${sqlite_cmd} ${conf_db} "INSERT INTO conf VALUES('${fField}','${fDefVal}')"
+    else
+        fVal=`${sqlite_cmd} ${conf_db} "SELECT v FROM conf WHERE k='${fField}'"`
+    fi 
+    echo "${fVal}"
+}
+
+#################################################
+#         NAME:  get_conf_db
+#  DESCRIPTION:  get All WebDAV setting vaule to global variable
+#      PARAM 1:  None
+#       RETURN:  None
+#       AUTHOR:  Chris
+#      CREATED:  2013/08/05
+#################################################
+get_conf_db(){
+    webdav_enable=`get_one_conf_data "webdav_enable" "1"`
+    webdav_port=`get_one_conf_data "webdav_port" "9800"`
+    webdav_ssl_enable=`get_one_conf_data "webdav_ssl_enable" "1"`
+    webdav_ssl_port=`get_one_conf_data "webdav_ssl_port" "9802"`
+    webdav_browser_view=`get_one_conf_data "webdav_browser_view" "1"`
+}
+
+#################################################
+#         NAME:  boot_webdav
+#  DESCRIPTION:  Start WebDAV Service when booting
+#      PARAM 1:  None
+#       RETURN:  None
+#       AUTHOR:  Chris
+#      CREATED:  2013/08/05
+#################################################
+boot_webdav(){
+    get_conf_db
+    if [ "${webdav_enable}" == "0" ] && [ "${webdav_ssl_enable}" == "0" ];then
+        echo "WebDAV service is set to disable"
+        exit 0
+    else
+        start_webdav
+    fi
+}
+
+#################################################
+#         NAME:  pam_init
+#  DESCRIPTION:  Create pam file for WebDAV auth
+#      PARAM 1:  None
+#       RETURN:  None
+#       AUTHOR:  Chris
+#      CREATED:  2013/08/05
+#################################################
+pam_init(){
+    local msg=""
+    msg="${msg}auth       sufficient   pam_ldap.so"
+    msg="${msg}\nauth       sufficient   pam_winbind.so"
+    msg="${msg}\nauth       required     pam_unix.so use_first_pass"
+    msg="${msg}\naccount    sufficient   pam_ldap.so"
+    msg="${msg}\naccount    sufficient   pam_winbind.so"
+    msg="${msg}\naccount    required     pam_unix.so"
+    msg="${msg}\nsession    sufficient   pam_ldap.so"
+    msg="${msg}\nsession    sufficient   pam_winbind.so"
+    msg="${msg}\nsession    required     pam_unix.so"
+    echo -e ${msg} > /etc/pam.d/pwauth
+}
+
+#################################################
+#         NAME:  check_router
+#  DESCRIPTION:  Check conf.db is contain 9800/9802
+#                (For OS6)
+#      PARAM 1:  None
+#       RETURN:  None
+#       AUTHOR:  Chris
+#      CREATED:  2013/08/27
+#################################################
+check_router(){
+
+    local is_exist=""
+    local restart_flag="0"
+
+    ## Check 9800
+    is_exist=`${sqlite_cmd} ${conf_db} "SELECT * FROM router WHERE port='9800'"`
+    if [ -z "${is_exist}" ];then
+        ${sqlite_cmd} ${conf_db} "INSERT INTO router VALUES('9800','9800','TCP','For WebDAV.')"
+        restart_flag="1"
+    fi
+
+    ## Check 9802
+    is_exist=`${sqlite_cmd} ${conf_db} "SELECT * FROM router WHERE port='9802'"`
+    if [ -z "${is_exist}" ];then
+        ${sqlite_cmd} ${conf_db} "INSERT INTO router VALUES('9802','9802','TCP','For WebDAV.')"
+        restart_flag="1"
+    fi
+
+    ## Check and restart router
+    if [ "${restart_flag}" != "0" ];then
+        /img/bin/rc/rc.router boot
+    fi
+}
+
+
+#==================================================
+#  Main Code
+#==================================================
+
+check_env
+
+case "$1"
+in
+	start)
+                pam_init
+                check_router
+		start_webdav
+		;;
+	stop)			
+		stop_webdav
+		;;
+	restart)
+                pam_init
+                check_router
+		restart_webdav
+		;;
+	reload)
+                pam_init
+                check_router
+	        reload_webdav
+	        ;;
+        boot)
+                pam_init
+                check_router
+                boot_webdav
+                ;;
+	*)			
+		echo "Usage: $0 {start|stop|restart|reload|boot}"
+                exit 1
+		;;
+esac

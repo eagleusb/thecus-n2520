@@ -1,0 +1,21 @@
+#!/bin/sh
+MINIPCI=$1
+wireless_netmask=`/usr/bin/sqlite /etc/cfg/conf.db "select v from conf where k='wireless_netmask'"`
+wireless_ip=`/usr/bin/sqlite /etc/cfg/conf.db "select v from conf where k='wireless_ip'"`
+wireless_network=`/usr/bin/sqlite /etc/cfg/conf.db "select v from conf where k='wireless_network'"`
+if [ "${MINIPCI}" = "1" ]; then
+  [ "${wireless_network}" = "0" ] && exit;
+  /sbin/ifconfig wlan0 $wireless_ip netmask $wireless_netmask broadcast +
+  /sbin/ifconfig wlan0 up
+  /img/bin/wlanchg.sh
+elif [ "${MINIPCI}" = "0" ]; then
+  modprobe zd1211
+  modprobe zd1211b
+  [ "${wireless_network}" = "0" ] && exit;
+  sleep 5
+  if [ `/sbin/ifconfig -a | grep wlan0 | wc -l` != '0' ];then
+    /sbin/ifconfig wlan0 $wireless_ip netmask $wireless_netmask broadcast +
+    /sbin/ifconfig wlan0 up
+    /img/bin/wlanchg.sh
+  fi
+fi

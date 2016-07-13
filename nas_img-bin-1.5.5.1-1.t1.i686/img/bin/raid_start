@@ -1,0 +1,669 @@
+#!/bin/bash
+source /img/bin/function/libmodule
+
+##################################################################
+#
+#  First, define some variables globally needed
+#
+##################################################################
+PATH=$PATH:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+mdadm="/sbin/mdadm"
+total_tray=`/img/bin/check_service.sh total_tray` #sysconf.N16000 total_tray=16  thecus_io MAX_TRAY: 16
+strdisk=`cat /proc/scsi/scsi | sort -t':' -k 4 |awk '/Thecus:/{tray=substr($2,6,3);if(int(tray)<='$total_tray' || (int(tray)>=53 && int(tray)<=147)) strdisk=sprintf("%s %s",strdisk,substr($3,6,4))}END{print strdisk}'`
+devices="${strdisk}"
+sata=""
+mdadm_targets=""
+swap_disk=""
+swap_count="0"
+sys_disk=""
+sys_count="0"
+encr_start="/usr/bin/encr_start"
+encrypt_raid=`/img/bin/check_service.sh encrypt_raid`
+force_assemble="True"
+ha_enable=`sqlite /etc/cfg/conf.db "select v from conf where k='ha_enable'"`
+DOM_A_EXIST_STR=`/bin/grep sdaaa /proc/partitions`
+DOM_B_BOOT_STR=`/bin/grep domb /proc/cmdline`
+##################################################################
+#
+#  Second, declare sub routines needed
+#
+##################################################################
+
+# check if the rootfs is on hard drive (say, md70 = sda4 + sdb4)
+# for N2520 series, the new version root is on md70 = mmcblk0p4
+# for N2310 series, the new version root is on md70 = flash partition
+is_md70_on_disk(){
+	local CHECK=`awk '/sda|sdb|sdc|sdd/ && /md70/' /proc/mdstat`
+	if [ -n "$CHECK" ]; then
+		MD70_ON_DISK=1
+	else
+		MD70_ON_DISK=0
+	fi
+}
+
+get_hours() {
+  HOURS=0
+#  Mon Oct 18 18:32:59 CST 2010
+  YEAR=`echo -n $1 | tail -c 4`
+  YEAR=`expr $YEAR - 1970`
+  WEEK=`echo $1 | awk '{print $1}'`
+  MONTH=`echo $1 | awk '{print $2}'`
+  DAY=`echo $1 | awk '{print $3}'`
+  HOUR=`echo $1 | awk '{print $3}'`
+
+  HOURS=`expr $HOURS + 24 \* $DAY - 24`
+  case "$MONTH"
+  in
+  Jan)
+    HOURS=`expr $HOURS + 24 \* 30 \* 0`
+    ;;
+  Feb)
+    HOURS=`expr $HOURS + 24 \* 30 \* 1`
+    ;;
+  Mar)
+    HOURS=`expr $HOURS + 24 \* 30 \* 2`
+    ;;
+  Apr)
+    HOURS=`expr $HOURS + 24 \* 30 \* 3`
+    ;;
+  May)
+    HOURS=`expr $HOURS + 24 \* 30 \* 4`
+    ;;
+  Jun)
+    HOURS=`expr $HOURS + 24 \* 30 \* 5`
+    ;;
+  Jul)
+    HOURS=`expr $HOURS + 24 \* 30 \* 6`
+    ;;
+  Aug)
+    HOURS=`expr $HOURS + 24 \* 30 \* 7`
+    ;;
+  Sep)
+    HOURS=`expr $HOURS + 24 \* 30 \* 8`
+    ;;
+  Oct)
+    HOURS=`expr $HOURS + 24 \* 30 \* 9`
+    ;;
+  Nov)
+    HOURS=`expr $HOURS + 24 \* 30 \* 10`
+    ;;
+  Dec)
+    HOURS=`expr $HOURS + 24 \* 30 \* 11`
+    ;;
+  esac
+
+  HOURS=`expr $HOURS + 24 \* 30 \* 12 \* $YEAR`
+
+  echo ${HOURS}
+}
+
+get_disk_update_time() {
+  DATE=`mdadm --examine ${1} 2>/dev/null | grep 'Update Time' | awk -F' : ' '{print $2}'`
+  hours=`get_hours "$DATE"`
+  echo ${hours}
+}
+
+get_disk_eventid() {
+  EVENTID=`mdadm --examine ${1} 2>/dev/null | grep Events | awk '{print $3}'`
+  echo ${EVENTID}
+}
+
+check_force_assemble() {
+  force_assemble="True"
+  lastest_update_time=0
+  min_event_id=0
+  for i in $1
+  do
+    if [ $lastest_update_time -eq 0 ];then
+      lastest_update_time=`get_disk_update_time ${i}`
+      min_event_id=`get_disk_eventid ${i}`
+    fi
+    current_update_time=`get_disk_update_time ${i}`
+    current_event_id=`get_disk_eventid ${i}`
+    if [ $lastest_update_time -gt $current_update_time ];then
+      if [ `expr $lastest_update_time - $current_update_time` -ge 12 ];then
+        force_assemble="False"
+        break
+      fi
+      lastest_update_time= $current_update_time
+    elif [ $current_update_time -gt $lastest_update_time ];then
+      if [ `expr $current_update_time - $lastest_update_time` -ge 12 ];then
+        force_assemble="False"
+        break
+      fi
+    fi
+    if [ $min_event_id -gt $current_event_id ];then
+      if [ `expr $lastest_update_time - $current_event_id` -ge 50 ];then
+        force_assemble="False"
+        break
+      fi
+      min_event_id= $current_event_id
+    elif [ $current_event_id -gt $min_event_id ];then
+      if [ `expr $current_event_id - $min_event_id` -ge 50 ];then
+        force_assemble="False"
+        break
+      fi
+    fi
+  done
+}
+
+
+## call to get disk UUID
+get_uuid() {
+        UUID=`mdadm --examine /dev/${1}3 2>/dev/null | awk 'BEGIN{OFS=";";FS=" : "}{if($1~/UUID/ && UUID==""){UUID=$2}if($1~/Raid Level/){TYPE=$2}}END{if(TYPE!="" && UUID!="")print TYPE,UUID}'`
+        echo ${UUID}
+}
+
+## use to group the disks into several groups
+group_devide_uuid() {
+  ##result key name is 
+  ## igroup : group counter by uuid
+  ## disk_group : group content by uuid
+  ## swap_disk : swap disk
+  ## swap_disk_count : swap disk
+  local standard
+  local uuid
+  local list
+  standard=""
+  list=$1
+  echo "list=$list"
+  
+  disk_counter="0"
+  for i in $list
+  do
+    disk_counter=$(($disk_counter+1))
+    disk_uuid[$disk_counter]=`get_uuid ${i}`
+    disk_name[$disk_counter]="$i"
+    echo "i=$i disk_counter=$disk_counter"
+  done
+  
+  swap_disk=""
+  swap_count="0"
+  sys_disk=""
+  sys_count="0"
+  idisk="0"
+  jdisk="0"
+  igroup="1"
+  while [ $idisk -le $disk_counter ]
+  do
+    idisk=$(($idisk+1))
+    disk_group[$igroup]=""
+    disk_group_count[$igroup]="0"
+    if [ "${disk_uuid[$idisk]}" != "" ] && [ "${disk_name[$idisk]}" != "" ];then
+      disk_group[$igroup]=${disk_name[$idisk]}
+      jdisk=$(($idisk+1))
+      disk_group_count[$igroup]="1"
+      disk_group_type[$igroup]=`echo "${disk_uuid[$idisk]}" | awk 'BEGIN{FS=";"}{print $1}'`
+
+      swap_disk="$swap_disk /dev/${disk_name[$idisk]}1"
+      swap_count=$(($swap_count+1))
+      sys_disk="$sys_disk /dev/${disk_name[$idisk]}4"
+      sys_count=$(($sys_count+1))
+      echo "idisk=$idisk"
+      echo "jdisk=$jdisk"
+      echo "disk_counter=$disk_counter"
+      while [ $jdisk -le $disk_counter ]
+      do 
+        echo "${disk_uuid[$idisk]} || ${disk_uuid[$jdisk]}"
+        if [ "${disk_uuid[$idisk]}" = "${disk_uuid[$jdisk]}" ];then
+          disk_group[$igroup]="${disk_group[$igroup]} ${disk_name[$jdisk]}"
+          swap_disk="$swap_disk /dev/${disk_name[$jdisk]}1"
+          swap_count=$(($swap_count+1))
+          sys_disk="$sys_disk /dev/${disk_name[$jdisk]}4"
+          sys_count=$(($sys_count+1))
+          disk_name[$jdisk]=""
+          disk_group_count[$igroup]=$((${disk_group_count[$igroup]}+1))
+        fi
+        jdisk=$(($jdisk+1))
+      done
+      echo "disk_group[$igroup]=${disk_group[$igroup]}"
+      igroup=$(($igroup+1))
+    fi
+  done
+  group_count=$(($igroup-1))
+}
+
+
+
+## call to elect a group
+elect_group() {
+  group_num=$1
+  local whether
+  if [ ! "${group_num}" = "" ]
+  then
+    whether=`ifCombine "${disk_group_type[$group_num]}" "${disk_group_count[$group_num]}"`
+    if [ $whether -ne 0 ]
+    then
+      sata=${disk_group[$group_num]}
+      return 1;
+    fi
+  fi
+}
+
+## call to decorate sata string for use
+decorate_sata() {
+  for i in ${sata}
+  do
+    mdadm_targets=${mdadm_targets}"/dev/${i}2 "
+    mdadm_sys_targets=${mdadm_sys_targets}"/dev/${i}3 "
+  done
+}
+
+remove_swap() {
+  for i in $mdadm_targets
+  do
+    swapdisks="$swapdisks `echo $i | awk -F2 '{print $1"1"}'`"
+  done
+  if [ "$swapdisks" = "$swap_disk" ];then
+    swapoff /dev/md10
+    ${mdadm} -S /dev/md10
+  else
+    mdadm --fail /dev/md10 $swapdisks
+    sleep 2
+    mdadm --remove /dev/md10 $swapdisks
+  fi
+}
+
+stop_sys() {
+  if [ $mdnum -ge 60 ] || [ $mdnum -ge 10 ];then
+    sysnum=`expr $mdnum + 10`
+  else
+    sysnum=`expr $mdnum + 50`
+  fi
+  umount /dev/md$sysnum
+  ${mdadm} -S /dev/md$sysnum
+  rmdir /raidsys/$mdnum
+}
+
+stop_raid() {
+  umount /raid$mdnum
+  mdadm -S /dev/md$mdnum
+  rmdir /raid$mdnum
+  rm /tmp/raid$mdnum
+  nesmdnum=`expr $mdnum + $mdnum + 30`
+  nesmdnum2=`expr $mdnum + $mdnum + 31`
+  mdadm -S /dev/md$nesmdnum
+  mdadm -S /dev/md$nesmdnum2
+}
+
+## final run mdadm command to combine disks to raid
+final_run_mdadm() {
+  sh -x /img/bin/mksinglesys_md.sh "${disk_group_count[$igroup]}" "${mdadm_sys_targets}" $mdnum > /tmp/mksys_md$mdnum.log 2>&1
+  if [ ! -e "/raidsys/$mdnum" ];then
+    remove_swap
+    return 1
+  fi
+
+  # For Huge Volume
+  if [ -f "/raidsys/$mdnum/HugeVolume" ]; then
+    stop_sys
+    sh -x /img/bin/mksinglesys_md.sh "${disk_group_count[$igroup]}" "${mdadm_sys_targets}" $huge_mdnum > /tmp/mksys_md$huge_mdnum.log 2>&1
+    if [ ! -e "/raidsys/$huge_mdnum" ];then
+      remove_swap
+      return 1
+    fi
+    
+    if [ "`/img/bin/check_service.sh hv`" != "1" ];then
+      mdadm -S /dev/md$huge_mdnum
+      rm /tmp/raid$huge_mdnum
+      sysnum=`expr $huge_mdnum + 10`
+      umount /dev/md$sysnum
+      ${mdadm} -S /dev/md$sysnum
+      rm -rf /raidsys/$huge_mdnum
+      remove_swap
+      return 1
+    fi
+    
+    if [ `cat /proc/mdstat | grep "^md$huge_mdnum " | wc -l` -eq 0 ]; then
+      if [ "${force_assemble}" == "True" ];then
+        ${mdadm} -A -R -f /dev/md$huge_mdnum ${mdadm_targets}
+      else
+        ${mdadm} -A -R /dev/md$huge_mdnum ${mdadm_targets}
+      fi
+      if [ "$?" != "0" ];then
+        mdadm -S /dev/md$huge_mdnum
+        rm /tmp/raid$huge_mdnum
+        sysnum=`expr $huge_mdnum + 10`
+        umount /dev/md$sysnum
+        ${mdadm} -S /dev/md$sysnum
+        rmdir /raidsys/$huge_mdnum
+        remove_swap
+        return 1
+      fi
+      ${mdadm} -D /dev/md$huge_mdnum > /raidsys/$huge_mdnum/mdstatus
+      huge_mdnum=$(($huge_mdnum+1))
+      return 0
+    fi
+  else
+    fsmode=`sqlite /raidsys/$mdnum/smb.db "select v from conf where k='filesystem'"`
+    if [ "$fsmode" = "" ];then
+      stop_sys
+      remove_swap
+      return 1
+    fi
+  fi
+  
+  raid_num=$mdnum
+  raid_name="raid$raid_num"
+  mddisk="/dev/md$mdnum"
+  mdname="md$mdnum"
+
+  if [ ! -e "/dev/md$mdnum" ];then
+    mknod /dev/md$mdnum b 9 $mdnum
+  fi
+  
+  # For nest RAID
+  if [ -f "/raidsys/$mdnum/uuid_a" ]; then
+    uuid_a=`cat /raidsys/$mdnum/uuid_a`
+    devices_a=""
+    nesnum_a=`expr $mdnum \* 2 + 30`
+    for i in $devices
+    do
+      UUID=`mdadm --examine /dev/${i}2 2>/dev/null | awk 'BEGIN{OFS=";";FS=" : "}{if($1~/UUID/ && UUID==""){UUID=$2}if($1~/Raid Level/){TYPE=$2}}END{if(TYPE!="" && UUID!="")print TYPE,UUID}'`
+      if [ "$UUID" == "$uuid_a" ]; then
+        devices_a="$devices_a /dev/$i"2
+      fi
+    done
+    if [ `cat /proc/mdstat | grep "^md$nesnum_a " | wc -l` -eq 0 ]; then
+      mknod /dev/md$nesnum_a b 9 $nesnum_a
+      if [ "${force_assemble}" == "True" ];then
+        ${mdadm} -A -R -f /dev/md$nesnum_a ${devices_a}
+      else
+        ${mdadm} -A -R /dev/md$nesnum_a ${devices_a}
+      fi
+      if [ "$?" != "0" ];then
+        stop_raid
+        stop_sys
+        remove_swap
+        return 1
+      fi
+    fi
+  fi
+
+  if [ -f "/raidsys/$mdnum/uuid_b" ]; then
+    uuid_b=`cat /raidsys/$mdnum/uuid_b`
+    devices_b=""
+    nesnum_b=`expr $mdnum \* 2 + 31`
+    for i in $devices
+    do
+      UUID=`mdadm --examine /dev/${i}2 2>/dev/null | awk 'BEGIN{OFS=";";FS=" : "}{if($1~/UUID/ && UUID==""){UUID=$2}if($1~/Raid Level/){TYPE=$2}}END{if(TYPE!="" && UUID!="")print TYPE,UUID}'`
+      if [ "$UUID" == "$uuid_b" ]; then
+        devices_b="$devices_b /dev/$i"2
+      fi
+    done
+    if [ `cat /proc/mdstat | grep "^md$nesnum_b " | wc -l` -eq 0 ]; then
+      mknod /dev/md$nesnum_b b 9 $nesnum_b
+      if [ "${force_assemble}" == "True" ];then
+        ${mdadm} -A -R -f /dev/md$nesnum_b ${devices_b}
+      else
+        ${mdadm} -A -R /dev/md$nesnum_b ${devices_b}
+      fi
+      if [ "$?" != "0" ];then
+        stop_raid
+        stop_sys
+        remove_swap
+        return 1
+      fi
+    fi
+    mdadm_targets="/dev/md$nesnum_a /dev/md$nesnum_b"
+  fi
+
+  if [ `cat /proc/mdstat | grep "^md$mdnum " | wc -l` -eq 0 ]; then
+    if [ "${force_assemble}" == "True" ];then
+      ${mdadm} -A -R -f /dev/md$mdnum ${mdadm_targets}
+    else
+      ${mdadm} -A -R /dev/md$mdnum ${mdadm_targets}
+    fi
+    if [ "$?" != "0" ];then
+      stop_raid
+      stop_sys
+      remove_swap
+      return 1
+    fi
+  fi
+  
+  building=`cat /proc/mdstat|sed -n '/^md$mdnum /p'|grep "recovery\|resync\|reshape" |cut -d"]" -f2|cut -d"=" -f1`
+  if [ -n "$building" ]; then
+    echo "building"
+    post_mount
+  else
+    echo "Check RAID Status"
+    active="$(check_inactive)"
+    if [ "${active}" = "" ] ##active
+    then
+      post_mount
+    else
+      if [ "$use_encrypt" = "1" ];then
+        #encrypt raid without usb pluged.... keep sys raid and wait for usb pluged
+        umount /raid$mdnum
+        rmdir /raid$mdnum
+      else
+        #abnormal raid... stop all raid and remove folder
+        stop_raid
+        stop_sys
+        remove_swap
+      fi
+    fi
+  fi
+
+  return 1;
+}
+
+ext_check(){
+  local i=$1
+
+  MC=$(/sbin/tune2fs -l $i | grep -E "Mount count:" | tr -d "Mount count:")
+  #MMC=$(/sbin/tune2fs -l $i | grep -E "Maximum mount count:" | tr -d "Maximum mount count:")
+  MMC=30
+  if [ "$MC" -ge "$MMC" ]; then
+    echo "auto e2fsck $i"
+    /img/bin/logevent/event 997 489 info email $i
+    /img/bin/pic.sh LCM_MSG "Check FS," "Please wait."
+    /sbin/e2fsck -fy $i
+    /bin/sync
+    /bin/sync
+    /bin/sync
+    /img/bin/logevent/event 997 488 info email $i
+    /img/bin/pic.sh LCM_MSG "Check FS," "Done!"
+  fi
+  if [ `tune2fs -l $i | grep "Filesystem state:" | grep errors | wc -l` -eq 1 ]; then
+    echo "tune2fs $i with errors, do e2fsck $i ..."
+    /img/bin/logevent/event 997 821 error email $i
+    /img/bin/pic.sh LCM_MSG "Check FS," "Please wait."
+    /sbin/e2fsck -fy $i
+    /bin/sync
+    /img/bin/logevent/event 997 488 info email $i
+    /img/bin/pic.sh LCM_MSG "Check FS," "Done!"
+  fi
+}
+
+## do post mount raid action
+post_mount() {
+  # For Huge Volume
+  if [ -f "/raidsys/$mdnum/HugeVolume" ]; then
+    return
+  fi
+  
+  /sbin/blockdev --setra 4096 $work_disk
+  mkdir -p /raid$mdnum
+  
+  # For Raid Encrypt
+  use_encrypt=`sqlite /raidsys/$mdnum/smb.db "select v from conf where k='encrypt'"`
+  # FIXME: we need to consider the condition that encrypt type not equals
+  # system support type, it shall not be allowed to start the encrypt raid
+  # if the type is not supported by the host system.
+  # Once this condition occurs, we should define a new event for error email.
+  if [ "$use_encrypt" == "1" ] && [ "$encrypt_raid" -ge "1" ] ;then
+    ${encr_start} $mdnum
+    if [ "$?" != "0" ];then
+      #encrypt raid without usb pluged.... keep sys raid and wait for usb pluged
+      raid_id=`sqlite /raidsys/$mdnum/smb.db "select v from conf where k='raid_name'"`
+      /img/bin/logevent/event 997 651 error email "${raid_id}"
+      umount /raid$mdnum
+      rmdir /raid$mdnum
+      return 1
+    else
+		work_disk="/dev/`encr_util -g $mdnum`"
+    fi
+  fi
+
+  sleep 1
+  
+  mounted=1
+
+  case "$fsmode" in
+    xfs)
+      mount -t xfs -o attr2,noatime,nodiratime,nobarrier,inode64 $work_disk /raid$mdnum
+    ;;
+    ext3)
+      if [ ! -f "/raidsys/$mdnum/ha_raid" ];then
+        ext_check $work_disk
+      fi
+      mount -t ext3 -o user_xattr,acl,rw,data=writeback,noatime,nodiratime,barrier=0,errors=remount-ro $work_disk /raid$mdnum
+    ;;
+    ext4)
+      if [ ! -f "/raidsys/$mdnum/ha_raid" ];then
+        ext_check $work_disk
+      fi
+      mount -t ext4 -o user_xattr,acl,rw,data=writeback,noatime,nodiratime,barrier=0,errors=remount-ro $work_disk /raid$mdnum
+    ;;
+    btrfs)
+      mount -t btrfs -o rw,noatime,nodiratime $work_disk /raid$mdnum
+    ;;
+  esac
+
+  if [ "$?" != "0" ] && [ ! -f "/raidsys/$mdnum/ha_raid" ];then
+    mounted=0
+    /img/bin/logevent/event 997 819 error email ${work_disk}
+    /img/bin/pic.sh LCM_MSG "Check FS," "Please wait."
+
+    case "$fsmode" in
+      xfs)
+        /sbin/xfs_repair ${work_disk}
+        if [ "$?" = "2" ];then
+          /sbin/xfs_repair -L ${work_disk}
+        fi
+        /bin/sync
+        mount -t xfs -o attr2,noatime,nodiratime,nobarrier,inode64 $work_disk /raid$mdnum
+      ;;
+      ext3)
+        /sbin/e2fsck -fy $work_disk -C 1
+        /bin/sync
+        mount -t ext3 -o user_xattr,acl,rw,data=writeback,noatime,nodiratime,barrier=0,errors=remount-ro $work_disk /raid$mdnum
+      ;;
+      ext4)
+        /sbin/e2fsck -fy $work_disk -C 1
+        /bin/sync
+        mount -t ext4 -o user_xattr,acl,rw,data=writeback,noatime,nodiratime,barrier=0,errors=remount-ro $work_disk /raid$mdnum
+      ;;
+      btrfs)
+        /sbin/btrfsck $work_disk -C 1
+        /bin/sync
+        mount -t btrfs -o rw,noatime,nodiratime $work_disk /raid$mdnum
+      ;;
+    esac
+    ret=$?
+
+    if [ "${mounted}" = "0" ];then
+      if [ "${ret}" != "0" ];then
+        /img/bin/logevent/event 997 820 error email ${work_disk}
+        /img/bin/pic.sh LCM_MSG "Check FS," "Failed!"
+      else
+        mounted=1
+        /img/bin/logevent/event 997 488 info email ${work_disk}
+        /img/bin/pic.sh LCM_MSG "Check FS," "Done!"
+      fi
+    fi
+  fi
+  
+  if [ "${mounted}" = "1" ] || [ -f "/raidsys/$mdnum/ha_raid" ];then
+    if [ "${ha_enable}" = "1" ] && [ ! -f "/raidsys/$mdnum/ha_raid" ];then
+      touch /raidsys/$mdnum/ha_raid
+    fi
+    mkdir -p /tmp/raid$mdnum
+    rm /raid$mdnum/sys
+    ln -sf /raidsys/$mdnum /raid$mdnum/sys
+##
+ # This function call is used for automatic installation via intelligentNAS.
+ # In this function, if root_on_emmc exists, then it sets symbolic link
+ # of modules to data RAID. 
+ ##
+    set_module_to_dataraid
+  else
+    #abnormal raid... stop all raid and remove folder
+    stop_raid
+    stop_sys
+    remove_swap
+  fi
+}
+
+## call to check whether inactive, active will echo ""
+check_inactive() {
+  cat /proc/mdstat | grep 'md$mdnum ' | grep 'inactive'
+}
+
+##################################################################
+#
+#  Finally, exec main code
+#
+##################################################################
+
+is_md70_on_disk
+
+RAID_MAX=`/img/bin/check_service.sh speed_limit_max`
+RAID_MIN=`/img/bin/check_service.sh speed_limit_min`
+echo $RAID_MAX > /proc/sys/dev/raid/speed_limit_max
+echo $RAID_MIN > /proc/sys/dev/raid/speed_limit_min
+
+group_devide_uuid "$devices"
+echo "swap_count = ${swap_count}"
+echo "swap_disk = ${swap_disk}"
+md_list=`cat /proc/mdstat | grep 'md[0-9]' | awk -F " " '/md/{printf("%s\n",$1)}'`
+for md in $md_list
+do
+  if [ "${md}" != "md70" ];then
+      mdadm -S /dev/$md
+  fi
+done
+if [ $swap_count -gt 0 ];then
+  /img/bin/mkswap_md.sh "${swap_count}" "${swap_disk}" >/tmp/mkswap_md.log 2>&1 &
+fi
+# At this moment, only N2310 still uses sda4 and sdb4 to assmeble /dev/md70
+if [ $MD70_ON_DISK -eq 1 -a $sys_count -gt 0 ];then
+  /img/bin/mksys_md.sh "${sys_count}" "${sys_disk}" >/tmp/mksys_md.log 2>&1 &
+fi
+
+md_list=`ls /raidsys | sort -r | awk -F '/' '{printf("%s ",$1)}'`
+
+igroup="1"
+mdnum="0"
+huge_mdnum="11"
+work_disk="/dev/md$mdnum"
+modelname=`cat /var/run/model`
+max_raid_count=`/img/bin/check_service.sh total_raid_limit`
+while [ $igroup -le $group_count ]
+do
+  sata=""
+  mdadm_targets=""
+  mdadm_sys_targets=""
+  sata=${disk_group[$igroup]}
+  echo "sata=$sata"
+  if [ ! "${sata}" = "" ]
+  then
+    decorate_sata
+    check_force_assemble $mdadm_targets
+    final_run_mdadm
+    mdchk=`${mdadm} -D $mddisk >/dev/null`
+    if [ $? -eq 0 ];then
+      mdnum=$(($mdnum+1))
+      work_disk="/dev/md$mdnum"
+      if [ $mdnum -eq $max_raid_count ];then
+        break
+      fi
+    fi
+  fi
+  
+  igroup=$(($igroup+1))
+done
+/img/bin/set_masterraid.sh

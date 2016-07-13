@@ -1,0 +1,81 @@
+#!/bin/sh
+if [ `ifconfig -a | grep -c '^eth1 '` -eq 0 ];then
+  exit 1
+fi
+#################################################
+##      Vars defined
+#################################################
+sqlite="/usr/bin/sqlite"
+confdb="/etc/cfg/conf.db"
+
+#################################################
+##      Declare subroutine
+#################################################
+
+get_setting() {
+  sqlcmd="select v from conf where k='nic2_dhcp'"
+  ${sqlite} ${confdb} "${sqlcmd}"
+}
+
+turn_on(){
+  eth1_ip=`/bin/cat /etc/cfg/cfg_nic1 |grep "netmask" |cut -d" " -f3`
+  dns1=`/bin/grep nameserver /etc/resolv.conf | sed -n '1p' |awk '{print $2}'`
+  dns2=`/bin/grep nameserver /etc/resolv.conf | sed -n '2p' |awk '{print $2}'`
+  dns3=`/bin/grep nameserver /etc/resolv.conf | sed -n '3p' |awk '{print $2}'`
+  startip=`/usr/bin/sqlite /etc/cfg/conf.db "select v from conf where k='nic2_startip'"`
+  endip=`/usr/bin/sqlite /etc/cfg/conf.db "select v from conf where k='nic2_endip'"`
+
+  echo "start      $startip" > /var/state/udhcpd_eth1.conf
+  echo "end        $endip" >> /var/state/udhcpd_eth1.conf
+  echo "interface  eth1" >> /var/state/udhcpd_eth1.conf
+  echo "option     subnet       255.255.255.0" >> /var/state/udhcpd_eth1.conf
+  echo "opt        router  $eth1_ip" >> /var/state/udhcpd_eth1.conf
+  echo "opt        dns     $dns1 $dns2" >> /var/state/udhcpd_eth1.conf
+  echo "pidfile    /var/run/udhcpd_eth1.pid" >> /var/state/udhcpd_eth1.conf
+  echo "lease_file /var/lib/misc/udhcpd_eth1.leases" >> /var/state/udhcpd_eth1.conf
+  if [ ! "$dns3" = "" ]; then
+    echo "option     dns     $dns3">> /var/state/udhcpd_eth1.conf
+  fi
+
+  /usr/sbin/udhcpd /var/state/udhcpd_eth1.conf
+}
+
+turn_off(){
+if [ -f /var/run/udhcpd_eth1.pid ];then
+  pidofeth1=`cat /var/run/udhcpd_eth1.pid`
+  kill -9 $pidofeth1
+  rm -f /var/run/udhcpd_eth1.pid
+fi 
+}
+
+bootup(){
+  able=`get_setting`
+  if [ ${able} -ne 0 ]; then
+    turn_on
+    echo "DHCPD is now running ..."
+  else 
+    turn_off
+    echo "DHCPD is shutting down..."
+  fi
+}
+
+#################################################
+##      Main code
+#################################################
+
+case "$1"
+in
+        start)
+                turn_on 
+                ;;
+        stop)
+                turn_off 
+                ;;
+        boot)
+                bootup
+                ;;
+        *)
+                echo "Usage: $0 {start|stop|boot}"
+                ;;
+esac
+

@@ -1,0 +1,35 @@
+#!/bin/sh
+
+Lpid_del_process(){
+    local Lpid_fCommand="$1"
+    local Lpid_fPidFile="$2"
+    local Lpid_fPidList
+    local Lpid_fPid
+    local Lpid_PPid
+    local Lpid_fSelfPid=`cat ${Lpid_fPidFile}`
+    local Lpid_fTotalCPid=""
+ 
+    if [ "${Lpid_fSelfPid}" != "" ];then
+        Lpid_fPidList=`ps | awk '!/awk /&&/'${Lpid_fCommand}'/{print $1}'`
+        for Lpid_fPid in $Lpid_fPidList
+        do
+            Lpid_PPid=`cat /proc/${Lpid_fPid}/status  | awk -F':' '
+                                                               function trim(str)
+                                                               {
+                                                                   sub(/^[ \t]*/,"",str);
+                                                                   sub(/[ \t]*$/,"",str);
+                                                                   return str;
+                                                               }
+                                                               /^PPid:/{print trim($2)}'`
+            if [ "${Lpid_fSelfPid}" == "${Lpid_PPid}" ];then
+               Lpid_fTotalCPid="${Lpid_fTotalCPid} ${Lpid_fPid}"
+            fi
+        done
+        if [ "${Lpid_fTotalCPid}" != "" ];then
+            kill -9 ${Lpid_fTotalCPid}
+        fi
+        
+        kill -9 $Lpid_fSelfPid
+        rm -f ${Lpid_fPidFile}
+    fi
+}

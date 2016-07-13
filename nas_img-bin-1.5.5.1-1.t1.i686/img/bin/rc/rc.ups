@@ -1,0 +1,107 @@
+#!/bin/sh
+
+VARTMP="/var/state/ups"
+if [ ! -e ${VARTMP} ];then
+	mkdir -p ${VARTMP}
+fi
+
+VARNUT="/var/run/nut"
+if [ ! -e ${VARNUT} ];then
+        mkdir -p ${VARNUT}
+fi
+
+if [ ! -f "/etc/ups/upsmon.conf.tmp" ];then
+    cp "/etc/ups/upsmon.conf" "/etc/ups/upsmon.conf.tmp"
+fi
+
+sqlite="/usr/bin/sqlite"
+confdb="/etc/cfg/conf.db"
+upsvar="ups_use"
+UPS_USERS="/etc/ups/upsd.users"
+UPS_CONF="/etc/ups/upsd.conf"
+upsdrvctl="/sbin/upsdrvctl"
+
+SYSPATH="/usr"
+TMPIPV6EN="/var/tmp/ipv6_en"
+
+get_setting() {
+	sqlcmd="select v from conf where k='${upsvar}'"
+	${sqlite} ${confdb} "${sqlcmd}"
+}
+
+
+stop_ups() {
+	${SYSPATH}/sbin/upsmon -c stop
+	${upsdrvctl} stop
+	killall upsd
+	killall upsmon
+}
+
+start_ups() {
+  stop_ups
+  mount -t usbfs usbfs /proc/bus/usb
+  ups=`${sqlite} ${confdb} "select v from conf where k='ups_usems'"`
+  if [ "${ups}" == "0" ];then
+    echo "[nutups]" > ${UPS_USERS}
+    echo "    password = nutups" >> ${UPS_USERS}
+    echo "    allowfrom = localhost" >> ${UPS_USERS}
+    echo "    actions = SET" >> ${UPS_USERS}
+    echo "    instcmds = ALL" >> ${UPS_USERS}
+    echo "    upsmon master" >> ${UPS_USERS}
+    
+    echo "LISTEN 127.0.0.1 3493" > ${UPS_CONF}
+    ip=`/sbin/ifconfig | awk '/^eth0/{t=NR+1;}(NR==t){ip=$2}END{sub(/^.*:/,"",ip);print ip}'`
+    if [ "${ip}" == "BROADCAST" ];then
+      ip=`/img/bin/function/get_interface_info.sh get_ip eth0`
+    fi
+    echo "LISTEN ${ip}" >> ${UPS_CONF}
+				
+    #add eth0 IPv6 address
+    ipv6=`ifconfig eth0|grep "Scope:Global"|awk '{print $3}'|sed -e 's/\/64//g'|head -n 1`
+    if [ "${ipv6}" == "" ];then
+      ipv6=`/img/bin/function/get_interface_info.sh get_ipv6 eth0`
+    fi
+          
+    if [ "${ipv6}" != "" ];then
+      echo "LISTEN ${ipv6}" >> ${UPS_CONF}
+    fi
+  fi	
+		
+  #for APC Smart-UPS 1000, can't get the device in first time
+  ${upsdrvctl} start
+  ret=$?
+  time=0
+  while [ "${ret}" != "0" ] && [ ${time} -lt 2 ]
+  do
+    sleep 10
+    ${upsdrvctl} start
+    ret=$?
+    time=$((${time} + 1))
+  done
+        
+  ${SYSPATH}/sbin/upsd
+  ${SYSPATH}/sbin/upsmon
+}
+
+#################################################
+##	Main code
+#################################################
+
+ups_able=`get_setting`
+if [ "${ups_able}" != "1" ];then
+	stop_ups
+	exit
+fi
+
+case "$1"
+in
+	start)
+		start_ups
+		;;
+	stop)			
+		stop_ups
+		;;
+	*)			
+		echo "Usage: $0 {start|stop}"
+		;;
+esac

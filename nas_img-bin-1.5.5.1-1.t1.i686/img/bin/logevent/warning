@@ -1,0 +1,69 @@
+#!/bin/sh
+if [ $# -lt 1 ]; then 
+echo "Need At Least one argument : Event ID"
+exit 1
+fi
+
+. /img/bin/logevent/sysinfo
+. /img/bin/logevent/setsyslog
+event_id=$1
+param_1=${2}
+warn_log_path=$log_path"warning"
+
+Usage(){
+echo "Event : "$1
+echo "Argument Error : "$2
+}
+
+      case $event_id in
+           001)
+#021-001
+	      IP=$2
+	      if [ $# -eq 2 ]; then
+	      warn_msg="Multiple admin login error from ${IP}"
+	      else
+	      Usage "001" "IP"
+	      fi
+           ;;
+           002)
+#026-002
+	      warn_msg="WARNING: The system [${host_name}] temperature is higher than 65 degree celsius!"
+           ;;
+           003)
+#041-003
+	              warn_msg="The RAID [${param_1}] on system [${host_name}] is recovering the RAID and rebuilding is in progress."
+             ;;
+#UPS Event
+           218)
+	              warn_msg="The system [${host_name}] is on battery power."
+             ;;
+           219)
+	              warn_msg="The system [${host_name}] found UPS has low battery."
+             ;;
+           220)
+	              warn_msg="The system [${host_name}] found UPS has being shutdown by the master."
+             ;;
+           221)
+	              warn_msg="The system [${host_name}] found communications established with the UPS."
+             ;;
+           222)
+	              warn_msg="The system [${host_name}] found communications lost to the UPS. The USB UPS connection failed could caused by system reboot, please unplug/plug and re-enable USB UPS again to correct it."
+             ;;
+           223)
+	              warn_msg="The system [${host_name}] will be shutdown by UPS trigger."
+             ;;
+           997)
+                      warn_msg="$3"
+           ;;
+           999)
+                      warn_msg="$2"
+             ;;
+ 	   *)
+	      echo "No Such Event ID In Warning Pool"
+	   ;;
+      esac
+
+if [ "${warn_msg}" != "" ]; then
+      $sqlite $db_path "insert into sysinfo(Date_time,Details,level) values('${time_stamp}',\"[${host_name}] : ${warn_msg}\",'Warning')"
+      set_syslog "warning" "${warn_msg}"
+fi

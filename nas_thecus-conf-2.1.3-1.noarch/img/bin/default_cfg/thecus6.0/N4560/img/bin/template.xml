@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<root xmlns="urn:schemas-upnp-org:device-1-0">
+  <specVersion>
+    <major>1</major>
+    <minor>0</minor>
+  </specVersion>
+  <device>
+    <deviceType>urn:schemas-upnp-org:device:Nastorage:1</deviceType>
+    <friendlyName>%s</friendlyName>
+    <manufacturer>THECUS</manufacturer>
+    <manufacturerURL>http://www.thecus.com</manufacturerURL>
+    <modelDescription>%s</modelDescription>
+    <modelName>%s</modelName>
+    <modelNumber>%s</modelNumber>
+    <modelURL>http://www.thecus.com</modelURL>
+    <serialNumber>%s</serialNumber>
+    <UDN>uuid:%s</UDN>
+    <UPC>%s</UPC>
+    <serviceList>
+        <service>
+            <serviceType>urn:schemas-upnp-org:service:Nastorage:1</serviceType>
+            <serviceId>urn:upnp-org:serviceId:Nastorage1</serviceId>
+            <controlURL>/upnp/control/Nastorage1</controlURL>
+            <eventSubURL>/upnp/event/Nastorage1</eventSubURL>
+            <SCPDURL>/NastorageSCPD.xml</SCPDURL>
+        </service>
+    </serviceList>
+   <presentationURL>%s</presentationURL>
+</device>
+</root>

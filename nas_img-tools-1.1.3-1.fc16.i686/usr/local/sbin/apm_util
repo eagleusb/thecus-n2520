@@ -1,0 +1,68 @@
+#!/bin/sh
+
+PATH=$PATH:/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin:/usr/lib/nas_img-tools
+
+show_usage(){
+	echo "Usage:"
+	echo " `basename $0` <Device> <Options> [<file>]"
+	echo 
+	echo "  Device:                    Target device, could be a bin file."
+	echo 
+	echo "  Options:"
+	echo "   -v | --info               Display version information"
+	echo "   -p | --printenv           Print u-boot environment"
+	echo "   -k | --kernel <file>      Update kernel by file"
+	echo "   -i | --initrd <file>      Update initramfs by file"
+	echo "   -d | --dtb <file>         Update device tree by file"
+
+	exit $RET
+}
+
+init_env(){
+	TYPE="apm"
+	DEVICE="$1"
+	OPT="$2"
+	FILE="$3"
+
+	[ ! -e "$DEVICE" ] && echo "${DEVICE}: file not found!" && RET=1
+
+	RET=0
+}
+
+[ -z "$1" -o -z "$2" ] && show_usage
+
+init_env "$@"
+source libapm
+
+if [ -e $DEVICE ];then
+	case "$OPT" in
+	-v|--info)
+		get_dtree "$DEVICE" > /dev/null 2>&1
+		[ "$?" -eq 0 ] && display_info
+		;;
+	-k|--kernel)
+		[ ! -f "$FILE" ] && RET=1 && show_usage
+		update_item "KERNEL" $FILE
+		;;
+	-i|--initrd)
+		[ ! -f "$FILE" ] && RET=1 && show_usage
+		update_item "RAMDISK" $FILE
+		;;
+	-d|--dtb)
+		[ ! -f "$FILE" ] && RET=1 && show_usage
+		update_item "DTB" $FILE
+		;;
+	-p|--printenv)
+		print_env "$DEVICE"
+		;;
+	*)  RET=1
+		show_usage
+	esac
+	RET=$?
+else
+	echo "$DEVICE is not found!"
+	RET=1
+fi
+
+exit $RET
+

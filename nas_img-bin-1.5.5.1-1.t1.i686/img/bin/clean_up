@@ -1,0 +1,17 @@
+#!/bin/sh
+# Before start rootfs network, clean-up job to ensure unnecessary 
+# processes left running in rootfs, such as network, mnid, etc.
+# So make sure it will be called before S10network
+case "$1" in
+  start)
+	/sbin/ifdown eth0
+	killall -q udhcpc
+	#killall -q node
+	killall -q udpr
+	killall -q telnetd
+	#rm -f /tmp/mnid.*
+  	;;
+  *)
+  	echo "$0 start"
+  	;;
+esac

@@ -1,0 +1,33 @@
+<?php
+require_once('../../function/conf/localconfig.php');
+require_once(INCLUDE_ROOT.'inittemplate.php');
+require_once(INCLUDE_ROOT.'session.php');
+require_once(INCLUDE_ROOT.'publicfun.php'); 
+require_once(INCLUDE_ROOT.'function.php'); 
+require_once(INCLUDE_ROOT.'modulestyle.class.php'); 
+
+if(!$_SESSION['loginid']){
+   header('Location: /index.php');
+   die;
+}
+
+$module = initWebVar('Module'); 
+$name = initWebVar('name'); 
+
+if(!empty($module)){
+  $_SESSION['module_'.$module]=$module; 
+  
+  $mod = new ModuleStyle($_SESSION['module_'.$module]);
+  $mod->getCss();
+  $mod->getHeader();
+  
+  if($name!=''){
+     include_once(MODULE_WWW.$module.'/www/'.$name.'.htm');
+  }else{
+     include_once(MODULE_WWW.$module.'/www/index.htm');
+  }
+  $mod->getFooter();
+  exit;
+}
+?>
+ 

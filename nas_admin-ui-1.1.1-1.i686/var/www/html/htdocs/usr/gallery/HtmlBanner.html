@@ -1,0 +1,42 @@
+<?
+require_once("/var/www/html/inc/function.php");
+global $sysconf,$webconfig;
+get_sysconf();
+$version=trim(shell_exec("/bin/cat /etc/version"));
+$model=trim(shell_exec('/bin/cat /proc/thecus_io | awk -F: \'/CPUFLAG/{printf("%s", $2)}\''));
+if($model=="1"){
+	$model_name=$webconfig['product_no'].$webconfig['pro'];
+}else{
+	$model_name=$webconfig['product_no'];
+}
+?>
+<tr>
+  <td align="center" height="59px" valign="top">
+    <? if(file_exists("/var/www/html/webinfo/img/key_image.png")){ ?>
+    <div style="background-image:url(/usr/gallery/img/key_image.png);width: 719px;height: 59px;">
+    <? }else{ ?>
+    <div style="background-image:url(/usr/gallery/img/key_image.png);width: 719px;height: 59px;">
+    <? } ?>
+      <table border="0" height="100%" align="right">
+        <tr><td valign="bottom">
+          <font style="font-family:'Arial', 'Helvetica', 'sans-serif';font-size: 10px; font-weight: bold;color:#D8D8D8;"><?=$model_name." V".$version?></font>
+        </td></tr>
+      </table>
+    </div>
+  </td>
+</tr>
+<!--
+<tr>
+  <td height="17px">
+    <table border="0" cellspacing="0" cellpadding="0">
+      <tr><td>
+      </td></tr>
+    </table>
+  </td>
+</tr>
+-->
+<tr>
+  <td height="1" valign="top">
+    <img src="/usr/gallery/img/s.png" width="719" height="15">
+  </td>
+</tr>

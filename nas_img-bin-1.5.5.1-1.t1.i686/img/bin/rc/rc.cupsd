@@ -1,0 +1,165 @@
+#!/bin/sh
+
+conf_build(){
+    echo "
+
+AccessLog /var/log/cups/access_log
+ErrorLog /var/log/cups/error_log
+PageLog /var/log/cups/page_log
+LogLevel warn
+SystemGroup nogroup
+User nobody
+Group nogroup
+Printcap /raid/sys/spool/cups/printcap
+RequestRoot /raid/sys/spool/cups
+# Allow remote access
+Port 631
+
+# Enable printer sharing and shared printers.
+#Browsing On
+#BrowseOrder allow,deny
+#BrowseAllow all
+#BrowseAddress @LOCAL
+
+DefaultAuthType None
+FileDevice Yes
+RemoteRoot nobody
+PreserveJobFiles No
+PreserveJobHistory No
+TempDir /raid/data/tmp
+ServerName localhost
+HostNameLookups Off
+ServerTokens None
+
+<Location />
+  # Allow shared printing and remote administration...
+  Order allow,deny
+  Allow all
+</Location>
+<Location /admin>
+  # Allow remote administration...
+  Order allow,deny
+  Allow all
+</Location>
+<Location /admin/conf>
+  AuthType Default
+  Require user @SYSTEM
+  # Allow remote access to the configuration files...
+  Order allow,deny
+  Allow all
+</Location>
+<Policy default>
+  <Limit Send-Document Send-URI Hold-Job Release-Job Restart-Job Purge-Jobs Set-Job-Attributes Create-Job-Subscription Renew-Subscription Cancel-Subscription Get-Notifications Reprocess-Job Cancel-Current-Job Suspend-Current-Job Resume-Job CUPS-Move-Job CUPS-Get-Document>
+    Require user @OWNER @SYSTEM
+    Order allow,deny
+    Allow all
+  </Limit>
+  <Limit CUPS-Add-Modify-Printer CUPS-Delete-Printer CUPS-Add-Modify-Class CUPS-Delete-Class CUPS-Set-Default CUPS-Get-Devices>
+    AuthType Default
+    Require user @OWNER @SYSTEM
+    Order allow,deny
+    Allow all
+  </Limit>
+  <Limit Pause-Printer Resume-Printer Enable-Printer Disable-Printer Pause-Printer-After-Current-Job Hold-New-Jobs Release-Held-New-Jobs Deactivate-Printer Activate-Printer Restart-Printer Shutdown-Printer Startup-Printer Promote-Job Schedule-Job-After CUPS-Accept-Jobs CUPS-Reject-Jobs>
+    AuthType Default
+    Require user @OWNER @SYSTEM
+    Order allow,deny
+    Allow all
+  </Limit>
+  <Limit CUPS-Authenticate-Job>
+    Require user @OWNER @SYSTEM
+    Order allow,deny
+    Allow all
+  </Limit>
+  <Limit All>
+    Order deny,allow
+    Allow all
+  </Limit>
+</Policy>
+<Policy authenticated>
+  <Limit Create-Job Print-Job Print-URI>
+  AuthType Default
+  Order allow,deny
+  Allow all
+  </Limit>
+  <Limit Send-Document Send-URI Hold-Job Release-Job Restart-Job Purge-Jobs Set-Job-Attributes Create-Job-Subscription Renew-Subscription Cancel-Subscription Get-Notifications Reprocess-Job Cancel-Current-Job Suspend-Current-Job Resume-Job CUPS-Move-Job CUPS-Get-Document>
+AuthType Default
+Require user @OWNER @SYSTEM
+Order allow,deny
+Allow all
+  </Limit>
+  <Limit CUPS-Add-Modify-Printer CUPS-Delete-Printer CUPS-Add-Modify-Class CUPS-Delete-Class CUPS-Set-Default>
+  AuthType Default
+  Require user @OWNER @SYSTEM
+  Order allow,deny
+  Allow all
+    </Limit>
+  <Limit Pause-Printer Resume-Printer Enable-Printer Disable-Printer Pause-Printer-After-Current-Job Hold-New-Jobs Release-Held-New-Jobs Deactivate-Printer Activate-Printer Restart-Printer Shutdown-Printer Startup-Printer Promote-Job Schedule-Job-After CUPS-Accept-Jobs CUPS-Reject-Jobs>
+    AuthType Default
+    Require user @OWNER @SYSTEM
+    Order allow,deny
+    Allow all
+  </Limit>
+  <Limit Cancel-Job CUPS-Authenticate-Job>
+      AuthType Default
+      Require user @OWNER @SYSTEM
+      Order allow,deny
+      Allow all
+  </Limit>
+  <Limit All>
+      Order allow,deny
+      Allow all
+  </Limit>
+</Policy>
+
+"  > /etc/cups/cupsd.conf
+
+
+
+    echo "
+<DefaultPrinter usb-printer>
+Info usb-printer
+Location /dev/usb/lp0
+MakeModel Epson Stylus Color Series
+#DeviceURI usb://EPSON/Stylus%20C59
+DeviceURI file:/dev/usb/lp0
+State Idle
+StateTime 1288005105
+Type 36876
+Filter application/vnd.cups-raw 0 -
+Filter application/vnd.cups-raster 50 rastertoepson
+Accepting Yes
+Shared Yes
+JobSheets none none
+QuotaPeriod 0
+PageLimit 0
+KLimit 0
+</Printer>
+
+" > /etc/cups/printers.conf
+}
+
+
+if [ "$1" = "stop" ]; then
+  /usr/bin/killall cupsd
+else
+  raid_exist=`cat /proc/mdstat | awk -F: '/^md[0-9] :/{print substr($1,3)}' | wc -l`
+  if [ $raid_exist -gt 0 -a -d '/raid/sys' ];then
+    /usr/bin/killall cupsd
+    if [ ! -d /raid/sys/spool/cups/ ]; then
+      mkdir -p /raid/sys/spool/cups/
+    fi
+
+    conf_build
+    if [ -e "/dev/lp0" ];then
+        chmod 666 /dev/lp0
+    fi
+
+    if [ -e "/dev/usb/lp0" ];then
+        chmod 666 /dev/usb/lp0
+    fi
+
+    /usr/sbin/cupsd
+  fi
+fi
+

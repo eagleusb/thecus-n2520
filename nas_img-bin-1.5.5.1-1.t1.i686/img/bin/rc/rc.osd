@@ -1,0 +1,334 @@
+#!/bin/sh
+
+if [ ! -f /var/run/mum ];then
+	exit 0
+fi
+
+model=`cat /var/run/model`
+source /img/bin/conf/sysconf.${model}.txt
+if [ ${osd} -eq 0 ]; then
+	exit 0
+fi
+
+#################################################
+##	Vars defined
+#################################################
+
+export LOCPATH=/usr/share/locale
+export LANG=en_US
+  
+SQL="/usr/bin/sqlite"
+CFGDB='/raid/sys/.CfgDB'
+CONFDB='/etc/cfg/conf.db'
+
+OSD_ROOT='/opt/osd'
+OSD_BIN=${OSD_ROOT}'/bin'
+OSD_ETC=${OSD_ROOT}'/etc'
+OSD_LIB=${OSD_ROOT}'/lib'
+OSD_FONTS=${OSD_ROOT}'/usr/share/fonts'
+OSD_FONTCONF=${OSD_ETC}'/fonts'
+
+FEGUE_ETC=${OSD_ROOT}'/etc'
+
+VCHOST=${OSD_BIN}'/vchost'
+VCCP=${OSD_BIN}'/vccp'
+MONO=${OSD_BIN}'/mono'
+ISCAN=${OSD_BIN}'/iscan'
+OSD=${OSD_BIN}'/osd'
+OSDWAIT=${OSD_BIN}'/osdwait'
+
+MONO_ARG='/tmp/mono host/king.ts -dmapool 16 17'
+MONO_BOOT_ARG='/tmp/mono /3200m/open.mpg -dmapool 16 17'
+
+#default value
+Output_port='Composite'
+Display_ratio='16:9'
+Display_resolution='480p'
+Display_standard='NTSC'
+
+raid_exist=`df | grep -c '^/dev/md0[[:blank:]]'`
+
+if [ -f '/raid/sys/mono' ];then
+  MONO='/raid/sys/mono'
+fi
+
+#################################################
+##	Declare subroutine
+#################################################
+
+run_mono() {
+  if [ "$1" == "boot" ];then
+  MONO_ARG=${MONO_BOOT_ARG}
+  fi
+  if [ $raid_exist -eq 1 -a -d '/raid/sys' ];then
+    _Output_port=`${SQL} ${CFGDB} "select value from conf where key='Output_port'"`
+    _Display_ratio=`${SQL} ${CFGDB} "select value from conf where key='Display_ratio'"`
+    _Display_resolution=`${SQL} ${CFGDB} "select value from conf where key='Display_resolution'"`
+    _Display_standard=`${SQL} ${CFGDB} "select value from conf where key='Display_standard'"`
+  else
+    _Output_port=`${SQL} ${CONFDB} "select v from conf where k='tv_Output_port'"`
+    _Display_ratio=`${SQL} ${CONFDB} "select v from conf where k='tv_Display_ratio'"`
+    _Display_resolution=`${SQL} ${CONFDB} "select v from conf where k='tv_Display_resolution'"`
+    _Display_standard=`${SQL} ${CONFDB} "select v from conf where k='tv_Display_standard'"`
+  fi
+  
+  if [ "${_Output_port}" != "" ];then Output_port=${_Output_port}; fi
+  if [ "${_Display_ratio}" != "" ];then Display_ratio=${_Display_ratio}; fi
+  if [ "${_Display_resolution}" != "" ];then Display_resolution=${_Display_resolution}; fi
+  if [ "${_Display_standard}" != "" ];then Display_standard=${_Display_standard}; fi
+  
+  ${SQL} ${CONFDB} "update conf set v='${Output_port}' where k='tv_Output_port'"
+  ${SQL} ${CONFDB} "update conf set v='${Display_ratio}' where k='tv_Display_ratio'"
+  ${SQL} ${CONFDB} "update conf set v='${Display_resolution}' where k='tv_Display_resolution'"
+  ${SQL} ${CONFDB} "update conf set v='${Display_standard}' where k='tv_Display_standard'"
+
+  if [ "${Display_ratio}" = "16:9" ];then
+    _Display_ratio='-asp 16 9'
+  else
+    _Display_ratio='-asp 4 3'
+  fi
+  if [ "${Output_port}" = "HDMI" ];then
+    if [ "${Display_standard}" = "PAL" ];then
+      if [ ${Display_resolution} = 'auto' ];then
+        MONO_CMD="${VCCP} exec ${MONO_ARG} ${_Display_ratio} -o dvi_24 -dvi_hdmi CAT6611 -f edid"
+      elif [ ${Display_resolution} = '720p' ];then
+        MONO_CMD="${VCCP} exec ${MONO_ARG} ${_Display_ratio} -o dvi_24 -dvi_hdmi CAT6611 -f HDMI_720p50"
+      elif [ "${Display_resolution}" = "1080i" ];then
+        MONO_CMD="${VCCP} exec ${MONO_ARG} ${_Display_ratio} -o dvi_24 -dvi_hdmi CAT6611 -f HDMI_1080i50"
+      elif [ "${Display_resolution}" = "1080p" ];then
+        MONO_CMD="${VCCP} exec ${MONO_ARG} ${_Display_ratio} -o dvi_24 -dvi_hdmi CAT6611 -f HDMI_1080p50"
+      else
+        MONO_CMD="${VCCP} exec ${MONO_ARG} ${_Display_ratio} -o dvi_24 -dvi_hdmi CAT6611 -f HDMI_576p50"
+      fi
+    else
+      if [ ${Display_resolution} = 'auto' ];then
+        MONO_CMD="${VCCP} exec ${MONO_ARG} ${_Display_ratio} -o dvi_24 -dvi_hdmi CAT6611 -f edid"
+      elif [ "${Display_resolution}" = "720p" ];then
+        MONO_CMD="${VCCP} exec ${MONO_ARG} ${_Display_ratio} -o dvi_24 -dvi_hdmi CAT6611 -f HDMI_720p60"
+      elif [ "${Display_resolution}" = "1080i" ];then
+        MONO_CMD="${VCCP} exec ${MONO_ARG} ${_Display_ratio} -o dvi_24 -dvi_hdmi CAT6611 -f HDMI_1080i60"
+      elif [ "${Display_resolution}" = "1080p" ];then
+        MONO_CMD="${VCCP} exec ${MONO_ARG} ${_Display_ratio} -o dvi_24 -dvi_hdmi CAT6611 -f HDMI_1080p60"
+      else
+        MONO_CMD="${VCCP} exec ${MONO_ARG} ${_Display_ratio} -o dvi_24 -dvi_hdmi CAT6611 -f HDMI_480p60"
+      fi
+    fi
+  elif [ "${Output_port}" = "Component" ];then
+    if [ "${Display_standard}" = "PAL" ];then
+      if [ ${Display_resolution} = '720p' ];then
+        MONO_CMD="${VCCP} exec ${MONO_ARG} ${_Display_ratio} -o component_yuv_smpte -f 720p50"
+      elif [ ${Display_resolution} = '1080i' ];then
+        MONO_CMD="${VCCP} exec ${MONO_ARG} ${_Display_ratio} -o component_yuv_smpte -f 1080i50"
+      elif [ ${Display_resolution} = '1080p' ];then
+        MONO_CMD="${VCCP} exec ${MONO_ARG} ${_Display_ratio} -o component_yuv_smpte -f 1080p50"
+      else
+        MONO_CMD="${VCCP} exec ${MONO_ARG} ${_Display_ratio} -o component_yuv_smpte -f 576p50"
+      fi
+    else
+      if [ "${Display_resolution}" = "720p" ];then
+        MONO_CMD="${VCCP} exec ${MONO_ARG} ${_Display_ratio} -o component_yuv_smpte -f 720p60"
+      elif [ ${Display_resolution} = '1080i' ];then
+        MONO_CMD="${VCCP} exec ${MONO_ARG} ${_Display_ratio} -o component_yuv_smpte -f 1080i60"
+      elif [ ${Display_resolution} = '1080p' ];then
+        MONO_CMD="${VCCP} exec ${MONO_ARG} ${_Display_ratio} -o component_yuv_smpte -f 1080p60"
+      else
+        MONO_CMD="${VCCP} exec ${MONO_ARG} ${_Display_ratio} -o component_yuv_smpte -f 480p60"
+      fi
+    fi
+  else
+    if [ "${Display_standard}" = "PAL" ];then
+      MONO_CMD="${VCCP} exec ${MONO_ARG} ${_Display_ratio} -o composite -f PAL_BG"
+    elif [ "${Display_standard}" = "PAL_M" ];then
+      MONO_CMD="${VCCP} exec ${MONO_ARG} ${_Display_ratio} -o composite -f PAL_M"
+    elif [ "${Display_standard}" = "PAL_N" ];then
+      MONO_CMD="${VCCP} exec ${MONO_ARG} ${_Display_ratio} -o composite -f PAL_N"
+    elif [ "${Display_standard}" = "PAL60" ];then
+      MONO_CMD="${VCCP} exec ${MONO_ARG} ${_Display_ratio} -o composite -f PAL60"
+    else
+      MONO_CMD="${VCCP} exec ${MONO_ARG} ${_Display_ratio} -o composite -f NTSC_M"
+    fi
+  fi
+  echo ${MONO_CMD}
+  ${MONO_CMD}
+}
+
+check_iscan() {
+  ISCAN_PID=`pidof iscan`
+  if [ $? -eq 1 ];then
+    ${ISCAN} &
+  fi
+}
+
+init() {
+  if [ ! -d '/etc/fonts' -o ! -f '/etc/fonts/fonts.conf' ];then 
+    rm -rf /etc/fonts
+    tar zxvfp /opt/osd/etc/fonts.tar.gz -C /etc/
+  fi
+  ln -fs ${OSD_FONTS} /usr/share/
+  lsmod | grep -q '^mum ' && rmmod mum
+  insmod ${OSD_LIB}/modules/mum.ko
+  ln -fs ${OSD_LIB}/lib*.so /lib/
+  start_osd_init
+}
+
+start_osd_init() {
+  if [ $raid_exist -eq 1 -a -d '/raid/sys' ];then
+    check_iscan
+  fi
+  nice -n -10 ${VCHOST} &
+  sleep 2
+  ${VCCP} scp ${MONO} /tmp/mono
+  sleep 2
+  ${VCCP} sh chmod 777 /tmp/mono
+  sleep 2
+  #run_mono
+  run_mono boot
+  sleep 1
+  /usr/bin/vccp key p
+  sleep 20
+  /usr/bin/vccp key q
+  sleep 1
+  /usr/bin/vccp key Q
+  sleep 3 
+  lsmod | grep -q '^em8xxxfb ' && rmmod em8xxxfb
+  #osdaddress=`${VCCP} osd -p`
+  osdaddress="0x17d44b98"
+  osdstring=`echo videomemory=$osdaddress videomemorysize=1639680 palette=0x79000 mode=854:480:32`
+  insmod ${OSD_LIB}/modules/em8xxxfb.ko $osdstring
+  ${VCCP} content ${OSD_ETC}/test.mpg
+  ${VCCP} key Q
+}
+
+start_osd() {
+  if [ $raid_exist -eq 1 -a -d '/raid/sys' ];then
+    check_iscan
+    run_mono
+    sleep 1
+    ${VCCP} osd -O 1
+    sleep 2
+    cd ${OSD_ROOT}
+    nice -n -20 ${OSD} &
+    cd -
+  fi
+}
+
+stop_osd() {
+  killall osd
+  ${VCCP} key q
+#  ${OSDWAIT} 10
+#  sleep 2
+  ${VCCP} osd -O 0
+  ${VCCP} key Q
+}
+
+restart_osd() {
+  if [ $raid_exist -eq 1 -a -d '/raid/sys' ];then
+    echo "OSD_LED 2" > /proc/thecus_io
+    stop_osd
+    sleep 2
+    start_osd
+    echo "OSD_LED 1" > /proc/thecus_io
+  fi
+}
+
+#################################################
+##	Main code
+#################################################
+case "$1"
+in
+	start)
+                if [ $raid_exist -eq 1 -a -d '/raid/sys' ];then
+                  check_iscan
+                fi
+		exit 0
+		;;
+	stop)			
+		pid=`pidof osd`
+		if [ "${pid}" != "" ]; then
+			stop_osd
+		fi
+		killall iscan
+		exit 0
+		;;
+	on)
+		lsmod | grep -q '^em8xxxfb '
+		if [ $? -eq 1 ];then
+			if [ -f /tmp/single ];then exit 0 ;fi
+			echo "BTN_OP 4" > /proc/thecus_io
+			sleep 1
+			echo "LCM_MSG -UOSD not ready -LPlease wait... -S6" > /proc/thecus_io
+			lsmod | grep -q '^em8xxxfb '
+			while [ $? -eq 1 ];do
+				if [ -f /tmp/single ];then exit 0 ;fi
+				sleep 3
+				lsmod | grep -q '^em8xxxfb '
+			done
+			sleep 1
+		fi
+		echo "BTN_OP 4" > /proc/thecus_io
+		sleep 1
+		echo "OSD_MODE 1" > /proc/thecus_io
+		echo "OSD_MSG -UOSD On -LWait for 5 sec" > /proc/thecus_io
+		echo "OSD_VOL 1" > /proc/thecus_io
+		echo "OSD_LED 2" > /proc/thecus_io
+		start_osd
+		echo "OSD_MSG -UTV: ${Display_standard} ${Display_ratio} -L${Output_port} ${Display_resolution}" > /proc/thecus_io
+		sleep 2
+		pid=`pidof osd`
+		if [ "${pid}" = "" ]; then
+			echo "OSD_LED 0" > /proc/thecus_io
+		else
+			echo "OSD_LED 1" > /proc/thecus_io
+                        #echo "BTN_OP 4" > /proc/thecus_io
+                        #sleep 1
+		fi
+		#/img/bin/tc.if eth0 start
+		#/img/bin/tc.if eth1 start
+		renice 19 -p `pidof smbd` 
+		renice 19 -p `pidof pure-ftpd` 
+		renice 19 -p `pidof nfsd` 
+		renice 19 -p `pidof rpc.mountd` 
+		renice 19 -p `pidof atalkd` 
+		renice 19 -p `pidof afpd` 
+		exit 0
+		;;
+	off)			
+		#echo "BTN_OP 4" > /proc/thecus_io
+		#sleep 1
+		echo "OSD_MSG -UOSD Off -LWait..." > /proc/thecus_io
+		echo "OSD_LED 2" > /proc/thecus_io
+  		${VCCP} key q
+  		${VCCP} osd -O 0
+  		${VCCP} key Q
+		echo "OSD_LED 0" > /proc/thecus_io
+		echo "OSD_MODE 0" > /proc/thecus_io
+		echo "BTN_OP 4" > /proc/thecus_io
+		sleep 1
+		#/img/bin/tc.if eth0 stop
+		#/img/bin/tc.if eth1 stop
+		renice 0 -p `pidof smbd` 
+		renice 0 -p `pidof pure-ftpd` 
+		renice 0 -p `pidof nfsd` 
+		renice 0 -p `pidof rpc.mountd` 
+		renice 0 -p `pidof atalkd` 
+		renice 0 -p `pidof afpd` 
+		killall osd
+		exit 0
+		;;
+	restart)
+		restart_osd
+		exit 0
+		;;
+	boot)
+		init
+		exit 0
+		;;
+	run_mono)
+		run_mono
+		exit 0
+		;;
+	*)			
+		echo "Usage: $0 {start|stop|restart|boot}"
+		exit 1
+		;;
+esac

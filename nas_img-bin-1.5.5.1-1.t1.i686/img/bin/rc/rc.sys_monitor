@@ -1,0 +1,49 @@
+#!/bin/sh
+#==================================================
+# Check sysconf to detect continue or not
+#==================================================
+monitor=`/img/bin/check_service.sh monitor`
+if [ "${monitor}" == "0" ]; then
+        exit 0
+fi
+
+
+VARTMP="/var/tmp/monitor"
+if [ ! -e ${VARTMP} ];then
+  mkdir -p ${VARTMP}
+fi
+
+monitor_boot() {
+  monitor_start
+}
+
+monitor_stop() {
+  killall system_monitor.sh
+}
+
+
+monitor_start() {
+  monitor_stop
+  sqlite /etc/cfg/conf.db "select v from conf where k = 'save_history'" > $VARTMP/save
+  /img/bin/system_monitor.sh &
+}
+
+#################################################
+##  Main code
+#################################################
+
+case "$1"
+in
+  boot)
+    monitor_boot
+    ;;
+  start)
+    monitor_start
+    ;;
+  stop)      
+    monitor_stop
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|boot}"
+    ;;
+esac

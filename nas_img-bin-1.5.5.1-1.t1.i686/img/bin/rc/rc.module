@@ -1,0 +1,343 @@
+#!/bin/sh
+raid_name="raid"
+c=`/img/bin/check_service.sh plugin_module`
+tmp_lang="/tmp/lang"
+sqlite="/usr/bin/sqlite"
+mod_photoserver="Piczza"
+mod_webdisk="WebDisk"
+mod_path="/var/tmp/modules"
+
+. /img/bin/function/libmodule
+tmp_error_msg="${M_tmp_path}/enable_error"
+module_item="${M_tmp_path}/module_item"
+
+sql_module="/usr/bin/sqlite /raid/data/module/cfg/module.db"
+module_root="/raid/data/module/"
+module_cfg="${module_root}/cfg"
+module_rc="${module_cfg}/module.rc/"
+
+if [ ! -d '/raid/sys' ];then
+  exit
+fi
+
+[ -d /raid/data ] || exit
+
+if [ ! "$c" == "1" ]; then
+  exit
+fi
+
+if [ ! -e /$raid_name/data/module/ ]; then
+     mkdir -p /$raid_name/data/module/
+fi
+if [ ! -e /$raid_name/data/module/cfg/ ];
+then
+     mkdir -p /$raid_name/data/module/cfg/
+fi
+if [ ! -e /$raid_name/data/module/lib/ ];
+then     
+     mkdir -p /$raid_name/data/module/lib/
+fi
+
+if [ ! -f /$raid_name/data/module/cfg/.htaccess ];then
+     echo "Order Deny,Allow" > /$raid_name/data/module/cfg/.htaccess
+     echo "Deny from all" >> /$raid_name/data/module/cfg/.htaccess
+     cp /$raid_name/data/module/cfg/.htaccess /$raid_name/data/module/lib/
+fi
+             
+if [ ! -f /$raid_name/data/module/cfg/module.db ]; then
+  /usr/bin/sqlite /$raid_name/data/module/cfg/module.db 'create table mod (module text, gid numeric, predicate text, object text)';
+  /usr/bin/sqlite /$raid_name/data/module/cfg/module.db 'create table module (name text, version text, 
+ description text, enable text, updateurl text, icon text, mode text, homepage text, ui text)'; 
+fi
+    
+module_list=`${sql_module} "select name from module where enable='Yes' and mode!='RPM'"`
+module_list_all=`${sql_module} "select name from module where mode!='RPM'"`
+
+boot(){
+  if [ ! -d "${mod_path}" ];then
+    mkdir -p "${mod_path}"
+  fi
+
+  ln -sf /raid/data/module/cfg ${mod_path}/cfg
+  
+  if [ -f /tmp/module.lock ];then
+    exit
+  fi
+
+  if [ ! -e "${tmp_lang}" ];then
+    /usr/bin/sqlite /etc/cfg/conf.db "select v from conf where k='admin_lang'" > ${tmp_lang}
+  fi 
+
+  if [ -d /raid/sys -a ! -d ${module_cfg} ];then
+    mkdir -p ${module_cfg}/module 
+    ${sql_module} 'create table mod (module text,gid numeric,predicate text,object text)'
+    ${sql_module} 'create table module (name text,version text,description text,enable text,updateurl text,icon text,mode text,homepage text,ui text)'
+  fi
+
+  if [ -d ${module_cfg} ];then
+    touch /tmp/module.lock
+    mod_count=`${sql_module} "select name from module where enable = 'Yes' and mode!='RPM'" | awk '{print NR}'`
+    cd ${module_rc} 
+    
+    for i in ${mod_count}
+    do
+      mod=`${sql_module} "select name from module where enable = 'Yes' and mode!='RPM'" | sed -n "${i} p"`
+	  /bin/ln -fs "${module_root}/${mod}" "${mod_path}/${mod}"
+      
+      ko=`${sql_module} "select object from mod where module='${mod}' and predicate='KernelModule'"`
+      for j in ${ko}
+      do
+        if [ -f "${module_root}/${mod}/drv/${j}" ];then
+          modprobe "${module_root}/${mod}/drv/${j}"
+        fi
+      done
+      
+      rm -f "${module_root}/${mod}/reboot.lock"
+      ${module_rc}/${mod}.rc boot ${mod}
+    done
+    
+    cd -
+    rm -f /tmp/module.lock
+  fi
+}
+
+start(){
+  if [ ! -d "${mod_path}" ];then
+    mkdir -p "${mod_path}"
+  fi
+
+  ln -sf /raid/data/module/cfg ${mod_path}/cfg
+
+  for mod in ${module_list_all}
+  do
+    /bin/ln -fs "${module_root}/${mod}" "${mod_path}/${mod}"
+    ${module_rc}/${mod}.rc start
+  done
+}
+
+stop(){
+  for mod in ${module_list_all}
+  do
+    if [ "$mod" != "" ];then
+      rm "${mod_path}/${mod}"
+    fi
+    ${module_rc}/${mod}.rc stop
+  done
+}
+
+restart() {                                                                                                                  
+	stop                                                                                                                         
+	sleep 1                                                                                                                      
+	start                                                                                                                        
+}
+
+#################################################
+##       execute module install
+##       param:   mod_name : module name
+##                act : install/upgrade
+#################################################
+install() {  
+  mod_name=$1
+  act=$2
+  ret=fail
+  log_file="${M_module_path}/${mod_name}/log.txt"
+  mod_install_gid=`${sqlite} ${M_module_db} "select gid from mod where module = '${mod_name}' and predicate = 'type' and object = 'Install'"`
+  mod_rdf_name=`${sqlite} ${M_module_db} "select object from mod where module = '${mod_name}' and predicate = 'Name' and gid='${mod_install_gid}'"`  
+  if [ "${mod_install_gid}" != "" ];then
+    backup_module "$mod_name" "module"
+    set_install_act "${act}" "${mod_name}"
+    cd "${M_tmp_module}"
+    ret=`execute_install "${mod_name}" "${act}"`
+    if [ "${ret}" == "pass" ];then
+      insert_db "${mod_name}" "${M_module_db}"
+    fi
+  else
+      set_install_act "${act}" "${mod_name}"
+      recover_mod "${mod_name}"
+      set_word "${M_tmp_log_file}" "module" "${M_fail_msg}"
+      ${M_event} 997 "${M_fail_code}" error email "${mod_rdf_name}"
+  fi
+  del_tmp_file "${mod_name}"
+}
+
+#################################################
+##       execute module uninstall
+#################################################
+uninstall() {
+  db_info=`${sqlite} ${M_module_db} "select name,enable from module where mode!='RPM'"`  
+  i=1
+  tmp_un="/tmp/un.sh"
+  
+  for mod in $db_info
+  do
+    uninstall_status=`grep " ${i} " ${module_item}`
+    if [ "${uninstall_status}" != "" ];then
+      mod_name=`echo "${mod}" | awk -F'|' '{print $1}'`
+      enable=`echo "${mod}" | awk -F'|' '{print $2}'`
+      mod_rdf_name=`${sqlite} ${M_module_db} "select object from mod where module = '${mod_name}' and predicate = 'Name'"`
+      set_word "${M_tmp_log_file}" "module" "uninstall_start" "${mod_rdf_name}"
+
+      if [ "${enable}" == "Yes" ];then
+        ${M_module_path}/cfg/module.rc/"$mod_name.rc" stop
+        if [ "${mod_name}" != "" ];then
+          rm "${mod_path}/${mod_name}"
+        fi
+      fi
+      
+      uninstall_file="${M_module_path}/${mod_name}/shell/uninstall.sh"
+      if [ -e "${uninstall_file}" ];then
+        mv "${uninstall_file}" ${tmp_un}
+        /bin/sh ${tmp_un} "${mod_name}"
+
+        if [ -d ${M_module_path}/${mod_name} ] && [ "${mod_name}" != "" ];then
+          cd ${M_module_path}/
+          rm -rf ${mod_name}
+          rm -f "${M_module_path}/cfg/module.rc/${mod_name}.rc"
+        fi
+
+        ${sqlite} ${M_module_db} "delete from module where name = '${mod_name}'"
+        ${sqlite} ${M_module_db} "delete from mod where module = '${mod_name}'"
+        set_word "${M_tmp_log_file}" "module" "uninstall_finish" "${mod_rdf_name}"
+        ${M_event} 997 447 info email "${mod_rdf_name}"
+      else
+        set_word "${M_tmp_log_file}" "module" "uninstall_fail" "${mod_rdf_name}"
+        ${M_event} 997 663 error email "${mod_rdf_name}"
+      fi
+    fi
+      i=$((${i}+1))
+      
+    done
+  rm -f "${module_item}"
+  rm -f "${M_lock_flag}"
+}
+
+#################################################
+##       execute module disable/enable
+#################################################
+enable() {  
+  db_info=`${sqlite} ${M_module_db} "select name,enable from module where mode!='RPM'"`
+  i=1
+  
+  rm "${tmp_error_msg}"
+  for mod in $db_info
+  do
+    enable_status=`grep " ${i} " ${module_item}`
+    if [ "${enable_status}" != "" ];then
+      mod_name=`echo "${mod}" | awk -F'|' '{print $1}'`
+      enable=`echo "${mod}" | awk -F'|' '{print $2}'`
+      log_file="${M_module_path}/${mod_name}/log.txt"
+      mod_rdf_name=`${sqlite} ${M_module_db} "select object from mod where module = '${mod_name}' and predicate = 'Name'"`
+      
+      if [ "${mod_name}" == "${mod_photoserver}" ] || [ "${mod_name}" == "${mod_webdisk}" ] ;then
+          if [ "${mod_name}" == "${mod_photoserver}" ];then
+              ${sqlite} /etc/cfg/conf.db "update conf set v='1' where k='photoserver'"
+          fi
+          if [ "${mod_name}" == "${mod_webdisk}" ];then
+              ${sqlite} /etc/cfg/conf.db "update conf set v='1' where k='webdisk'"
+          fi
+          ${sqlite} /etc/cfg/conf.db "update conf set v='0' where k='modupgrade_enabled'"
+      fi
+      
+      if [ "${enable}" == "Yes" ];then        
+        act="No"
+        success_code=449
+        fail_code=662
+        fail_msg="disable_fail"
+        success_msg="disable_finish"
+        start_msg="disable_start"
+      else
+        act="Yes"
+        success_code=448
+        fail_code=661
+        fail_msg="enable_fail"
+        success_msg="enable_finish"
+        start_msg="enable_start"
+      fi
+      
+      set_word "${M_tmp_log_file}" "module" "${start_msg}" "${mod_rdf_name}"
+      
+      mod_reboot=`${sqlite} ${M_module_db} "select object from mod where module='${mod_name}' and gid='${mod_install_gid}' and predicate='Reboot'"`
+      lock_file="${M_module_path}/${mod_name}/reboot.lock"
+      if [ "${mod_reboot}" == "Yes" ];then
+          touch "${lock_file}"
+      fi
+      
+      ret=`${M_module_path}/"${mod_name}"/shell/enable.sh "${mod_name}" "${enable}" | tail -1`      
+      if [ "$ret" == "pass" ];then
+        ${sqlite} ${M_module_db} "update module set enable = '${act}' where name='${mod_name}'"        
+        if [ -f "${lock_file}" ];then
+          set_word "${tmp_error_msg}" "module" "${start_msg}" "${mod_rdf_name}" 
+          set_word "${tmp_error_msg}" "module" "need_reboot" "${mod_rdf_name}"
+          set_word "${M_tmp_log_file}" "module" "${success_msg}" "${mod_rdf_name}" 
+        fi
+        set_word "${M_tmp_log_file}" "module" "${success_msg}" "${mod_rdf_name}"     
+        ${M_event} 997 "${success_code}" info email "${mod_rdf_name}"
+        if [ "${act}" == "Yes" ];then
+          ln -sf "${M_module_path}/${mod_name}" "${mod_path}/${mod_name}"
+        else
+          if [ "${mod_name}" != "" ];then
+            rm "${mod_path}/${mod_name}"
+          fi
+        fi
+      else
+        set_word "${M_tmp_log_file}" "module" "${fail_msg}" "${mod_rdf_name}"
+        set_word "${tmp_error_msg}" "module" "${start_msg}" "${mod_rdf_name}" 
+        set_word "${tmp_error_msg}" "module" "${fail_msg}" "${mod_rdf_name}" 
+        ${M_event} 997 "${fail_code}" error email "${mod_rdf_name}"        
+      fi
+      cp ${M_tmp_log_file} "${log_file}"
+    fi    
+    i=$((${i}+1))
+  done
+
+  rm -f "${module_item}"
+  rm -f "${M_lock_flag}"
+}
+
+#################################################
+##       execute UI restore for module db
+#################################################
+restore(){
+  mod_name=$1
+  log_file="${M_module_path}/${mod_name}/log.txt"
+  mv "${M_tmp_db}" "${M_module_db}"
+  cp ${M_tmp_log_file} "${log_file}"
+  del_tmp_file "${mod_name}"
+}
+
+case "$1" in
+  boot)
+    boot
+    ;;
+  start)
+    start
+    ;;
+  stop)
+    stop
+    ;;
+  restart|reload)                                                                                                              
+    restart 
+    ;; 
+  install|update)
+    module_name=$2
+    act=$1
+    install "${module_name}" "$act"
+    ;;
+  uninstall)  
+    uninstall
+    ;;
+  enable)
+    enable 
+    ;;
+  restore)
+    module_name=$2
+    restore "${module_name}"
+    ;;
+  *)
+    echo $"Usage: $0 {boot|start|stop|restart|install|update|uninstall|enable|restore}"
+    exit 1
+esac
+
+exit 0
+
+

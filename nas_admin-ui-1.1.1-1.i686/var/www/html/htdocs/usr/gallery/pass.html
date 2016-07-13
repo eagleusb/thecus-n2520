@@ -1,0 +1,41 @@
+<?
+	session_start();
+  require_once('../../../function/conf/localconfig.php');
+  require_once(INCLUDE_ROOT.'session.php');
+	require_once("GlobalVars.html");
+	require_once("functions.html");
+//	require_once("../setlang/lang.html");
+	$words=$session->PageCode("album");
+	$gwords=$session->PageCode("global");
+  	if ( ($_SESSION['username']==$_GET['id']) && ($_SESSION['username']!="admin")){
+		if (!is_dir(AlbumRoot . $_SESSION['username'])){
+			@mkdir(AlbumRoot . $_SESSION['username'],0755);
+			GiveRight($_SESSION['username'],AlbumRoot . $_SESSION['username']);
+		}
+	}
+  if (User_exist($_POST['id'])){
+	$passfile=AlbumRoot . $_POST['id'] . "/" .  fix_post($_POST['album']) . "/.album_security";
+	$passfile=Fix_special_char($passfile);
+	$passwd=trim(shell_exec("/usr/bin/des -D -k album $passfile"));
+	if ($_POST['album_pwd'] == $passwd){
+		$_SESSION['album_pwd']='pass';
+		direct_out("photo.html?id=" . fix_encode($_POST['id']) . "&album=" . Fix_encode($_POST['album']));
+                exit;
+	}else{
+		direct_out("album.html?id=".fix_encode($_POST['id']));
+		exit;
+	}
+  }
+
+  if (User_exist($_GET['id'])){
+  	if ($_SESSION['username']==$_GET['id']){
+		$_SESSION['album_pwd']='pass';
+		direct_out("photo.html?id=" . fix_encode($_SESSION['username']) . "&album=" . Fix_encode($_GET['album']));
+		exit;
+	}else{
+		include_once('AlbumPassForm.html');
+		exit;
+	}
+  }
+
+?>

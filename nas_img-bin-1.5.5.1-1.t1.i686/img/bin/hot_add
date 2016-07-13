@@ -1,0 +1,214 @@
+#!/bin/sh
+#################################################
+##  Define global vars
+#################################################
+
+sgdisk="/usr/sbin/sgdisk"
+mdadm="/sbin/mdadm"
+prefix="/dev/sd"
+. /img/bin/cproc      ## include cproc
+
+# check if the rootfs is on hard drive (say, md70 = sda4 + sdb4)
+# for N2520 series, the new version root is on md70 = mmcblk0p4
+# for N2310 series, the new version root is on md70 = flash partition
+is_md70_on_disk(){
+	local CHECK=`awk '/sda|sdb|sdc|sdd/ && /md70/' /proc/mdstat`
+	if [ -n "$CHECK" ]; then
+		MD70_ON_DISK=1
+	else
+		MD70_ON_DISK=0
+	fi
+}
+
+which_degrade() {
+  mdlist=`awk -F ':' '/^md[0-9] /{print $1}'  /proc/mdstat|sort -u`
+  ##Get Raid Number and Raid Name from DB
+  for mdname in $mdlist
+  do
+    raidnum=`echo "$mdname" |awk -F'md' '{printf("%d",$2)}'`
+    status=`mdadm -D /dev/md$raidnum | awk -F' ' '/State :/{printf($4)}' | awk -F, '{printf $1}'`
+    recover=`mdadm -D /dev/md$raidnum | awk -F' ' '/State :/{printf($5)}'`
+    if [ "$status" = "degraded" ] && [ "$recover" != "recovering" ] && [ "$recover" != "resyncing" ];then
+      ## Get Degrade RAID
+      echo "$mdname"
+      break
+    fi
+  done
+}
+which_nestdegrade() {
+  mdlist=`awk -F ':' '/^md[3-4][0-9] /{print $1}'  /proc/mdstat|sort -u`
+  ##Get Raid Number and Raid Name from DB
+  for mdname in $mdlist
+  do
+    raidnum=`echo "$mdname" |awk -F'md' '{printf("%d",$2)}'`
+    status=`mdadm -D /dev/md$raidnum | awk -F' ' '/State :/{printf($4)}' | awk -F, '{printf $1}'`
+    recover=`mdadm -D /dev/md$raidnum | awk -F' ' '/State :/{printf($5)}'`
+    if [ "$status" = "degraded" ] && [ "$recover" != "recovering" ] && [ "$recover" != "resyncing" ];then
+      ## Get Degrade RAID
+      echo "$mdname"
+      break
+    fi
+  done
+}
+
+which_HVdegrade() {
+  mdlist=`awk -F ':' '/^md1[1-9] /{print $1}'  /proc/mdstat|sort -u`
+  ##Get Raid Number and Raid Name from DB
+  for mdname in $mdlist
+  do
+    raidnum=`echo "$mdname" |awk -F'md' '{printf("%d",$2)}'`
+    status=`mdadm -D /dev/md$raidnum | awk -F' ' '/State :/{printf($4)}' | awk -F, '{printf $1}'`
+    recover=`mdadm -D /dev/md$raidnum | awk -F' ' '/State :/{printf($5)}'`
+    if [ "$status" = "degraded" ] && [ "$recover" != "recovering" ] && [ "$recover" != "resyncing" ];then
+      ## Get Degrade RAID
+      echo "$mdname"
+      break
+    fi
+  done
+}
+#################################################
+##  Main code
+##  this script is for batch execution
+##  of mdadm add new disk action
+##  include gdisk and mdadm --hot add
+#################################################
+
+# to obtain the variable MD70_ON_DISK, 1: yes, 0:no
+is_md70_on_disk 
+
+if [ "$1" = "" ];then
+  exit
+else
+  ##work around for spin down io_fail
+  id=`ls /sys/block/sd$1/device/scsi_disk/`
+  echo 1 > /sys/block/sd$1/device/scsi_disk/$id/allow_restart
+  mkdir /tmp/hot_add_lock
+  while [ $? -eq 1 ]
+  do
+    sleep 1
+    mkdir /tmp/hot_add_lock
+  done
+
+  
+  ##Which RAID degrade
+  degrade_md=`which_degrade`
+  if [ "$degrade_md" != "" ];then
+    if [ -f "/tmp/ha_role" ] && [ "$degrade_md" = "md1" ];then
+      exit
+    fi
+    mddisk="/dev/$degrade_md"
+    if [ -e "$mddisk" ];then
+      device="${prefix}""$1"
+      partition="${device}2"
+      swap="${device}1"
+      ramdisk="${device}3"
+      sysdisk="${device}4"
+      
+      ${sgdisk} -oZ ${device} 2>&1
+      /img/bin/init_disk.sh sd$1
+      sleep 1
+      sync
+      mdnum=`echo $mddisk | awk -F"md" '{print $2}'`
+      sysmdnum=`expr $mdnum + 50`
+      ${mdadm} --zero ${swap}
+      ${mdadm} --zero ${partition}
+      ${mdadm} --zero ${ramdisk}
+      ${mdadm} $mddisk --add ${partition}
+      for (( i=0; i<=5; i++ )){
+          recover=`mdadm -D $mddisk | awk -F' ' '/State :/{printf($5)}'`
+          if [ "$recover" != "recovering" ] && [ "$recover" != "resyncing" ];then
+             break
+          fi
+          sleep 5
+      }
+      recover=`mdadm -D $mddisk | awk -F' ' '/State :/{printf($5)}'`
+      if [ "$recover" != "recovering" ] && [ "$recover" != "resyncing" ];then
+        /img/bin/logevent/event 339 sd$1 >/dev/null 2>&1 &
+      fi
+      echo "" > /tmp/TRAY$2
+      ${mdadm} /dev/md10 --add ${swap}
+      ${mdadm} /dev/md$sysmdnum --add ${ramdisk}
+      [ $MD70_ON_DISK -eq 1 ] && ${mdadm} /dev/md70 --add $sysdisk
+    fi
+  fi
+  degrade_nestmd=`which_nestdegrade`
+  if [ "$degrade_nestmd" != "" ];then
+    mddisk="/dev/$degrade_nestmd"
+    if [ -e "$mddisk" ];then
+      device="${prefix}""$1"
+      partition="${device}2"
+      swap="${device}1"
+      ramdisk="${device}3"
+      sysdisk="${device}4"
+
+      ${sgdisk} -oZ ${device} 2>&1
+      /img/bin/init_disk.sh sd$1
+      sleep 1
+      sync
+      mdnum=`echo $mddisk | awk -F"md" '{print $2}'`
+      sysmdnum=`expr $mdnum - 30`
+      sysmdnum=`expr $sysmdnum / 2`
+      sysmdnum=`expr $sysmdnum + 50`
+      ${mdadm} --zero ${swap}
+      ${mdadm} --zero ${partition}
+      ${mdadm} --zero ${ramdisk}
+      ${mdadm} /dev/md10 --add ${swap}
+      ${mdadm} /dev/md$sysmdnum --add ${ramdisk}
+      # At this moment, only N2310 still uses sda4/sdb4 for md70
+      [ $MD70_ON_DISK -eq 1 ] && ${mdadm} /dev/md70 --add $sysdisk
+      ${mdadm} $mddisk --add ${partition}
+      for (( i=0; i<=5; i++ )){
+          recover=`mdadm -D $mddisk | awk -F' ' '/State :/{printf($5)}'`
+          if [ "$recover" != "recovering" ] && [ "$recover" != "resyncing" ];then
+             break
+          fi
+          sleep 5
+      }      
+      recover=`mdadm -D $mddisk | awk -F' ' '/State :/{printf($5)}'`
+      if [ "$recover" != "recovering" ] && [ "$recover" != "resyncing" ];then
+        /img/bin/logevent/event 339 sd$1 >/dev/null 2>&1 &
+      fi
+      echo "" > /tmp/TRAY$2
+    fi
+  fi
+  
+  degrade_HVmd=`which_HVdegrade`
+  if [ "$degrade_HVmd" != "" ];then
+    mddisk="/dev/$degrade_HVmd"
+    if [ -e "$mddisk" ];then
+      device="${prefix}""$1"
+      partition="${device}2"
+      swap="${device}1"
+      ramdisk="${device}3"
+      sysdisk="${device}4"
+
+      ${sgdisk} -oZ ${device} 2>&1
+      /img/bin/init_disk.sh sd$1
+      sleep 1
+      sync
+      mdnum=`echo $mddisk | awk -F"md" '{print $2}'`
+      sysmdnum=`expr $mdnum + 10`
+      ${mdadm} --zero ${swap}
+      ${mdadm} --zero ${partition}
+      ${mdadm} --zero ${ramdisk}
+      ${mdadm} /dev/md10 --add ${swap}
+      ${mdadm} /dev/md$sysmdnum --add ${ramdisk}
+      [ $MD70_ON_DISK -eq 1 ] &&${mdadm} /dev/md70 --add $sysdisk
+      ${mdadm} $mddisk --add ${partition}
+      for (( i=0; i<=5; i++ )){
+          recover=`mdadm -D $mddisk | awk -F' ' '/State :/{printf($5)}'`
+          if [ "$recover" != "recovering" ] && [ "$recover" != "resyncing" ];then
+             break
+          fi
+          sleep 5
+      }
+      recover=`mdadm -D $mddisk | awk -F' ' '/State :/{printf($5)}'`
+      if [ "$recover" != "recovering" ] && [ "$recover" != "resyncing" ];then
+        /img/bin/logevent/event 339 sd$1 >/dev/null 2>&1 &
+      fi
+    fi
+  fi
+
+  rmdir /tmp/hot_add_lock  
+fi
+

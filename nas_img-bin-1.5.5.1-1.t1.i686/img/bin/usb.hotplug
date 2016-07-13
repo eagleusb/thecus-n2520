@@ -1,0 +1,307 @@
+#!/bin/sh
+[ -d /raid/data ] || exit
+
+mkdir="/bin/mkdir"
+rmdir="/bin/rmdir"
+export LD_LIBRARY_PATH=/usr/lib
+ntfs_3g="/usr/bin/ntfs-3g"
+esata_tray=`/img/bin/check_service.sh esata`
+esata_count=`/img/bin/check_service.sh esata_count`
+esata_list=`cat /proc/scsi/scsi | sort -u |awk "/ Tray:${esata_tray} /{print \\\$3}" | cut -d":" -f2`
+char_handle="/usr/bin/specstr_handle"
+while [ ${esata_count} -gt 1 ]
+do
+  esata_tray=`expr ${esata_tray} + 1`
+  esata_list=$esata_list" "`cat /proc/scsi/scsi |awk "/ Tray:${esata_tray} /{print \\\$3}" | cut -d":" -f2`
+  esata_count=`expr ${esata_count} - 1`
+done
+USB_TRAY=`expr ${esata_tray} + 1`
+esata_tray=`/img/bin/check_service.sh esata`
+
+encrypt_raid=`/img/bin/check_service.sh "encrypt_raid"`
+. /img/bin/function/libsdcard
+sd_dev=`check_sd_card_dev`
+xbmc_exist=`ps | grep "[/]opt/xbmc-mplayer/lib/xbmc/xbmc.bin"`
+#################################################
+##  Declare subroutine
+#################################################
+checkmounted(){
+  check=` mount |grep "$tmp"`
+}
+
+checkremove(){
+  check=`cat /proc/partitions | grep "$tmp2$" | awk '{print $4}'`
+}
+
+mounting(){
+#  partition=`cat /proc/partitions | awk '/'${tmp1}'$|'${tmp1}'[0-9]/{FS=" ";print $4}'`
+  partition=`cat /proc/partitions | awk '/ '${tmp1}'[0-9]/{FS=" ";print $4}'`
+  if [ "${partition}" != "" ];then
+      partition="${partition} ${tmp1}"
+  else
+      partition="${tmp1}"
+  fi
+  
+  for j in $partition
+  do 
+    src=${j}
+    if [ $j = $tmp1 ];then
+      des="${tmp}"
+    else
+      part=`echo $j | awk -F$tmp1 '{print $2}'`
+      des="${tmp}/${part}"
+    fi
+
+    /sbin/blockdev --setra 512 /dev/${src}
+    $mkdir -p /raid/data/$folder/${des}
+    [ "${xbmc_exist}" != "" ] && $mkdir -p /opt/XBMC/raid/data/$folder/${des}
+    /bin/mount -o utf8,umask=0,fmask=001,uid=99,gid=99 /dev/${src} /raid/data/$folder/${des}
+ 
+    if [ ! $? -eq 0 ]; then
+      /bin/mount /dev/${src} /raid/data/$folder/${des}
+      if [ ! $? -eq 0 ]; then
+        /bin/mount -t ntfs /dev/${src} /raid/data/$folder/${des}
+      fi
+    fi
+    if [ $? -eq 0 ]; then
+      mount_path="\/dev\/${src}"
+      fs_type=`/bin/mount | awk -F" " '/'$mount_path' /{printf($5)}'`
+      if [ "$fs_type" == "vfat" ] || [ "$fs_type" == "ntfs" ] || [ "$fs_type" == "msdos" ] || [ "$fs_type" == "fat" ]; then
+        if [ "$fs_type" == "vfat" ] || [ "$fs_type" == "msdos" ];then
+          /bin/mount -o remount,utf8,umask=0,fmask=001,uid=99,gid=99,shortname=mixed /dev/${src} /raid/data/$folder/${des}
+        elif [ "$fs_type" == "ntfs" ]; then
+          /bin/umount /dev/${src}
+          sleep 1 
+          ${ntfs_3g} /dev/${src} /raid/data/$folder/${des} -o umask=0,fmask=001,uid=99,gid=99
+          if [ "$?" != "0" ]; then
+            /bin/mount -o remount,utf8,umask=0,fmask=001,uid=99,gid=99 /dev/${src} /raid/data/$folder/${des}
+          fi
+        else
+          /bin/mount -o remount,utf8,umask=0,fmask=001,uid=99,gid=99 /dev/${src} /raid/data/$folder/${des}
+        fi
+      else
+         if [ "$fs_type" == "ext2" ] || [ "$fs_type" == "ext3" ] || [ "$fs_type" == "ext4" ]; then
+           /bin/mount -o remount,noacl /dev/${src} /raid/data/$folder/${des}
+         fi
+      fi
+      if [ "$?" = "0" ];then
+        [ "${xbmc_exist}" != "" ] && /bin/mount -o bind /raid/data/$folder/${des} /opt/XBMC/raid/data/$folder/${des}
+        flag=1
+        if [ "$ext_type" = "usb" ];then
+          #for usb_copy
+          /bin/touch /var/run/usb/${src}
+        fi
+        chmod 707 /raid/data/$folder/${des}
+      fi
+    else
+      cd /raid/data/$folder/
+      $rmdir ${des}
+    fi
+  done
+}
+
+turn_sdled(){
+  local act="$1"
+  local dev_id="$2" 
+  local is_sd=`echo " ${sd_dev} " | grep " ${dev_id} "`
+  local is_mount=`mount | egrep "^/dev/${dev_id}[0-9]|^/dev/${dev_id} "`  
+
+  if [ "${is_sd}" != "" ];then
+      if [ "$is_mount" != "" ];then
+        echo SD_LED 1 > /proc/thecus_io
+        echo SDF_LED 0 > /proc/thecus_io
+      else
+        echo SD_LED 0 > /proc/thecus_io
+        echo SDF_LED 0 > /proc/thecus_io
+      fi
+  fi
+}
+
+turn_usbled(){
+  local act="$1"
+  local dev_id="$2"
+  local usb_scsi=""
+  local usb_count=""
+  local is_sd=""
+
+  usb_scsi=`awk '/Intf:USB/{print $3}' /proc/scsi/scsi | awk -F":" '{print $2}'`
+  for usb in $usb_scsi
+  do
+    is_sd=`echo " ${sd_dev} " | grep " ${usb} "`
+    if [ "${is_sd}" == "" ]; then
+        usb_count_tmp=`mount | grep -c "^/dev/${usb}[0-9]* "`
+        usb_count=$((usb_count+$usb_count_tmp))
+    fi
+  done
+
+  if [ $usb_count -ge 1 ];then
+    echo U_LED 1 > /proc/thecus_io
+    echo UF_LED 0 > /proc/thecus_io
+  else
+    echo U_LED 0 > /proc/thecus_io
+    echo UF_LED 0 > /proc/thecus_io
+  fi
+}
+
+add_ext(){
+  raid=`ls /raid/ |grep "data"`
+  if [ "$raid" != "" ];then
+    case "$ext_type"
+    in
+    usb)
+      #usb part
+      for delay in 1 2 3 4 5
+      do
+        usb_list=`cat /proc/scsi/scsi | grep "Intf:USB" | cut -d":" -f3 | cut -d" " -f1`
+        for i in $usb_list
+        do
+          [ $i -eq 0 ] && continue
+          f1=`cat /proc/scsi/scsi | grep "Tray:$i Disk:" | cut -d":" -f4 | cut -d" " -f1`
+          partition=`cat /proc/partitions | awk '/ '${f1}'\$/{FS=" ";print $4}'`
+          [ "$partition" = "" ] && continue
+
+          tmp="usb${i}"
+          checkmounted
+          if [ "$check" = "" ];then
+            tmp1=$f1
+            mounting
+            turn_usbled "on" "${tmp1}"
+            turn_sdled "on" "${tmp1}"
+          fi
+        done
+        [ "$flag" = "1" ] && break
+        sleep 3
+      done
+
+      # Try to mount Encrypt Raid.
+      if [ "${encrypt_raid}" -ge "1" ]; then
+        if [ `/bin/ps | grep "[e]ncr_mount" | wc -l` -ne 0 ]; then
+          return
+        fi
+        strExec="df |awk -F' ' '/\/$tmp$/{print (\$6)}'"
+        usb_data=`eval ${strExec}`
+        if [ "${usb_data}" != "" ];then
+          /usr/bin/encr_mount &
+        fi
+      fi
+      ;;
+    esata)
+      #esata part
+      [ -f /raid/sys/acl_esata ] || getfacl /raid/data/$folder > /raid/sys/acl_esata
+      for i in $esata_list
+      do
+        tray_id=`cat /proc/scsi/scsi |awk "/Disk:${i} /{print \\\$2}" | cut -d":" -f2`
+
+        tmp="esata"`expr ${tray_id} - ${esata_tray} + 1`
+        checkmounted
+        if [ "$check" = "" ];then
+          tmp1=$i
+          mounting
+        fi
+      done
+      ;;
+    esac
+  fi
+  
+}
+
+realunmount(){
+    hold_folder=`mount | grep "$folder/${k}" | cut -d" " -f3`
+    for m_folder in $hold_folder
+    do
+        hold_pid=`/sbin/fuser -m ${m_folder}`
+        for pid in $hold_pid
+        do  
+            towner=`ps | grep "${pid} " | grep -v grep | awk '{print $2}'`
+            tsamba=`ps | grep "${pid} " | egrep "(smbd|nmbd|winbindd)" | grep -v egrep`
+            #Samba root process can't be kill.
+            
+            if [ "${towner}" == "root" ] && [ "${tsamba}" != "" ]; then
+                continue
+            else
+                kill -9 $pid
+            fi
+        done
+  done
+
+  cmdstr1=`${char_handle} "awk" "/usr/bin/ntfs-3g"`
+  cmdstr2=`${char_handle} "awk" "/raid/data/$folder/${k}/"`
+  awkstr="ps www | awk '/ ${cmdstr1} /&&/ ${cmdstr2}/{print \$1}'"
+  ntfs3g_pid=`eval "${awkstr}"`
+  if [ "$ntfs3g_pid" != "" ]; then
+    kill -9 $ntfs3g_pid
+  fi
+
+  if [ "${xbmc_exist}" != "" ];then
+      /bin/umount -l -f /opt/XBMC/raid/data/$folder/${k}/*
+      /bin/umount -l -f /opt/XBMC/raid/data/$folder/${k} 
+      $rmdir /opt/XBMC/raid/data/$folder/${k}/*
+      $rmdir /opt/XBMC/raid/data/$folder/${k}
+  fi
+
+  /bin/umount -l -f /raid/data/$folder/${k}/*
+  /bin/umount -l -f /raid/data/$folder/${k}
+  $rmdir /raid/data/$folder/${k}/*
+  cd /raid/data/$folder/
+  $rmdir ${k}
+}
+
+remove_ext(){
+  unmount=`mount |grep "$folder/$ext_type" |cut -d" " -f3 |cut -d"/" -f5`
+  for k in $unmount
+  do
+    tmp2=`mount |egrep "(/data/$folder/$k/|/data/$folder/$k )" |cut -d" " -f1 |cut -d"/" -f3`
+    [ "$tmp2" = "" ] && continue
+    checkremove
+    if [ "$check" = "" ];then
+      realunmount
+      if [ "$ext_type" = "usb" ];then
+        /bin/rm -fr /var/run/usb/$tmp2
+        turn_usbled "off" "${tmp1}"
+        tmp1=`echo "${tmp2}" | sed 's/[0-9]//g'`
+        turn_sdled "off" "${tmp1}"
+      fi
+      if [ "$ext_type" = "esata" ];then
+        if [ `mount|grep '/raid/data/$folder'|wc -l` = "0" ];then
+          [ -f /raid/sys/acl_esata ] && setfacl --set-file=/raid/sys/acl_esata /raid/data/$folder
+        fi
+      fi
+    fi
+  done
+}
+
+#################################################
+##  Main code
+#################################################
+
+case "$2"
+in
+usb)
+  ext_type="usb"
+  folder="USBHDD"
+  ;;
+esata)
+  ext_type="esata"
+  folder="eSATAHDD"
+  ;;
+*)
+  echo "Usage: $0 {add|remove usb|esata}"
+  exit
+  ;;
+esac
+
+case "$1"
+in
+add)
+  add_ext
+  /img/bin/dataguard/realtime.sh hotplugadd
+  ;;
+remove)
+  remove_ext
+  /img/bin/dataguard/realtime.sh hotplugremove
+  ;;
+*)
+  echo "Usage: $0 {add|remove usb|esata}"
+  exit
+  ;;
+esac

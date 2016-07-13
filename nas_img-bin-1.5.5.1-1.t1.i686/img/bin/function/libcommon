@@ -1,0 +1,33 @@
+#!/bin/sh
+SQLITE="/usr/bin/sqlite"
+conf_db="/etc/cfg/conf.db"
+
+function BEEP(){
+    beep_sec=$1
+    
+    notif_beep=`${SQLITE} ${conf_db} "select v from conf where k='notif_beep'"`
+    if [ "${notif_beep}" != "1" ];then
+        echo "Beep disabled"
+        return
+    fi
+
+    if [ "${beep_sec}" == "" ] || [ "${beep_sec}" -lt 1 ];then
+        beep_sec=3
+    fi 
+
+    echo "Buzzer 1" > /proc/thecus_io
+    sleep ${beep_sec}
+    echo "Buzzer 0" > /proc/thecus_io
+}
+
+critical_prog_wait(){
+    # Ensure the critical system process finishing completely since some
+    # particular process can't be terminated suddenly or will cause the
+    # system damaged.
+    local PROGS="yumex"
+    #If there is not only wait for one program
+    #please use "|" to seperate them, ex. "yumex|httpd"
+    while [ -n "`pgrep "${PROGS}"`" ];do
+        sleep 5
+    done
+}

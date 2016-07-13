@@ -1,0 +1,355 @@
+#!/bin/sh
+#
+#
+# License:      GNU General Public License (GPL)
+# Support:      linux-ha@lists.linux-ha.org
+# 
+# Raid1
+#      Description: Manages a software Raid1 device on a shared storage medium.
+#  Original Author: Eric Z. Ayers (eric.ayers@compgen.com)
+# Original Release: 25 Oct 2000
+#     RAID patches: http://people.redhat.com/mingo/raid-patches/
+# Word to the Wise: http://lwn.net/2000/0810/a/raid-faq.php3
+#  Sympathetic Ear: mailto:linux-raid@vger.kernel.org
+#
+# usage: $0 {start|stop|status|monitor|validate-all|usage|meta-data}
+#
+#
+# EXAMPLE config file /etc/raidtab.md0
+# This file must exist on both machines!
+#
+#  raiddev		    /dev/md0
+#  raid-level		    1
+#  nr-raid-disks	    2
+#  chunk-size		    64k
+#  persistent-superblock    1
+#  #nr-spare-disks	    0
+#    device	    /dev/sda1
+#    raid-disk     0
+#    device	    /dev/sdb1
+#    raid-disk     1
+#
+# EXAMPLE config file /etc/mdadm.conf (for more info:man mdadm.conf)
+#
+#  DEVICE /dev/sdb1 /dev/sdc1 
+#  ARRAY /dev/md0 UUID=4a865b55:ba27ef8d:29cd5701:6fb42799
+#######################################################################
+# Initialization:
+
+: ${OCF_FUNCTIONS_DIR=${OCF_ROOT}/resource.d/heartbeat}
+. ${OCF_FUNCTIONS_DIR}/.ocf-shellfuncs
+
+#######################################################################
+
+usage() {
+	cat <<-EOT
+	usage: $0 {start|stop|status|monitor|validate-all|usage|meta-data}
+	EOT
+}
+
+meta_data() {
+	cat <<END
+<?xml version="1.0"?>
+<!DOCTYPE resource-agent SYSTEM "ra-api-1.dtd">
+<resource-agent name="Raid1">
+<version>1.0</version>
+
+<longdesc lang="en">
+Resource script for RAID1. It manages a software Raid1 device on a shared 
+storage medium. 
+</longdesc>
+<shortdesc lang="en">Manages a software RAID1 device on shared storage</shortdesc>
+
+<parameters>
+<parameter name="raidconf" unique="0" required="1">
+<longdesc lang="en">
+The RAID configuration file. e.g. /etc/raidtab or /etc/mdadm.conf.
+</longdesc>
+<shortdesc lang="en">RAID config file</shortdesc>
+<content type="string" default="" />
+</parameter>
+
+<parameter name="raiddev" unique="0" required="1">
+<longdesc lang="en">
+The block device to use.
+</longdesc>
+<shortdesc lang="en">block device</shortdesc>
+<content type="string" default="" />
+</parameter>
+
+<parameter name="homehost" unique="0" required="0">
+<longdesc lang="en">
+The value for the homehost directive; this is an mdadm feature to
+protect RAIDs against being activated by accident. It is recommended to
+create RAIDs managed by the cluster with "homehost" set to a special
+value, so they are not accidentially auto-assembled by nodes not
+supposed to own them.
+</longdesc>
+<shortdesc lang="en">Homehost for mdadm</shortdesc>
+<content type="string" default="" />
+</parameter>
+</parameters>
+
+<actions>
+<action name="start" timeout="20s" />
+<action name="stop" timeout="20s" />
+<action name="status" depth="0" timeout="20s" interval="10" />
+<action name="monitor" depth="0" timeout="20s" interval="10" />
+<action name="validate-all" timeout="5" />
+<action name="meta-data" timeout="5" />
+</actions>
+</resource-agent>
+END
+}
+
+#
+# START: Start up the RAID device
+#
+raid1_start() {
+	raid1_monitor
+	rc=$?
+	if [ $rc -eq $OCF_SUCCESS ]; then
+		# md already online, nothing to do.
+		return $OCF_SUCCESS
+	fi
+	if [ $rc -ne $OCF_NOT_RUNNING ]; then
+		# If the array is in a broken state, this agent doesn't
+		# know how to repair that.
+		ocf_log err "$MDDEV in a broken state; cannot start (rc=$rc)"
+		return $OCF_ERR_GENERIC
+	fi
+
+	# Insert SCSI module
+	$MODPROBE scsi_hostadapter
+	if [ $? -ne 0 ] ; then
+	    ocf_log warn "Couldn't insert SCSI module."
+	fi
+
+	# Insert raid personality module
+	$MODPROBE raid1
+	if [ $? -ne 0 ] ; then
+	# It is not fatal, chance is that we have raid1 builtin...
+	    ocf_log warn "Couldn't insert RAID1 module"
+	fi
+	grep -q "^Personalities.*\[raid1\]" /proc/mdstat 2>/dev/null
+	if [ $? -ne 0 ] ; then
+	    ocf_log err "We don't have RAID1 support! Exiting"
+	    return $OCF_ERR_GENERIC
+	fi
+
+	if [ $HAVE_RAIDTOOLS = "true" ]; then
+	    # Run raidstart to start up the RAID array
+	    $RAIDSTART --configfile $RAIDCONF $MDDEV
+	else
+	    # Run mdadm
+	    $MDADM --assemble $MDDEV --config=$RAIDCONF $MDADM_HOMEHOST
+	fi
+
+	raid1_monitor
+	if [ $? -eq $OCF_SUCCESS ]; then
+	    return $OCF_SUCCESS
+	else
+	    ocf_log err "Couldn't start RAID for $MDDEV"
+	    return $OCF_ERR_GENERIC
+	fi
+}
+
+#
+# STOP: stop the RAID device
+#
+raid1_stop() {
+	# See if the MD device is already cleanly stopped:
+	raid1_monitor
+	if [ $? -eq $OCF_NOT_RUNNING ]; then
+		return $OCF_SUCCESS
+	fi
+
+	# Turn off raid
+	if [ $HAVE_RAIDTOOLS = "true" ]; then
+		$RAIDSTOP --configfile $RAIDCONF $MDDEV
+	else
+		ocf_log info "Stopping array $MDDEV"
+		$MDADM --stop $MDDEV --config=$RAIDCONF --wait-clean -W
+	fi
+	rc=$?
+
+	if [ $rc -ne 0 ]; then
+		ocf_log err "Couldn't stop RAID for $MDDEV (rc=$rc)"
+		if [ $HAVE_RAIDTOOLS != "true" ]; then
+			ocf_log info "Attempting to mark array $MDDEV readonly"
+			$MDADM --readonly $MDDEV --config=$RAIDCONF
+			rc=$?
+			if [ $rc -ne 0 ]; then
+				ocf_log err "Failed to set $MDDEV readonly (rc=$rc)"
+			fi
+		fi
+		return $OCF_ERR_GENERIC
+	fi
+
+	raid1_monitor
+	if [ $? -eq $OCF_NOT_RUNNING ]; then
+		return $OCF_SUCCESS
+	fi
+	
+	ocf_log err "RAID $MDDEV still active after stop command!"
+	return $OCF_ERR_GENERIC
+}
+
+#
+# monitor: a less noisy status
+#
+raid1_monitor() {
+	TRY_READD=0
+	# check if the md device exists first
+	if [ ! -b $MDDEV ]; then
+		ocf_log info "$MDDEV is not a block device"
+		return $OCF_NOT_RUNNING
+	fi
+	if ! grep -e "^$MD[ \t:]" /proc/mdstat >/dev/null ; then
+		ocf_log info "$MD not found in /proc/mdstat"
+		return $OCF_NOT_RUNNING
+	fi
+	if [ $HAVE_RAIDTOOLS != "true" ]; then
+		$MDADM --detail --test $MDDEV >/dev/null 2>&1 ; rc=$?
+		case $rc in
+		0)	;;
+		1)	ocf_log warn "$MDDEV has at least one failed device."
+			TRY_READD=1
+			;;
+		2)	ocf_log err "$MDDEV has failed."
+			return $OCF_ERR_GENERIC
+			;;
+		4)	ocf_log err "mdadm failed on $MDDEV."
+			return $OCF_ERR_GENERIC
+			;;
+		*)	ocf_log err "mdadm returned an unknown result ($rc)."
+			return $OCF_ERR_GENERIC
+			;;
+		esac
+	fi
+	if [ "$__OCF_ACTION" = "monitor" -a "$OCF_RESKEY_CRM_meta_interval" != 0 \
+		-a $TRY_READD -eq 1 -a $OCF_CHECK_LEVEL -gt 0 ]; then
+		ocf_log info "Attempting recovery sequence to re-add devices on $MDDEV:"
+		$MDADM $MDDEV --fail detached 
+		$MDADM $MDDEV --remove failed 
+		$MDADM $MDDEV --re-add missing
+		# TODO: At this stage, there's nothing to actually do
+		# here. Either this worked or it did not.
+	fi
+
+	if ! dd if=$MDDEV count=1 bs=512 of=/dev/null \
+	     iflag=direct >/dev/null 2>&1 ; then
+		ocf_log err "$MDDEV: I/O error on read"
+		return $OCF_ERR_GENERIC
+	fi
+
+	return $OCF_SUCCESS
+}
+
+#
+# STATUS: is the raid device online or offline?
+#
+raid1_status() {
+	# See if the MD device is online
+	raid1_monitor
+	rc=$?
+	if [ $rc -ne $OCF_SUCCESS ]; then
+	    echo "stopped"
+	else
+	    echo "running"
+	fi
+	return $rc
+}
+
+raid1_validate_all() {
+    return $OCF_SUCCESS
+}
+	
+
+if
+  ( [ $# -ne 1 ] )
+then
+  usage
+  exit $OCF_ERR_ARGS
+fi
+
+case "$1" in
+  meta-data)
+	meta_data
+	exit $OCF_SUCCESS
+	;;
+  usage) 
+	usage
+	exit $OCF_SUCCESS
+	;;
+  *)
+	;;
+esac
+
+RAIDCONF="$OCF_RESKEY_raidconf"
+MDDEV="$OCF_RESKEY_raiddev"
+
+if [ -z "$RAIDCONF" ] ; then
+	ocf_log err "Please set OCF_RESKEY_raidconf!"
+	exit $OCF_ERR_ARGS
+fi
+
+if [ ! -r "$RAIDCONF" ] ; then
+	ocf_log err "Configuration file [$RAIDCONF] does not exist, or can not be opend!"
+	exit $OCF_ERR_ARGS
+fi
+
+if [ -z "$MDDEV" ] ; then
+	ocf_log err "Please set OCF_RESKEY_raiddev to the Raid device you want to control!"
+	exit $OCF_ERR_ARGS
+fi
+
+if [ -e "$MDDEV" -a ! -b "$MDDEV" ] ; then
+	ocf_log err "$MDDEV is not a block device!"
+	exit $OCF_ERR_ARGS
+fi
+
+# strip off the /dev/ prefix to get the name of the MD device
+MD=`echo $MDDEV | sed -e 's/\/dev\///'`
+
+
+HAVE_RAIDTOOLS=false
+if have_binary $MDADM >/dev/null 2>&1 ; then
+  if [ -n "$OCF_RESKEY_homehost" ]; then
+  	MDADM_HOMEHOST="--homehost=${OCF_RESKEY_homehost}"
+  else
+  	MDADM_HOMEHOST=""
+  fi
+else
+  check_binary $RAIDSTART
+  HAVE_RAIDTOOLS=true
+fi
+
+# At this stage,
+# [ $HAVE_RAIDTOOLS = false ] <=> we have $MDADM,
+# otherwise we have raidtools (raidstart and raidstop)
+
+# Look for how we are called 
+case "$1" in
+  start)
+	raid1_start
+	;;
+  stop)
+	raid1_stop
+	;;
+  status) 
+	raid1_status
+	;;
+  monitor) 
+	raid1_monitor
+	;;
+  validate-all)
+	raid1_validate_all
+	;;
+  *)
+	usage
+	exit $OCF_ERR_UNIMPLEMENTED 
+	;;
+esac
+
+exit $?

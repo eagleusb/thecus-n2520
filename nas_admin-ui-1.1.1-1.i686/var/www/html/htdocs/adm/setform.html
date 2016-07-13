@@ -1,0 +1,109 @@
+<?
+require_once('../../function/conf/localconfig.php');
+require_once(INCLUDE_ROOT.'inittemplate.php');
+require_once(INCLUDE_ROOT.'session.php');
+require_once(INCLUDE_ROOT.'publicfun.php');
+require_once(INCLUDE_ROOT.'function.php');
+require_once(WEBCONFIG);
+
+    $debug=false; 
+    session_start();
+    header('Content-type: text/html;charset=utf-8');
+    //Leon 2005/03/25
+//    if(!$_SESSION['admin_auth']){
+    if(!$_SESSION['loginid']){
+		header('Location: /index.php');
+        exit;
+    }
+    get_sysconf();
+    // iap, 2005.1.19
+    /* Execute ( Task Runner)*/
+    $module=$_REQUEST['Module'];
+    $prefix=$_REQUEST['prefix'];
+    $prefixform=$_REQUEST['prefixform'];
+    //echo "prefix=$prefix <br>";
+    //echo "prefixform=$prefixform <br>";
+    
+    
+    
+    function dotask(){
+        /* pre-check is  the duty within Task Runner */
+       global $prefix,$prefixform,$module;
+        if($module==""){
+          $taskrunner="$prefix.html";
+        }else{
+          $taskrunner="/raid/data/module/${module}/www/${prefix}.html";
+          //support new module which is install in /opt
+          if (! is_file($taskrunner)){
+            $taskrunner="/opt/${module}/www/${prefix}.html";
+          }
+        }
+        /* Task Runner should return the following data */
+        return require($taskrunner);
+    }
+    list($errcode,$topic,$mesg,$buttons,$extra,$title)=dotask();
+    
+    /* response */
+    $formname=($prefixform!="")?$prefixform:$prefix;
+    /* successful execution should return a logical false value */
+    if (!$buttons){
+        $buttons=array('type'=>'OKOnly');
+	$buttons['links']=array("/adm/getform.html?name=$formname");
+    }
+
+//	require_once("../setlang/lang.html");
+//	$words = PageCode("common");
+   $words = $session->PageCode("global");
+
+    $success=$words["success"];
+    $failed=$words["failed"];
+
+    if (!$mesg){
+        $mesg=$topic;
+        if (is_array($errcode)){
+            $errcode=join($errcode,","); 
+        }
+        if ($errcode) $mesg="$mesg<hr>$errcode";
+    }
+    
+    if ($title=="") {
+    	if ($errcode==false){
+		 $title="$success";
+    	}
+    	else{
+    	    $title="$failed";
+    	}
+    }
+
+    $buttonType=$buttons['type'];
+    $links=$buttons['links'];
+    if ($errcode==false){
+        /* After work */
+        require('setconf.html');
+		shell_exec("/img/bin/makeRoaming.sh");
+    }
+
+    //Leon 2005/4/28
+    if($prefix=='allset'){
+      $title=$words["allset_title"];
+      shell_exec("/img/bin/rc/rc.upnpd restart > /dev/null 2>&1 &");
+    }
+    
+    if($prefix==notif){
+      $title=$words["sys_update"];
+    }
+    
+    if($prefix=="winad"){
+      $strExec="/img/bin/rc/rc.scanad boot";
+      shell_exec($strExec);
+    }
+    include_once("/var/www/html/inc/msgbox.inc.php");
+    $a=new msgBox($mesg,$buttonType,$title);
+    $a->makeLinks($links);
+    if ($extra) print $extra;
+    ?>
+	<html>
+	<head>
+	</head><body>
+	<?=$a->showMsg()?>
+	</body></html>

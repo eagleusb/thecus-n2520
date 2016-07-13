@@ -1,0 +1,209 @@
+<?
+session_start();
+require_once("HtmlHeader.html");
+require_once("GlobalVars.html");
+require_once("functions.html");
+
+?>
+<script language="javascript" src="/pub/isAccount.js"></script>
+<style type="text/css">
+<!--
+.style1 {font-size: 14px;
+	font-weight: bold;
+	color: #ffffFF;
+}
+.style4 {font-size: 10px}
+body,td,th {
+	font-family: Arial, Helvetica, sans-serif;
+	color: #ffffFF;
+}
+body {
+	margin-left: 0px;
+	margin-top: 0px;
+	margin-right: 0px;
+	margin-bottom: 0px;
+	color: #ffffFF;
+}
+-->
+</style>
+<!--<body background="/usr/gallery/img/frame_bg.gif" onload="if(enableClick()){newAlbum.confirm_modify.disabled=false;}";>-->
+<body bgcolor="#686868" text="#000000" leftmargin="0" topmargin="0" marginwidth="0" marginheight="0" onload="if(enableClick()){newAlbum.confirm_modify.disabled=false;}";>
+<form method=post name=newAlbum >
+<input type=hidden name="old_album_name" value="<?=Fix_post($_POST['target_album'])?>">
+<input type=hidden name="admin" value="">
+<?$cover = AlbumRoot . $_SESSION['username'] . "/" . Fix_post($_POST['target_album']);?>
+<table width="719px" border="0" cellspacing="0" cellpadding="0" align="center" class="outerpage">
+  <? require_once("HtmlBanner.html"); ?>
+  <tr>
+    <td align="center" valign="top">
+        <table width="95%"  border="0" cellpadding="0" cellspacing="0">
+          <tr>
+            <td width="70%" align="left"><span class="style1"><a href="album.html?id=<?=fix_encode($_SESSION['username'])?>" target="_self"><?=$words['my_gallery']?></a> &gt; <?=$words['modify_album']?> </span></td>
+            <td width="30%" align="right">
+              <table width="10%"  border="0" cellpadding="0" cellspacing="0">
+                <? AlbumMenu(); ?>
+              </table>
+            </td>
+          </tr>
+        </table>
+        <br>
+        <table width="60%"  border="1" cellpadding="5" cellspacing="0" bordercolor="#000000">
+          <tr align="center">
+            <td colspan="2" class="style1">
+              <table width="60%"  border="0" cellspacing="0" cellpadding="0">
+                <tr>
+                  <td align="center"><?=$words['modify_album']?></td>
+                </tr>
+                <tr>
+                  <td align="center">
+                    <table width="0%"  border="0" cellpadding="0" cellspacing="0">
+                      <tr>
+                        <td><img src="/usr/gallery/img/photo_frame_01.png" width="10" height="9"></td>
+                        <td><img src="/usr/gallery/img/photo_frame_02.png" width="100" height="9"></td>
+                        <td><img src="/usr/gallery/img/photo_frame_03.png" width="9" height="9"></td>
+                      </tr>
+                      <tr>
+                        <td background="/usr/gallery/img/photo_frame_04.png" ></td>
+                          <?$cover=AlbumRoot . $_SESSION['username'] . "/" .  $_POST['target_album'];?>
+                        <td bgcolor="#FFFFFF" align="center" width=100 height=100><?=GetCover($cover, $_POST['target_album'])?></td>
+                        <td background="/usr/gallery/img/photo_frame_06.png"></td>
+                      </tr>
+                      <tr>
+                        <td><img src="/usr/gallery/img/photo_frame_07.png" width="10" height="9"></td>
+                        <td><img src="/usr/gallery/img/photo_frame_08.png" width="100" height="9"></td>
+                        <td><img src="/usr/gallery/img/photo_frame_09.png" width="9" height="9"></td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          <tr>
+            <td width="50%" align="right" valign="top" class="style1"><?=str_replace("\\\\'","'",$words["subject_rest"])?></td>
+            <td align="left">
+              <input name="new_album_name" onkeyup="if(enableClick())newAlbum.confirm_modify.disabled=false; else newAlbum.confirm_modify.disabled=true;checklength(this,20);" type="text" size="25" maxlength="20" value="<?=Fix_post($_POST['target_album'])?>" >
+            </td>
+          </tr>
+          <tr>
+            <td align="right" valign="top" class="style1"><?=str_replace("\\'","'",$words["desp_rest"])?></td>
+            <td align="left">
+              <textarea size=30 name="newDesp"><?=GetDesp($cover,Fix_post($_POST['target_album']))?></textarea>
+            </td>
+          </tr>
+            <?$Album_Password=GetPassword($cover,Fix_post($_POST['target_album']))?>
+          <tr>
+            <td width="50%" align="right" valign="top" class="style1"><?=$words['passwd_rest']?></td>
+            <td align="left">
+              <input id="new_password" name="new_password" type="password" size="26" maxlength="20" value="<?=$Album_Password?>">
+            </td>
+          </tr>
+          <tr>
+            <td width="50%" align="right" valign="top" class="style1"><?=$gwords['pwd_confirm']?></td>
+            <td align="left">
+              <input id="new_password2" name="new_password2" type="password" size="26" maxlength="20" value="<?=$Album_Password?>">
+            </td>
+          </tr>
+          <tr align="center">
+            <td align="center"><input type="button" disabled name="confirm_modify" value="<?=$words['modify_album']?>" onclick=confirm_modify_click();></td>
+            <td align="center"><input type="button" name="cancel" value="<?=$words['cancel']?>" onclick=check_confirm_modify('');></td>
+          </tr>
+        </table>
+        <table width="60%"  border="0" cellspacing="0" cellpadding="0">
+          <tr>
+            <td>&nbsp;</td>
+          </tr>
+        </table>
+      </td>
+  </tr>
+  <? require_once("HtmlBottom.html"); ?>
+</table>
+</form>
+</body>
+</html>
+<script language="javascript" src="./js/isSingleByteChar.js"></script>
+<script language="javascript">
+    function isDirName(s){
+	var s = typeof(s.value)=='undefined' ? s : s.value;
+	for(var account=0;account<s.length;account++){
+	    var tmp_index = s.charCodeAt(account);
+	    if(tmp_index == 92 || tmp_index == 47 || tmp_index ==58 || tmp_index ==42 || tmp_index ==63|| tmp_index ==60|| tmp_index ==62|| tmp_index ==34|| tmp_index ==124)
+		return false;
+	}
+	return true;
+    }
+function enableClick(){
+  	 for(var i=0;i<document.newAlbum.new_album_name.value.length;i++){
+		if(document.newAlbum.new_album_name.value.charCodeAt(i)!=32)
+			return true;
+	}
+		return false;
+}
+
+function check(){
+	if(!isDirName(newAlbum.new_album_name)){
+		alert("<?=$words["AlbumNameError"];?>");
+		return false;
+	}
+return true;
+}
+function check_confirm_modify(ACT){
+	document.newAlbum.admin.value=ACT;
+	document.newAlbum.submit();
+}
+function LengthCheck(argv){
+	if(argv.value.length > 100){
+		alert("<?=$words['max_desp_size']?>");
+		return false;
+    	}
+return true;
+}
+function confirm_modify_click(){
+	if(!check())
+		return false;
+	if(!LengthCheck(newAlbum.newDesp))
+		return false;
+	checklength(document.newAlbum.new_album_name,20);
+
+        if(newAlbum.new_password2.value != newAlbum.new_password.value){
+                alert("<?=$words["pwd_diff"]?>");
+                return false;
+        }
+        if(!isSingleByteChar(newAlbum.new_password.value)){
+                alert("<?=$words["pwd_double_bytes"]?>");
+                return false;
+        }
+	if ((newAlbum.new_password.value.length>0)&&(newAlbum.new_password.value.length<4)){
+		alert("<?=$words["pwd_too_short"]?>");
+		return false;
+	}
+	check_confirm_modify('confirm_modify');
+		return true;
+}
+function checklength(key,len){
+	var sharename=key.value;
+	var sharename_length = 0;
+	var count = 0;
+    for(var i=0;i<sharename.length;i++){
+        if(sharename.charCodeAt(i)  > 255){
+           sharename_length += 2;
+		count++;
+		if(sharename_length>len)
+		key.value=sharename.substr(0,key.value.length-1);
+ 	}
+        else
+	{
+            sharename_length ++;
+		count++;
+		if(sharename_length>len)
+		key.value=sharename.substr(0,key.value.length-1);
+	}
+    }
+    if(sharename_length >= len){
+        key.maxLength = count;
+	return false;
+    }else
+	key.maxLength = len;
+	return true;
+}
+</script>

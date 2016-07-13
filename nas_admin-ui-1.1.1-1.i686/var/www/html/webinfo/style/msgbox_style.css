@@ -1,0 +1,32 @@
+.msg{
+	background: ActiveBorder;	
+	padding: 6px;
+	border: outset thin;
+	font-family: Verdana, Geneva, Arial, Helvetica, sans-serif;
+	font-size: x-small;
+}
+
+.msgButton{
+	background: ButtonFace;
+	color: ButtonText;
+	padding: 4px;
+	text-decoration: none;
+	border: groove thin;
+	font-size: 16pt;
+}
+
+.msgTitle{
+	background: ActiveCaption;
+	color: HighlightText;		
+}
+
+.msglinks{
+	text-decoration: none;
+	color: ButtonText;
+}
+
+.msgIcon{
+	font-family: Webdings;
+	font-weight: bolder;
+	font-size: xx-large;
+}

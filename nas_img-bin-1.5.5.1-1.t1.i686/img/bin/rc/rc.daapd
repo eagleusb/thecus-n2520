@@ -1,0 +1,100 @@
+#!/bin/sh
+conf_file="/var/run/mt-daapd.conf"
+sqlite="/usr/bin/sqlite"
+confdb="/etc/cfg/conf.db"
+web_root="/var/www/daapdweb"
+
+sqlcmd="select v from conf where k='ha_enable'"
+ha_enable=`${sqlite} ${confdb} "${sqlcmd}"`
+
+if [ ! -d ${web_root} ];then
+  mkdir ${web_root}
+  chmod 755 ${web_root}
+fi
+
+#################################################
+##       Check Raid Mount First
+#################################################
+check_raid(){
+  sys_path=`/bin/ls -l /raid/sys | awk -F' ' '{printf $11}'`
+  data_path=`/bin/ls -l /raid/data | awk -F' ' '{printf $11}'`
+  if [ "$sys_path" == "" ] || [ "$data_path" == "" ];then
+    echo "Your Master RAID link is not exist"
+    exit
+  fi
+}
+  
+start_service() {
+	check_raid
+
+	if [ "$ha_enable" = "1" ];then
+		servername=`/usr/bin/sqlite /etc/cfg/conf.db "select v from conf where k='ha_virtual_name'"`
+	else
+		servername=`/usr/bin/sqlite /etc/cfg/conf.db "select v from conf where k='iTune_servername'"`
+	fi
+	passwd=`/usr/bin/sqlite /etc/cfg/conf.db "select v from conf where k='iTune_passwd'"`
+	rescan_interval=`/usr/bin/sqlite /etc/cfg/conf.db "select v from conf where k='iTune_rescan_interval'"`
+	encode=`/usr/bin/sqlite /etc/cfg/conf.db "select v from conf where k='iTune_encode'"`
+
+#	rm -f /raid/sys/songs3.db
+	echo "[general]" > ${conf_file}
+	echo "db_type = sqlite3" >> ${conf_file}
+	echo "port = 3689" >> ${conf_file}
+	echo "web_root = ${web_root}" >> ${conf_file}
+	echo "servername = ${servername}" >> ${conf_file}
+	echo "password = ${passwd}" >> ${conf_file}
+	echo "db_parms = /raid/sys" >> ${conf_file}
+	echo "mp3_dir = /raid/data/_NAS_Media" >> ${conf_file}
+	echo "admin_pw = mt-daapd" >> ${conf_file}
+	echo "rescan_interval = ${rescan_interval}" >> ${conf_file}
+	echo "text_encode = ${encode}" >> ${conf_file}
+	echo "extensions = .mp3,.m4a,.m4p,.wav,.aif,.aifc,.aiff,.ogg,.flac" >> ${conf_file}
+	echo "runas = root" >> ${conf_file}
+	echo "ssc_codectypes = ogg,flac,alac" >> ${conf_file}
+	echo "ssc_prog = /usr/bin/mt-daapd-ssc.sh" >> ${conf_file}
+	echo "[plugins]" >> ${conf_file}
+	echo "plugin_dir = /usr/lib/mt-daapd/plugins" >> ${conf_file}
+	echo "[scanning]" >> ${conf_file}
+	echo "process_playlists = 1" >> ${conf_file}
+	echo "process_itunes = 1" >> ${conf_file}
+	echo "process_m3u = 1" >> ${conf_file}
+	sync
+	sleep 3
+	/usr/sbin/mt-daapd -c ${conf_file} > /dev/null 2>&1 & 
+}
+
+stop_service() {
+	killall mt-daapd
+	rm -f /raid/sys/songs3.db
+}
+
+bootup_service(){
+	able=`/usr/bin/sqlite /etc/cfg/conf.db "select v from conf where k='iTune_iTune'"`
+	if [ ${able} -eq 1 ]; then
+		start_service
+	else
+		stop_service
+	fi
+}
+
+case "$1"
+in
+	start)
+		stop_service
+		start_service
+		;;
+	stop)
+		stop_service
+		;;
+	restart)
+		stop_service
+		start_service
+		;;
+	boot)
+		bootup_service
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart|boot}"
+		;;
+esac
+

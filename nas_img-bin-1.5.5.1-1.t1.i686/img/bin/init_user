@@ -1,0 +1,84 @@
+#!/bin/sh
+adduser="/usr/sbin/adduser"
+mkpasswd="/usr/bin/passwd"
+smbpwd="/usr/bin/smbpasswd"
+slash="/usr/bin/specstr_handle"
+now_uid="1000"
+pwd="/etc/passwd"
+group="/etc/group"
+gid="100"
+tmp_path="/var/tmp/www"
+tmp_pwd_file="${tmp_path}/pwd"
+md_num=""
+flag="${tmp_path}/init_user.lock"
+init_file="${tmp_path}/init_info"
+
+. ${init_file}
+
+if [ -e "$flag" ];then
+  exit
+fi
+
+#################################
+#  function : add_user
+#  para : user_name -> user name
+#       : user_pwd -> user password
+#  desp : add user
+#################################
+function add_user(){
+  ret=0
+
+  slash_user_pwd=`$slash "common" "$user_pwd"`
+  slash_user_name=`$slash "awk" "$user_name"`
+
+  #### get gid ####
+  while [ true ];
+  do
+    str="awk -F':' '/:${now_uid}:/{if(\$3==\"${now_uid}\") print \$3}' ${pwd}"
+    uid_is_exist=`eval $str`
+  
+    if [ "${uid_is_exist}" == "" ];then
+      userid=${now_uid} 
+      break
+    fi
+  
+    now_uid=$(($now_uid+1))
+  done
+
+  #### add user ####
+  ${adduser} -D -u ${userid} -G users -s /dev/null -h /dev/null -H -g "$user_name" "$user_name"
+
+  #### set password ####
+  str="${mkpasswd} '$slash_user_name' '$slash_user_pwd'"
+  eval "${str}"
+
+}
+
+#################################
+#  function : add_samba_user
+#  para : user_name -> user name
+#       : user_pwd -> user password
+#  desp : add samba user
+#################################
+function add_samba_user(){
+  ### add user in samba ###
+  echo -e "${user_pwd}\n${user_pwd}" > ${tmp_pwd_file}
+  $smbpwd -s -a "${user_name}" < ${tmp_pwd_file}
+  rm -rf ${tmp_pwd_file}
+}
+
+##########  Main  ##################
+  slash_user_name=`$slash "awk" "$user_name"`
+  str="awk '/^${slash_user_name}:/{print \$1}' /etc/passwd"
+  user_exist=`eval "$str"`
+  if [ "${user_exist}" == "" ];then
+    add_user 
+    add_samba_user 
+
+    /img/bin/logevent/event 997 104 info "" "${user_name}" 
+  else
+    /img/bin/logevent/event 997 657 error "" "${user_name}" 
+  fi
+
+  rm -rf $flag
+  rm -rf ${init_file}

@@ -1,0 +1,9 @@
+#!/bin/sh
+mkdir /raid0/data/NAS_Public/
+chmod 777 /raid0/data/NAS_Public/
+chown admin:admin /raid0/data/NAS_Public
+sqlite /raid/sys/smb.db "insert into smb_userfd('share','comment','browseable','guest only','path','map hidden','recursive') values ('NAS_Public','Default share folder','yes','yes','/raid0/data/NAS_Public','yes','yes')"
+setfacl -d -m u::rwx /raid0/data/NAS_Public/
+setfacl -d -m g::rwx /raid0/data/NAS_Public/
+setfacl -d -m o::rwx /raid0/data/NAS_Public/
+ln -sf /raid0/data/NAS_Public/ /raid0/data/ftproot

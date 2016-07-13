@@ -1,0 +1,154 @@
+#!/bin/sh
+sqlite=/usr/bin/sqlite
+confdb=/etc/cfg/conf.db
+thecus_io=/proc/thecus_io
+PIC_MSG=/img/bin/pic.sh
+PIC16C=`/img/bin/check_service.sh pic16c`
+PIC24LCM=`/img/bin/check_service.sh pic24lcm`
+ISCSI_LIMIT=`/img/bin/check_service.sh iscsi_limit`
+
+[ "`/img/bin/check_service.sh cpu_fan1`" == "0" \
+  -a "`/img/bin/check_service.sh sys_fan1`" == "0" \
+  -a "`/img/bin/check_service.sh sys_fan2`" == "0" ] && fan=0
+[ "`/img/bin/check_service.sh cup_temp1`" == "0" \
+  -a "`/img/bin/check_service.sh sys_temp`" == "0" ] && temp=0
+drive_thecus_io() {
+        echo "$1" > ${thecus_io}
+}
+
+## get notif sqlite settings
+get_notif_setting() {
+        ## mail, beep
+        if [ "$1" != "" ]
+        then
+                field=notif_"${1}"
+                sqlcmd="select v from conf where k='${field}'"
+                ${sqlite} ${confdb} "${sqlcmd}"
+        fi
+}
+
+## turn buzzer on
+buzzer_on() {
+        setting=`get_notif_setting beep`
+        if [ ${setting} -eq 1 ]
+        then
+                cmd="Buzzer 1"
+                drive_thecus_io "${cmd}"
+        fi
+}
+
+## turn buzzer off
+buzzer_off() {
+        cmd="Buzzer 0"
+        drive_thecus_io "${cmd}"
+}
+
+while_secs=60	## time for each loop sleep time
+
+lcm_display() {
+	if [ "${PIC16C}" = "0" ] && [ "${PIC24LCM}" = "0" ] ;then
+		return
+	fi
+	hostname=`hostname`
+	#wan_ip=$(ifconfig eth0 | grep "addr:" | sed -e 's/^.*addr://' | cut -d" " -f1)
+	wan_ip=`/img/bin/function/get_interface_info.sh get_ip eth0`
+	bpppoe=$(ifconfig | grep ppp0 | wc -l)
+	if [ ${bpppoe} -eq 1 ]; then
+		wan_ip=$(ifconfig ppp0 | grep "addr:" | sed -e 's/^.*addr://' | cut -d" " -f1)
+	fi
+	#lan_ip=$(ifconfig eth1 | grep "addr:" | sed -e 's/^.*addr://' | cut -d" " -f1)
+	lan_ip=`/img/bin/function/get_interface_info.sh get_ip eth1`
+	timestamp=`date "+%Y/%m/%d %H:%M:%S"`
+	uptime=`uptime | sed "s/.*up *//g" | sed "s/, load .*//g"`
+	if [ "`/img/bin/check_env.sh -r hwm`" == "exist" ];then
+		[ ! "$fan" == "0" ] && \
+			rpm1=$(cat /proc/hwm | grep "FAN 1 RPM:" | sed -e 's/^.*RPM: //' | cut -d" " -f1) && \
+			drive_thecus_io "LCM_FAN ${rpm1} RPM"
+		[ ! "$temp" == "0" ] && \
+			temp1=$(cat /proc/hwm | grep "Temp 1:" | sed -e 's/^.*Temp 1: //' | cut -d" " -f1) && \
+			drive_thecus_io "LCM_TEMP ${temp1}"
+	fi
+
+	drive_thecus_io "LCM_HOSTNAME ${hostname}"
+	drive_thecus_io "LCM_WANIP ${wan_ip}"
+	drive_thecus_io "LCM_LANIP ${lan_ip}"
+	drive_thecus_io "LCM_DATE ${timestamp}"
+	drive_thecus_io "LCM_UPTIME ${uptime}"
+
+}
+
+FAN_FAIL=0
+fan_check() {
+	[ ! "`/img/bin/check_env.sh -r hwm`" == "exist" ] && return
+	rpm1=$(cat /proc/hwm | grep "FAN 1 RPM:" | sed -e 's/^.*RPM: //' | cut -d" " -f1)
+	temp1=$(cat /proc/hwm | grep "Temp 1:" | sed -e 's/^.*Temp 1: //' | cut -d" " -f1)
+	if [ ${temp1} -ge 30 ] && [ ${rpm1} -le 500 ]; then
+		if [ ${FAN_FAIL} -eq 0 ]; then
+			buzzer_on
+			${PIC_MSG} LCM_MSG "Fan_Status" "Fail"
+			/img/bin/logevent/event 308
+			/img/bin/logevent/event 216
+		fi
+		FAN_FAIL=1
+	else
+		FAN_FAIL=0
+	fi
+}
+
+event_triger="/img/bin/logevent/event"
+warn_led=0
+raid_full() {
+  md_list=`awk -F ':' '/^md[0-9] /||/^md6[0-9]/{print substr($1,3)}'  /proc/mdstat|sort -u`
+  for md in $md_list
+  do
+    if [ "${raid_full_flag[$md]}" == "" ];then
+      raid_full_flag[$md]=0
+    fi
+    
+    raid_used=`df | grep "md${md}" | awk '{if ($6=="'/raid${md}'") printf "%d",$5}'`
+   iscsi_used=0
+   if [ $ISCSI_LIMIT -gt 0 ];then 
+    iscsi_size=`$sqlite /raid${md}/sys/smb.db "select sum(percent) as total from lun"`
+    if [ "${iscsi_size}" == "0" ] || [ "${iscsi_size}" == "" ];then
+      iscsi_used=0
+    else
+      raid_size=`df -m | grep "md${md}" | awk '{if ($6=="'/raid${md}'") printf "%d",$2}'`
+      iscsi_size=$(($iscsi_size*1024*100))
+      iscsi_used=$(($iscsi_size/$raid_size))
+    fi
+   fi
+    
+    if [ -n "${raid_used}" ]; then
+      if [ ${raid_used} -ge 90 ] && [ ${iscsi_used} -lt 90 ]; then
+        if [ ${raid_full_flag[$md]} -eq 0 ]; then
+          warn_led=$(($warn_led+1))
+          echo "Busy 2" > /proc/thecus_io
+          raid_full_flag[$md]=1
+          
+          raid_name=`$sqlite /raid${md}/sys/smb.db "select v from conf where k='raid_name'"`
+          ${event_triger} 210 "${raid_name}" &
+          ${event_triger} 317 "${raid_name}" &
+        fi
+      else
+        if [ ${raid_full_flag[$md]} -eq 1 ]; then
+          raid_full_flag[$md]=0
+          warn_led=$(($warn_led-1))
+          
+          if [ ${warn_led} == "0" ];then
+            echo "Busy 0" > /proc/thecus_io
+          fi
+        fi
+      fi
+    fi
+  done
+}
+
+while true
+do
+    cat /proc/meminfo | grep "^MemTotal\|^Cached" | sed -e 's/[a-zA-Z: ]*//g' | tr '\n' ' ' | awk '{total=$1; cache=$2; if (cache/total > 0.5) system("echo 3 > /proc/sys/vm/drop_caches");}'
+	lcm_display
+	#fan_check
+	raid_full
+	sleep ${while_secs}
+done &
+

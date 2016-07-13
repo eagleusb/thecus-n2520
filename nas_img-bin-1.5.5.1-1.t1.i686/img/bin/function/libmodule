@@ -1,0 +1,265 @@
+#!/bin/sh
+M_module_path="/raid/data/module"
+M_sqlite="/usr/bin/sqlite"
+M_module_db="${M_module_path}/cfg/module.db"
+M_tmp_path="/var/tmp/tmp_module"
+M_lock_flag="${M_tmp_path}/module.lock"
+M_tmp_data="/raid/data/tmp"
+M_tmp_module="${M_tmp_data}/module"
+M_tmp_log_file="${M_tmp_path}/tmp_module_log.txt"
+M_event="/img/bin/logevent/event"
+#M_tmp_db="/raid/data/tmp/module.db"
+M_module_item="/tmp/module_item"
+M_tmp_error_msg="/tmp/enable_error"
+M_tmp_backup="${M_tmp_data}/tmp_backup"
+M_tmp_db="${M_tmp_backup}/module.db"
+
+#################################################
+##       Set log msg
+##       param: M_msg_file: log file path
+##              M_fun: function name
+##              M_val: wording value
+##              M_param1:
+#################################################
+set_word(){
+  M_msg_file=$1
+  M_fun=$2
+  M_val=$3
+  M_param1=$4
+  M_param2=$5
+  M_param3=$6
+  
+  if [ "${M_val}" != "module_name_msg" ] && [ "${M_val}" != "module_version_msg" ] && [ "${M_val}" != "download_mod" ];then
+    M_time_stamp=`date +'%Y/%m/%d %H:%M:%S'`
+    M_time_stamp="${M_time_stamp}: "
+  else
+    M_time_stamp=""
+  fi
+
+  type=`${M_sqlite} /etc/cfg/conf.db "select v from conf where k='admin_lang'"`
+  word=`${M_sqlite} /var/www/html/language/language.db "select msg from ${type} where function='${M_fun}' and value='${M_val}'"`
+
+  if [ "${M_param1}" == "" ];then
+    echo "${M_time_stamp}${word}" >> ${M_msg_file}
+  elif [ "${M_param3}" != "" ];then
+      printf "${M_time_stamp}${word}\n" "$M_param1" "$M_param2" "$M_param3" >> ${M_msg_file}
+  elif [ "${M_param2}" != "" ];then
+      printf "${M_time_stamp}${word}\n" "$M_param1" "$M_param2" >> ${M_msg_file}
+  else
+      printf "${M_time_stamp}${word}\n" "$M_param1" >> ${M_msg_file}
+  fi  
+}
+
+
+#################################################
+##       insert module record
+##       param:   M_mod_name : module name
+##                module_db : module db
+#################################################
+insert_db(){
+  M_mod_name=$1
+  module_db=$2  
+  mod_version=`${M_sqlite} ${module_db} "select object from mod where module = '${M_mod_name}' and predicate='Version'"`
+  mod_description=`${M_sqlite} ${module_db} "select object from mod where module = '${M_mod_name}' and predicate='Description'"`
+  mod_update_url=`${M_sqlite} ${module_db} "select object from mod where module = '${M_mod_name}' and predicate='UpdateUrl'"`
+  mod_icon=`${M_sqlite} ${module_db} "select object from mod where module='${M_mod_name}' and predicate='Icon'"`
+  mod_mode=`${M_sqlite} ${module_db} "select object from mod where module='${M_mod_name}' and predicate='Mode'"`
+  mod_homepage=`${M_sqlite} ${module_db} "select object from mod where module='${M_mod_name}' and predicate='HomePage'"`
+  mod_ui=`${M_sqlite} ${module_db} "select object from mod where module='${M_mod_name}' and predicate='UI'"`
+  mod_reboot=`${M_sqlite} ${module_db} "select object from mod where module='${M_mod_name}' and predicate='Reboot'"`
+  ${M_sqlite} ${module_db} "insert into module (name,version,description,enable,updateurl,icon,mode,homepage,ui) values ('${M_mod_name}','${mod_version}','${mod_description}','No','${mod_update_url}','${mod_icon}','${mod_mode}','${mod_homepage}','${mod_ui}')"
+}
+
+#################################################
+##       restore and recover orginal module and db
+##       param:   M_mod : module name
+#################################################
+recover_mod(){
+  M_mod=$1
+  rm -r "${M_module_db}"
+  mv "${M_tmp_db}" "${M_module_db}"
+
+  #rm -rf "${M_module_path}/${M_mod}"
+  #if [ -e "${M_tmp_data}/${M_mod}" ];then
+  #  mv "${M_tmp_data}/${M_mod}" "${M_module_path}/${M_mod}"
+  #fi
+}
+
+#################################################
+##       backup module data before install or upgrade
+##       param:   Mod : module name
+##                type : auto_mdoule or not
+#################################################
+backup_module(){
+  ret=0
+  Mod=$1
+  type=$2
+  
+  if [ ! -e "${M_tmp_backup}" ];then
+     mkdir -p "${M_tmp_backup}"
+  fi
+
+  if [ "${type}" == "auto_module" ];then
+      cp "${M_module_db}" "${M_tmp_db}"
+  fi
+
+  if [ -e "${M_module_path}/${Mod}" ];then
+    if [ ! -e "${M_tmp_backup}/${Mod}" ];then
+      mkdir -p "${M_tmp_backup}/${Mod}"
+    fi
+    cp -rd "${M_module_path}/${Mod}/sys" "${M_tmp_backup}/${Mod}"
+    ret=1
+  fi
+  echo ${ret}
+}
+
+#################################################
+##       delete temp file 
+##       param:   Mod : module name
+#################################################
+del_tmp_file(){
+  Mod=$1
+  if [ -e "${M_tmp_module}" ];then
+    rm -rf "${M_tmp_module}" 
+  fi
+  if [ -e "${M_tmp_data}/module.tgz" ];then
+    rm -f "${M_tmp_data}/module.tgz"
+  fi
+  if [ -e "${M_tmp_data}/module.app" ];then
+    rm -f "${M_tmp_data}/module.app"
+  fi
+  if [ -e "${M_tmp_db}" ];then
+    rm -f ${M_tmp_db}
+  fi
+  if [ "${Mod}" != "" ] && [ -e "${M_tmp_backup}/${Mod}" ];then
+    rm -rf ${M_tmp_backup}/${Mod}
+  fi
+  rm -f "${M_lock_flag}"
+}
+
+#################################################
+##       set before install/upgrade action or msg
+##       param: act : install or upgrade  
+##              Mod : module name
+#################################################
+set_install_act(){
+  act=$1
+  Mod=$2
+
+  enable=`${M_sqlite} ${M_tmp_db} "select enable from module where name='${Mod}'"`
+  if [ "${enable}" == "Yes" ];then
+    ${M_module_path}/cfg/module.rc/"${Mod}.rc" stop
+    ${M_sqlite} ${M_tmp_db} "update module set enable = 'No' where name='${Mod}'"
+  fi
+  
+  if [ "${act}" == "install" ];then
+      M_success_code=445
+      M_fail_code=659
+      M_fail_msg="install_fail"
+      M_success_msg="install_success"
+      M_start_word="install_start"
+      #if [ -e "${M_module_path}/${Mod}" ];then
+      #  rm -rf "${M_module_path}/${Mod}"
+      #fi
+  else      
+      M_success_code=446
+      M_fail_code=660
+      M_fail_msg="upgrade_fail"
+      M_success_msg="upgrade_success"
+      M_start_word="upgrade_start"
+  fi
+
+}
+
+#################################################
+##       execute install
+##       param: install_type : install or upgrade  
+##              Mod : module name
+#################################################
+execute_install(){
+  Mod=$1
+  install_type=$2
+  name=`${M_sqlite} ${M_module_db} "select object from mod where module = '${Mod}' and predicate = 'Name'"`  
+
+  if [ "${install_type}" == "install" ];then
+    ret=`sh ./Shell/install.sh | tail -1`
+  else
+    ret=`sh ./Shell/upgrade.sh | tail -1`
+  fi
+  
+  if [ "${ret}" == "pass" ];then
+      mod_reboot=`${M_sqlite} ${M_module_db} "select object from mod where module='${Mod}' and predicate='Reboot'"`
+      if [ "${mod_reboot}" == "Yes" ];then
+         touch "${M_module_path}/${Mod}/reboot.lock";
+      fi
+      set_word "${M_tmp_log_file}" "module" "${M_success_msg}"
+      ${M_event} 997 "${M_success_code}" info email "${name}"
+  else
+      recover_mod "${Mod}"
+      set_word "${M_tmp_log_file}" "module" "${M_fail_msg}"
+      ${M_event} 997 "${M_fail_code}" error email "${name}"
+  fi
+  
+  cp "${M_tmp_log_file}" "${M_module_path}/${Mod}/log.txt"
+
+  echo "${ret}"
+}
+
+function set_module_to_dataraid() {
+##
+ # Checking rootfs whether exists on eMMC
+ ##
+  if [ -n "`grep mmcblk0p4 /proc/mdstat`" ]; then
+#
+ # Using the directory /raid/data/NAS_Modules to place those modules under /opt originally.
+ ##
+    mkdir -p /$raid_name/data/NAS_Modules
+##
+ # Preserving these directories and files once raid destroyed.
+ # So, keeping necessary directories and files of /opt_emmc on eMMC and only creating symbolic links.
+ ##
+    ln -sf /opt_emmc/* /$raid_name/data/NAS_Modules
+##
+ # Redirecting /opt from /opt_emmc to /raid.
+ ##
+    unlink /opt
+    ln -sf /$raid_name/data/NAS_Modules /opt
+##
+ # Creating symbolic link /var/cache/yum to data RAID.
+ # Yum creates /var/cache/yum automatically if the directory does not exist.
+ # So I delete original cache files.
+ ##
+    rm /var/cache/yum -rf
+    mkdir -p /$raid_name/yum
+    ln -sf /$raid_name/yum /var/cache/yum
+  fi
+}
+
+function reset_module_to_rootfs() {
+##
+ # Checking rootfs whether exists on eMMC
+ ##
+  if [ -n "`grep mmcblk0p4 /proc/mdstat`" ]; then
+##
+ # Those installed modules via NasApp (yum install, according to pkg.repo) should be removed.
+ ##
+    remove_installed_module_from_dataraid
+##
+ # Redirecting /opt back to /opt_emmc when raid destroyed.
+ ##
+    unlink /opt
+    ln -sf /opt_emmc /opt
+##
+ # Removing symbolic link when data RAID destoryed.
+ ##
+    unlink /var/cache/yum
+  fi
+}
+
+function remove_installed_module_from_dataraid() {
+  ls /opt | while read line; do
+    if [ ! -L "$line" ]; then
+      yum groupremove -y $line
+    fi
+  done
+}

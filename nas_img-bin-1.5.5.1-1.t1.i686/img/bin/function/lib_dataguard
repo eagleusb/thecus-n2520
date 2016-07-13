@@ -1,0 +1,1029 @@
+#!/bin/bash
+####################################################### rsync backup lib  #######################################################
+PATH="/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin"
+CROND_CONF="/etc/cfg/crond.conf"
+Ldataguard_sqlite="/usr/bin/sqlite"
+Ldataguard_backupdb="/etc/cfg/backup.db"
+logevent="/img/bin/logevent/event"
+rsync="/usr/bin/rsync"
+ftproot="/raid/data/ftproot"
+
+#######################################################
+#
+# check Log folder
+#
+#######################################################
+check_log_folder(){
+  local taskname=$1
+  local log_folder=$2
+  local action=$3
+
+  fLog_folder_rootpath=`Ldataguard_get_raid_root_path "$log_folder"`
+  log_path="$fLog_folder_rootpath/LOG_Data_Guard"
+
+  if [ ! -d "${log_path}" ];then
+    mkdir -m 777 "${log_path}"
+    chown nobody.nogroup "${log_path}"
+  fi
+
+  start_time=`date "+%Y%m%d_%H%M%S"`
+
+  if [ "${action}" == "stop" ];then
+     action="Terminate"
+  fi
+
+  log_path="${log_path}/${taskname}_${action}.${start_time}"
+}
+
+#######################################################
+#
+# check rsync process Does not exist
+#
+#######################################################
+
+check_task_processing(){
+  local status_file=$1
+  if [ -f "${status_file}" ];then
+    echo "1"
+  fi
+  return
+}
+
+#######################################################
+#
+#  event log message
+#
+#######################################################
+
+eventlog(){
+  local taskname="$1"
+  local result="$2"
+  local action="$3"
+  local tmplog="$4"
+  local folder_name="$5"
+  local act_type="$6"
+  [ -z "$acttype" ] && acttype="remote"
+  local backup_status="${result}"
+
+  if [ "$action" == "start" ]; then
+    action="Backup"
+  elif [ "$action" == "restore" ]; then
+    action="Restore"
+  fi
+
+  #some case is the return value, and other cases are the values that we defined
+  case "$result"
+  in
+    0)
+      if [ "$action" == "Backup" ] || [ "$action" == "Restore" ];then
+        backup_status="7"
+        if [ "$lose_folder" != "" ];then
+          backup_status="16"
+          if [ "$acttype" == "local" ] && [ "$action" == "Restore" ];then
+            backup_status="102"
+          fi
+        elif [ "$target_lose_folder" != "" ];then
+          backup_status="37"
+          if [ "$acttype" == "local" ] && [ "$action" == "Restore" ];then
+            backup_status="101"
+          fi
+        else
+          $logevent 997 458 info email "${taskname}" "$action"
+        fi
+      fi
+      ;;
+    5)
+      err_msg=`cat "${tmplog}" | grep " @ERROR: auth failed on module"`
+      if [ "${err_msg}" != "" ];then
+          $logevent 997 680 error email "${taskname}" "$action"
+          backup_status="32"
+      fi
+
+      err_msg=`cat "${tmplog}" | grep "@ERROR: Unknown module"`
+      if [ "${err_msg}" != "" ];then
+          $logevent 997 677 error email "${taskname}" "$action" "$folder_name"
+          backup_status="37"
+      fi
+
+      err_msg=`cat "${tmplog}" | grep "@ERROR: chroot failed"`
+      if [ "${err_msg}" != "" ];then
+          $logevent 997 671 error email "${taskname}" "$action"
+          backup_status="12"
+      fi
+
+      err_msg=`cat "${tmplog}" | grep "@ERROR: max connections"`
+      if [ "${err_msg}" != "" ];then
+          $logevent 997 679 error email "${taskname}" "$action"
+          backup_status="38"
+      fi
+      ;;
+    10)
+      $logevent 997 667 error email "${taskname}" "$action"
+      backup_status="10"
+      ;;
+    12)
+      if [ "${encrypt_on}" == "1" ];then
+        $logevent 997 682 error email "${taskname}" "$action"
+        backup_status="998"
+      else
+        err_msg=`grep "No space left" $tmplog`
+        if [ "$err_msg" != "" ];then
+          $logevent 997 670 error email "${taskname}" "$action" "$folder_name"
+          backup_status="12"
+          if [ "$acttype" == "local" ] && [ "$action" == "Restore" ];then
+            backup_status="104"
+          fi
+        else
+          err_msg=`grep "File too large (27)" $tmplog`
+          if [ "$err_msg" != "" ];then
+            $logevent 997 671 error email "${taskname}" "$action" "$folder_name"
+            backup_status="23"
+          else
+            $logevent 997 667 error email "${taskname}" "$action"
+            backup_status="10"
+          fi
+        fi
+      fi
+      ;;
+    15)
+      $logevent 997 459 info email "${taskname}" "$action"
+      backup_status="15"
+      ;;
+    16)
+      $logevent 997 668 error email "${taskname}" "$action" "$folder_name"
+      backup_status="16"
+      if [ "$acttype" == "local" ] && [ "$action" == "Restore" ];then
+        backup_status="102"
+      fi
+      ;;
+    23)
+      err_msg=`grep 'failed: Read-only file system' $tmplog`
+      if [ "${err_msg}" != "" ];then
+        $logevent 997 669 error email "${taskname}" "$action" "$folder_name"
+        backup_status="9"
+      else
+        err_msg=`grep 'rename' $tmplog`
+        if [ "${err_msg}" != "" ];then
+          $logevent 997 675 error email "${taskname}" "$action"
+        else
+          $logevent 997 671 error email "${taskname}" "$action" "$folder_name"
+        fi
+        if [ "$acttype" == "local" ] && [ "$action" == "Restore" ];then
+          backup_status="105"
+        fi
+      fi
+      ;;
+    24)
+      $logevent 997 676 error email "${taskname}" "$action" "$folder_name"
+      if [ "$acttype" == "local" ] && [ "$action" == "Restore" ];then
+        backup_status="106"
+      fi
+      ;;
+    30)
+      $logevent 997 672 error email "${taskname}" "$action" "$folder_name"
+      if [ "$acttype" == "local" ] && [ "$action" == "Restore" ];then
+        backup_status="107"
+      fi
+      ;;
+    31)
+      $logevent 997 515 warning email "${taskname}" "$action"
+      if [ "$acttype" == "local" ] && [ "$action" == "Restore" ];then
+        backup_status="108"
+      fi
+      ;;
+    32)
+      $logevent 997 680 error email "${taskname}" "$action"
+      backup_status="32"
+      ;;
+    34)
+      $logevent 997 514 warning email "${taskname}" "$action"
+      backup_status="31"
+      if [ "$acttype" == "local" ] && [ "$action" == "Restore" ];then
+        backup_status="108"
+      fi
+      ;;
+    35)
+      $logevent 997 516 warning email "${taskname}" "$action"
+      backup_status="31"
+      if [ "$acttype" == "local" ] && [ "$action" == "Restore" ];then
+        backup_status="108"
+      fi
+      ;;
+    36)
+      $logevent 997 670 error email "${taskname}" "$action" "$folder_name"
+      backup_status="12"
+      if [ "$acttype" == "local" ] && [ "$action" == "Restore" ];then
+        backup_status="104"
+      fi
+      ;;
+    37)
+      $logevent 997 677 error email "${taskname}" "$action" "$folder_name"
+      backup_status="37"
+      if [ "$acttype" == "local" ] && [ "$action" == "Restore" ];then
+        backup_status="101"
+      fi
+      ;;
+    38)
+      $logevent 997 679 error email "${taskname}" "$action"
+      backup_status="38"
+      ;;
+    39)
+      $logevent 997 811 error email "${taskname}" "$action"
+      backup_status="39"
+      ;;
+    40)
+      $logevent 997 812 error email "${taskname}" "$action" "$folder_name"
+      backup_status="40"
+      ;;
+    41)
+      $logevent 997 485 info email "${taskname}" "$action" "$folder_name"
+      ;;
+    42)
+      $logevent 997 486 info email "${taskname}" "$action" "$folder_name"
+      ;;
+    200)
+      $logevent 997 457 info email "${CFG_task_name}" "${action}"
+      backup_status="1"
+      ;;
+    255)
+      $logevent 997 683 error email "${taskname}" "$action"
+      backup_status="997"
+      ;;
+    *)
+      $logevent 997 673 error email "${taskname}" "$action"
+      backup_status="999"
+      ;;
+  esac
+
+  echo "${backup_status}" > /tmp/backup_status_file_${taskname}
+}
+
+#######################################################
+#
+# get iso point
+#
+#######################################################
+
+get_iso_info(){
+    local iso_file=$1
+
+	if [ -f /etc/cfg/isomount.db ]; then
+		$Ldataguard_sqlite /etc/cfg/isomount.db "select point from isomount" > "${iso_file}"
+	else
+		$Ldataguard_sqlite /etc/cfg/conf.db "select point from mount" > "${iso_file}"
+	fi
+}
+
+#######################################################
+#
+#  get backup.db value
+#
+#######################################################
+db_to_env() {
+    local tid_num=$1
+    cmd=""
+    cmd="$cmd SELECT * FROM task WHERE tid='$tid_num';"
+    cmd="$cmd SELECT opts.key, opts.value FROM opts WHERE tid=$tid_num"
+    total=0
+    $Ldataguard_sqlite $Ldataguard_backupdb "$cmd" | while read line; do
+        if [ $total -eq 0 ]; then
+            echo CFG_tid=\"`echo $line | cut -d \| -f 1`\"
+            echo CFG_task_name=\"`echo $line | cut -d \| -f 2`\"
+            echo CFG_back_type=\"`echo $line | cut -d \| -f 3`\"
+            echo CFG_act_type=\"`echo $line | cut -d \| -f 4`\"
+            echo CFG_last_time=\"`echo $line | cut -d \| -f 5`\"
+            echo CFG_status=\"`echo $line | cut -d \| -f 6`\"
+        else
+            line=`echo "$line" | sed 's/\`/\\\\\`/g'`
+            echo "$line" | sed -nr "s/^([^\|]*)\|(.*)$/OPT_\1=\"\2\"/p"
+        fi
+        total=$((total+1))
+    done
+}
+
+####################################################### lsync backup lib  #######################################################
+
+#######################################################
+#
+# backup conf
+#
+#######################################################
+filelist(){
+  echo "etc/cfg/roaming"
+  echo "etc/cfg/conf.db"
+  echo "etc/cfg/cfg_nic0"
+  echo "etc/cfg/cfg_nic1"
+  echo "etc/cfg/crond.conf"
+  echo "etc/cfg/stackable.db"
+  echo "etc/cfg/quota.db"
+  echo "etc/cfg/backup.db"
+  echo "etc/hosts"
+  echo "etc/HOSTNAME"
+  echo "etc/passwd"
+  echo "etc/group"
+  echo "etc/localtime"
+  echo "etc/resolv.conf"
+  echo "etc/samba/smb.conf"
+  echo "etc/php.ini"
+  echo "etc/httpd/conf/httpd.conf"
+  echo "etc/httpd/conf/ssl.conf"
+  echo "etc/httpd/conf/ssl.crt/ca-bundle.crt"
+  echo "etc/httpd/conf/ssl.crt/server.crt"
+  echo "etc/httpd/conf/ssl.key/server.key"
+  echo "etc/cfg/samba/passdb.tdb"
+  echo "etc/cfg/samba/secrets.tdb"
+}
+
+makeDefaultConf(){
+  cd /
+  tar cpf /tmp/confdownload.tar `filelist`
+  gzip /tmp/confdownload.tar
+  enckey=`/img/bin/check_service.sh key`
+  /usr/bin/des -k conf_${enckey} -E /tmp/confdownload.tar.gz /tmp/confdownload.bin
+  rm -rf /tmp/confdownload.tar.gz
+}
+
+backup_conf_to_remote(){
+  local taskname=$1
+  local username=$2
+  local password=$3
+  local ip=$4
+  local port=$5
+  local Pro_type=`cat /etc/manifest.txt |awk -F' ' 'NR==1{print $2}'`
+  local HWaddr=`/sbin/ifconfig |awk -F' ' 'NR==1{print $5}'`
+  local passwd_file="/tmp/rsync.${taskname}_passwd"
+  local acl_file="/tmp/rsync_${taskname}_acl"
+  local empty_folder="/tmp/rsync_${taskname}_tmpfolder/_SYS_TMP"
+
+  tarfolder="/raid/data/tmp/mgmt_nasconfig"
+
+  if [ ! -d "${tarfolder}" ];then
+     mkdir -p "${tarfolder}"
+  fi
+
+  if [ ! -d "${empty_folder}" ];then
+    mkdir -p "${empty_folder}"
+  fi
+
+  echo "${password}" > "${passwd_file}"
+  chmod 600 "${passwd_file}"
+
+  mv ${acl_file} "${tarfolder}/backup.acl"
+  makeDefaultConf
+  mv /tmp/confdownload.bin ${tarfolder}/conf.bin
+  cp -r /raidsys "${tarfolder}"
+
+  /bin/tar zcvf /tmp/${Pro_type}_${HWaddr}_${taskname} ${tarfolder}
+  strExec="/usr/bin/rsync --port=${port} --chmod=ugo=rwX --timeout=600 --password-file=\"${passwd_file}\" \"${empty_folder}\" \"${username}@${ip}::raidroot/\""
+  eval
+  strExec="/usr/bin/rsync --port=${port} --chmod=ugo=rwX --timeout=600 --password-file=\"${passwd_file}\" \"/tmp/${Pro_type}_${HWaddr}_${taskname}\" \"${username}@${ip}::raidroot/_SYS_TMP/remote_conf/\""
+  eval $strExec
+
+  rm -rf "/tmp/${Pro_type}_${HWaddr}_${taskname}"
+  rm -rf ${passwd_file}
+  rm -rf ${tarfolder}
+  rm -rf ${empty_folder}
+}
+
+#######################################################
+#
+#  get folder acl to backup
+#
+#######################################################
+get_acl(){
+  local folder_info=$1
+  local acl_file=$2
+
+  dest_folder_acl=`echo "$folder_info" | awk -F'/' '{print $5}'`
+  /usr/bin/getfacl "/raid/data/ftproot/${dest_folder_acl}/" >> "${acl_file}"
+}
+
+
+
+####################################################### local backup lib  #######################################################
+
+#######################################################
+#
+# get raid status
+#
+#######################################################
+Ldataguard_get_raid_status(){
+    local Ldataguard_fTask_name=$1
+    local Ldataguard_fAction=$2
+    local Ldataguard_fLog_tmp=$3
+    local Ldataguard_fLog_file=$4
+    local Ldataguard_fAct_type=$5
+    local Ldataguard_fRaid_status
+
+    [ ! -f "/var/tmp/raidlock" ] && exit
+    Ldataguard_fRaid_status=`cat "/var/tmp/raidlock"`
+    if [ "${Ldataguard_fRaid_status}" == "1" ]; then
+        eventlog "${Ldataguard_fTask_name}" "35" "${Ldataguard_fAction}" "" "" "$Ldataguard_fAct_type"
+        Ldataguard_change_status "${Ldataguard_fTask_name}" "$Ldataguard_fLog_tmp" "$Ldataguard_fLog_file"
+        exit
+    fi
+}
+
+#######################################################
+#
+# get migrate status
+#
+#######################################################
+Ldataguard_get_migrate_status(){
+    local Ldataguard_fTask_name=$1
+    local Ldataguard_fAction=$2
+    local Ldataguard_fLog_tmp=$3
+    local Ldataguard_fLog_file=$4
+    local Ldataguard_fAct_type=$5
+    local Ldataguard_fRaid_status
+
+    strExec="awk -F ':' '/^md[0-9] /||/^md6[0-9]/{print substr(\$1,3)}'  /proc/mdstat| sort -u"
+    raid_array=`eval $strExec`
+    echo -e "$raid_array" | \
+    while read info
+    do
+        [ ! -f "/raid${info}/sys/migrate/lock" ] && continue
+        Ldataguard_fRaid_status=`cat "/raid${info}/sys/migrate/lock"`
+        if [ "${Ldataguard_fRaid_status}" == "1" ]; then
+            eventlog "${Ldataguard_fTask_name}" "31" "${Ldataguard_fAction}" "" "" "$Ldataguard_fAct_type"
+            Ldataguard_change_status "$Ldataguard_fTask_name" "$Ldataguard_fLog_tmp" "$Ldataguard_fLog_file"
+            exit
+        fi
+    done
+}
+
+#######################################################
+#
+# check rsync process does not exist
+#
+#######################################################
+Ldataguard_check_status(){
+    local Ldataguard_fTask_name=$1
+    local Ldataguard_fStatus_file=$2
+    local Ldataguard_fAction=$3
+    local Ldataguard_fAct_type=$4
+
+    if [ -f $Ldataguard_fStatus_file ] && [ ! -z `grep 2 $Ldataguard_fStatus_file` ]; then
+        eventlog "${Ldataguard_fTask_name}" "34" "${Ldataguard_fAction}" "" "" "$Ldataguard_fAct_type"
+        exit
+    else
+        echo "2" > $Ldataguard_fStatus_file
+        eventlog "$CFG_task_name" "200" "$Ldataguard_fAction" "" "" "$Ldataguard_fAct_type"
+        end_time=`date "+%Y/%m/%d %k:%M"`
+        for ((i=0;i<10;i++))
+        do
+            $Ldataguard_sqlite $Ldataguard_backupdb "update task set last_time='$end_time',status='1' where task_name='$Ldataguard_fTask_name'"
+            [ `echo $?` == "0" ] && break
+            sleep 1
+        done
+    fi
+}
+
+#######################################################
+#
+# change task status
+#
+#######################################################
+Ldataguard_change_status(){
+    local Ldataguard_fTask_name=$1
+    local Ldataguard_fLog_tmp=$2
+    local Ldataguard_fLog_file=$3
+    local Ldataguard_fAction=$4
+
+    backup_status=`cat /tmp/backup_status_file_${Ldataguard_fTask_name}`
+    last_time=`date "+%Y/%m/%d %k:%M"`
+
+    for ((i=0;i<10;i++))
+    do
+        $Ldataguard_sqlite $Ldataguard_backupdb "update task set last_time='$last_time',status='$backup_status' where task_name='$Ldataguard_fTask_name'"
+        [ `echo $?` == "0" ] && break
+        sleep 1
+    done
+
+    if [ -f "$Ldataguard_fLog_tmp" ]; then
+        cp -rf "$Ldataguard_fLog_tmp" "$Ldataguard_fLog_file"
+        rm -rf "$Ldataguard_fLog_tmp"
+    fi
+
+    rm -rf /tmp/backup_status_file_${Ldataguard_fTask_name}
+    rm -rf /tmp/rsync_${Ldataguard_fTask_name}_iso.log
+    rm -rf /tmp/rsync_${Ldataguard_fTask_name}_iso_tmp.log
+    rm -rf /tmp/rsync_backup_${Ldataguard_fTask_name}.count
+    rm -rf /tmp/rsync_backup_${Ldataguard_fTask_name}.status
+    rm -rf /tmp/rsync_${Ldataguard_fTask_name}_${Ldataguard_fAction}.acl
+}
+
+#######################################################
+#
+# get target folder smbdb
+#
+#######################################################
+Ldataguard_get_folder_smbdb(){
+    local Ldataguard_fFolder_uuid="$1"
+    local Ldataguard_fFolder_name
+    local Ldataguard_fSmb_db
+
+    fFolder_raid=`Ldataguard_check_uuid "$Ldataguard_fFolder_uuid"`
+    Ldataguard_fSmb_db="/"`echo "${fFolder_raid}" | awk -F"/" '{print $2}'`"/sys/smb.db"
+    echo "$Ldataguard_fSmb_db"
+}
+
+#######################################################
+#
+# get root folder path
+#
+#######################################################
+Ldataguard_get_raid_root_path(){
+    local Ldataguard_fFolder_name=$1
+    local Ldataguard_fFolder_rootpath
+
+    Ldataguard_fFolder_name=`echo "$Ldataguard_fFolder_name" | sed -r 's/(\\$|\\^|\\(|\\)|\\\)/\\\\\1/g'`
+    Ldataguard_fFolder_rootpath="`readlink "${ftproot}/${Ldataguard_fFolder_name}"`"
+    echo "$Ldataguard_fFolder_rootpath"
+}
+
+#######################################################
+#
+# get external mount path
+#
+#######################################################
+Ldataguard_external_path(){
+   Folder_T=""
+   rm -rf /tmp/USB_TMP
+   cat /proc/scsi/scsi | grep Intf:USB | while read file;do
+       Disk_1=`echo ${file} | awk -F 'Disk:' '{print $2}'`
+       Disk=`echo ${Disk_1} | awk -F 'Model:' '{print $1}'`
+       Disk=`echo $Disk`
+       MDisk="/dev/""$Disk"
+       Folder_1=`mount | grep "$MDisk[0-9]* "| awk -F 'on' '{print $2}'`
+       Folder=`echo $Folder_1|awk -F 'type' '{print $1}'`
+       Folder=`echo $Folder`
+       Folder_T=$Folder_T$Folder" "
+       echo $Folder_T > /tmp/USB_TMP
+   done
+   if [ -f /tmp/USB_TMP ];then
+       Folder_T=`cat /tmp/USB_TMP`
+       Folder_T=$Folder_T" "
+   fi
+   esatakno=`/img/bin/check_service.sh esata`
+   esatakcount=`/img/bin/check_service.sh esata_count`
+   for((i=esatakno;i<=$((esatakno+esatakcount));i=i+1))
+   do
+       Disk_count=`cat /proc/scsi/scsi | grep Tray:${i}|wc -l`
+       if [ $Disk_count -gt 0 ];then
+          Disk_1=`cat /proc/scsi/scsi |grep Tray:${i}|awk -F 'Disk:' '{print $2}'`
+          Disk=`echo ${Disk_1} | awk -F 'Model:' '{print $1}'`
+          Disk=`echo $Disk`
+          MDisk="/dev/""$Disk"
+          Folder_1=`mount | grep "$MDisk[0-9]* "| awk -F 'on' '{print $2}'`
+          Folder=`echo $Folder_1|awk -F 'type' '{print $1}'`
+          Folder=`echo $Folder`
+          Folder_T=$Folder_T$Folder" "
+       fi
+   done
+   echo $Folder_T
+}
+
+#######################################################
+#
+# search target tag
+#
+#######################################################
+Ldataguard_search_target_tag(){
+    local Ldataguard_fTarget="$1"                                               #opts.target
+    local Ldataguard_fTarget_tag="$2"
+
+    Ldataguard_fTarget_Mount_path=(`Ldataguard_external_path`)
+    for mount_path in ${Ldataguard_fTarget_Mount_path[@]}
+    do
+        if [ -z "$Ldataguard_fTarget" ]; then
+            Ldataguard_fFolder_path="${mount_path}"
+        else
+            Ldataguard_fFolder_path="${mount_path}${Ldataguard_fTarget}"
+        fi
+        [ -f "${Ldataguard_fFolder_path}/${Ldataguard_fTarget_tag}" ] && Ldataguard_fTarget_folder="${Ldataguard_fFolder_path}" && break
+    done
+    echo "$Ldataguard_fTarget_folder"
+}
+
+#######################################################
+#
+# check folder's raid uuid
+#
+#######################################################
+Ldataguard_check_uuid(){
+    local Ldataguard_fFolder_uuid="$1"
+    local Ldataguard_fFolder_raidmd
+
+#    if [ ! -f /tmp/mdadm_list ]; then
+        mdadm -D /dev/md* 2>/dev/null | sed -nr 's/\/dev\/(md[0-9]+):/\1/p;s/.*UUID : (.*)/\1/p;' | sed -r 'N;s/\n/ /g;s/(.*) (.*):(.{4})(.{4}):(.{4})(.{4}):(.*)/\1 \2-\3-\4-\5-\6\7/p' | grep -e "md[0-9] " > /tmp/mdadm_list
+#    fi
+
+    Ldataguard_fFolder_raidmd=`awk '/ '$Ldataguard_fFolder_uuid'$/{print $1}' /tmp/mdadm_list | head -1`
+    if [ -z "$Ldataguard_fFolder_raidmd" ]; then
+        Ldataguard_fFolder_raidmd=`blkid | awk '/ UUID=\"'$Ldataguard_fFolder_uuid'\"/{print substr($1,6,length($1)-6)}' | head -1`
+        [ -z "$Ldataguard_fFolder_raidmd" ] && exit
+    fi
+    if [ `df | egrep -c "^/dev/$Ldataguard_fFolder_raidmd "` -lt 1 ]; then
+        Ldataguard_fFolder_raidmd=`echo "loop"$((\`echo $Ldataguard_fFolder_raidmd | sed -nr 's/md([0-9]+)/\1/p'\`+50))`
+        [ `df | egrep -c "^/dev/$Ldataguard_fFolder_raidmd "` -lt 1 ]&& exit
+    fi
+    df | awk '/^\/dev\/'$Ldataguard_fFolder_raidmd' /{print $6}' | head -1
+}
+
+#######################################################
+#
+# get backup source list
+#
+#######################################################
+Ldataguard_backup_source(){
+    local Ldataguard_fTask_name="$1"
+    local Ldataguard_fList="$2"                                                 #opts.path + opts.folder
+    local Ldataguard_arySource_Mount_path=`echo "$3" | awk -F"//" '{print $1}'`        #full path
+
+    local Ldataguard_fFolder_rootpath
+    local Ldataguard_fFolder_path
+    local Ldataguard_fFolder_name
+    local Ldataguard_fLoss_folder
+    local Ldataguard_fSource_folder
+
+    eval "Ldataguard_fList=($Ldataguard_fList)"
+    for ((i=0;i<${#Ldataguard_fList[@]};i++))
+    do
+        if [ -z "$Ldataguard_arySource_Mount_path" ]; then                      #Source folder is raid
+            Ldataguard_fFolder_name=`echo "${Ldataguard_fList[$i]}" | awk -F"/" '{print $2}'`
+            Ldataguard_fFolder_rootpath=`Ldataguard_get_raid_root_path "$Ldataguard_fFolder_name"`
+            Ldataguard_fFolder_path="${Ldataguard_fFolder_rootpath}"`echo "${Ldataguard_fList[$i]#/${Ldataguard_fFolder_name}}"`
+        else                                                                    #Source folder is external
+            Ldataguard_fFolder_path="${Ldataguard_arySource_Mount_path}${Ldataguard_fList[$i]}"
+        fi
+        if [ ! -e "${Ldataguard_fFolder_path}" ]; then
+            Ldataguard_fLoss_folder="${Ldataguard_fLoss_folder}"`basename "${Ldataguard_fList[$i]}"`", "
+        else
+            Ldataguard_fFolder_path=`echo "${Ldataguard_fFolder_path}" | sed "s/'/\'\\\\\\''/g"`
+            Ldataguard_fSource_folder="${Ldataguard_fSource_folder}'${Ldataguard_fFolder_path}' "
+        fi
+    done
+    echo "${Ldataguard_fLoss_folder}//${Ldataguard_fSource_folder}"
+}
+
+#######################################################
+#
+# get backup target list
+#
+#######################################################
+Ldataguard_backup_target(){
+    local Ldataguard_fTask_name="$1"
+    local Ldataguard_fTarget="$2"                                               #opts.target
+    local Ldataguard_fTarget_tag="$3"
+    local Ldataguard_fDevice_type="$4"
+    local Ldataguard_fTarget_Mount_path="$5"                                    #full path
+
+    local Ldataguard_fFolder_rootpath
+    local Ldataguard_fFolder_path
+    local Ldataguard_fFolder_name
+    local Ldataguard_fLoss_folder
+    local Ldataguard_fTarget_folder
+
+    if [ "$Ldataguard_fDevice_type" != "1" ]; then                              #Target folder is raid
+        Ldataguard_fFolder_name=`echo "$Ldataguard_fTarget" | awk -F"/" '{print $2}'`
+        Ldataguard_fFolder_rootpath=`Ldataguard_get_raid_root_path "$Ldataguard_fFolder_name"`
+        Ldataguard_fFolder_path="${Ldataguard_fFolder_rootpath}"`echo "${Ldataguard_fTarget#/${Ldataguard_fFolder_name}}"`
+        if [ -d "${Ldataguard_fFolder_path}" ]; then
+            Ldataguard_fFolder_path=`echo "${Ldataguard_fFolder_path}" | sed "s/'/\'\\\\\\''/g"`
+            Ldataguard_fTarget_folder="'${Ldataguard_fFolder_path}'"
+        else
+            Ldataguard_fLoss_folder="${Ldataguard_fLoss_folder}"`basename "${Ldataguard_fTarget}"`" "
+        fi
+    else                                                                        #Target folder is external
+        if [ -z "$Ldataguard_fTarget_Mount_path" ]; then
+            Ldataguard_fFolder_path=`Ldataguard_search_target_tag "$Ldataguard_fTarget" "$Ldataguard_fTarget_tag"`
+            if [ -d "${Ldataguard_fFolder_path}" ]; then
+                Ldataguard_fFolder_path=`echo "${Ldataguard_fFolder_path}" | sed "s/'/\'\\\\\\''/g"`
+                Ldataguard_fTarget_folder="'${Ldataguard_fFolder_path}'"
+            else
+                if [ -z "${Ldataguard_fFolder_path}" ]; then
+                    if [ -z "${Ldataguard_fTarget}" ]; then
+                        Ldataguard_fLoss_folder="${Ldataguard_fTarget_tag}"
+                    else
+                        Ldataguard_fLoss_folder=`basename "${Ldataguard_fTarget}"`
+                    fi
+                else
+                    Ldataguard_fLoss_folder=`basename "${Ldataguard_fFolder_path}"`
+                fi
+            fi
+        else
+            if [ -z "$Ldataguard_fTarget" ]; then
+                Ldataguard_fFolder_path="${Ldataguard_fTarget_Mount_path}"
+            else
+                Ldataguard_fFolder_path="${Ldataguard_fTarget_Mount_path}${Ldataguard_fTarget}"
+            fi
+            if [ -d "${Ldataguard_fFolder_path}" ]; then
+                Ldataguard_fFolder_path=`echo "${Ldataguard_fFolder_path}" | sed "s/'/\'\\\\\\''/g"`
+                Ldataguard_fTarget_folder="'${Ldataguard_fFolder_path}'"
+            else
+                Ldataguard_fLoss_folder=`basename "${Ldataguard_fFolder_path}"`
+            fi
+        fi
+    fi
+    echo "${Ldataguard_fLoss_folder}//${Ldataguard_fTarget_folder}"
+    exit
+}
+
+#######################################################
+#
+# get restore source(backup target) list
+#
+#######################################################
+Ldataguard_restore_source(){
+    local Ldataguard_fTask_name="$1"
+    local Ldataguard_fList="$2"                                                 #full path
+    local Ldataguard_fTarget="$3"                                               #opts.target
+    local Ldataguard_fTarget_tag="$4"
+    local Ldataguard_fDevice_type="$5"
+    local Ldataguard_fCreate_sfolder="$6"
+
+    local Ldataguard_fFolder_rootpath
+    local Ldataguard_fFolder_path
+    local Ldataguard_fFolder_name
+    local Ldataguard_fLoss_folder
+    local Ldataguard_fSource_folder
+    local Ldataguard_arySource_list
+
+    eval "Ldataguard_fList=($Ldataguard_fList)"
+    if [ "$Ldataguard_fDevice_type" != "1" ]; then                              #Source folder is raid
+        Ldataguard_fFolder_name=`echo "${Ldataguard_fTarget}" | awk -F"/" '{print $2}'`
+        Ldataguard_fFolder_rootpath=`Ldataguard_get_raid_root_path "$Ldataguard_fFolder_name"`
+        if [ -z "$Ldataguard_fFolder_rootpath" ]; then
+            Ldataguard_fLoss_folder=`basename "${Ldataguard_fTarget}"`
+        else
+            for folder in "${Ldataguard_fList[@]}"
+            do
+                folder_basename=`basename "${folder}"`
+                if [ "$Ldataguard_fCreate_sfolder" == "1" ]; then
+                    Ldataguard_fFolder_path="${Ldataguard_fFolder_rootpath}"`echo "${Ldataguard_fTarget#/${Ldataguard_fFolder_name}}"`"/${Ldataguard_fTask_name}/${folder_basename}"
+                else
+                    Ldataguard_fFolder_path="${Ldataguard_fFolder_rootpath}"`echo "${Ldataguard_fTarget#/${Ldataguard_fFolder_name}}"`"/${folder_basename}"
+                fi
+                if [ ! -e "${Ldataguard_fFolder_path}" ]; then
+                    Ldataguard_fLoss_folder="${Ldataguard_fLoss_folder}${folder_basename}, "
+                else
+                    Ldataguard_fFolder_path=`echo "${Ldataguard_fFolder_path}" | sed "s/'/\'\\\\\\''/g"`
+                    Ldataguard_fSource_folder="${Ldataguard_fSource_folder}'${Ldataguard_fFolder_path}' "
+                fi
+            done
+        fi
+    else                                                                        #Source folder is external
+        Ldataguard_fFolder_path=`Ldataguard_search_target_tag "$Ldataguard_fTarget" "$Ldataguard_fTarget_tag"`
+        if [ "$Ldataguard_fCreate_sfolder" == "1" ]; then
+            Ldataguard_fFolder_path="${Ldataguard_fFolder_path}/${Ldataguard_fTask_name}"
+        fi
+        if [ -d "${Ldataguard_fFolder_path}" ]; then
+            for folder in "${Ldataguard_fList[@]}"
+            do
+                folder_basename=`basename "${folder}"`
+                Ldataguard_fFolder_name=`echo "${folder}" | awk -F"/" '{print $2}'`
+                if [ ! -e "${Ldataguard_fFolder_path}/${Ldataguard_fFolder_name}" ]; then
+                    Ldataguard_fLoss_folder="${Ldataguard_fLoss_folder}${folder_basename}, "
+                else
+                    Ldataguard_fFolder_path=`echo "${Ldataguard_fFolder_path}" | sed "s/'/\'\\\\\\''/g"`
+                    Ldataguard_fSource_folder="${Ldataguard_fSource_folder}'${Ldataguard_fFolder_path}/${folder_basename}' "
+                fi
+            done
+        else
+            if [ -z "${Ldataguard_fFolder_path}" ]; then
+                if [ -z "${Ldataguard_fTarget}" ]; then
+                    Ldataguard_fLoss_folder="${Ldataguard_fTarget_tag}"
+                else
+                    Ldataguard_fLoss_folder=`basename "${Ldataguard_fTarget}"`
+                fi
+            else
+                Ldataguard_fLoss_folder=`basename "${Ldataguard_fFolder_path}"`
+            fi
+        fi
+    fi
+    echo "${Ldataguard_fLoss_folder}//${Ldataguard_fSource_folder}"
+}
+
+#######################################################
+#
+# get restore target(backup source) list
+#
+#######################################################
+Ldataguard_restore_target(){
+    local Ldataguard_fTask_name="$1"
+    local Ldataguard_fList="$2"                                                 #opts.path + opts.folder
+    local Ldataguard_fPath="$3"                                                 #opts.path
+
+    local Ldataguard_fFolder_rootpath
+    local Ldataguard_fFolder_path
+    local Ldataguard_fFolder_name
+    local Ldataguard_fTarget_folder
+
+    eval "Ldataguard_fList=($Ldataguard_fList)"
+    for ((i=0;i<${#Ldataguard_fList[@]};i++))
+    do
+        Ldataguard_fFolder_name=`echo "${Ldataguard_fList[$i]}" | awk -F"/" '{print $2}'`
+        Ldataguard_fFolder_rootpath=`Ldataguard_get_raid_root_path "$Ldataguard_fFolder_name"`
+        if [ -z "$Ldataguard_fPath" ]; then
+            Ldataguard_fFolder_path=`dirname "${Ldataguard_fFolder_rootpath}"`
+        else
+            Ldataguard_fFolder_path="${Ldataguard_fFolder_rootpath}"`echo "${Ldataguard_fList[$i]#/${Ldataguard_fFolder_name}}"`
+        fi
+        if [ ! -e "${Ldataguard_fFolder_path}" ]; then
+            Ldataguard_fLoss_folder="${Ldataguard_fLoss_folder}"`basename "${Ldataguard_fList[$i]}"`", "
+        else
+            Ldataguard_fFolder_path=`echo "${Ldataguard_fFolder_path}" | sed "s/'/\'\\\\\\''/g"`
+            Ldataguard_fTarget_folder="${Ldataguard_fTarget_folder}'${Ldataguard_fFolder_path}' "
+        fi
+    done
+    echo "${Ldataguard_fLoss_folder}//${Ldataguard_fTarget_folder}"
+}
+
+#######################################################
+#
+# stop task
+#
+#######################################################
+Ldataguard_stop_task(){
+    local Ldataguard_fTid="$1"
+    local Ldataguard_fTask_name="$2"
+    local Ldataguard_fProcess_name="$3"
+    local Ldataguard_fLog_tmp="$4"
+    local Ldataguard_fLog_folder="$5"
+    local Ldataguard_fAct_type="$6"
+
+    rsync_pid=`/bin/ps wwww | grep "rsync -8rltDvH" | grep "file=${Ldataguard_fLog_tmp} " | grep -v grep | awk '{print $1}'`
+    process_pid=`/bin/ps wwww | egrep " $Ldataguard_fProcess_name (Backup|Restore|start|restore|import) $Ldataguard_fTid" | grep -v grep | grep -v " stop " |awk '{print $1}'`
+    types=`/bin/ps wwww | egrep " $Ldataguard_fProcess_name (Backup|Restore|start|restore|import) $Ldataguard_fTid" | grep -v grep | grep -v " stop " |awk '{print $7}'`
+
+    [ "${rsync_pid}" != "" -o "${process_pid}" != "" ] && kill -9 $rsync_pid $process_pid
+
+    if [ "${rsync_pid}" != "" -o "${process_pid}" != "" ] || [ -f /tmp/rsync_backup_${Ldataguard_fTask_name}.status ]; then
+        check_log_folder "$Ldataguard_fTask_name" "$Ldataguard_fLog_folder" "$types"
+        eventlog "${Ldataguard_fTask_name}" "15" "${types}" "" "" "$Ldataguard_fAct_type"
+        Ldataguard_change_status "$Ldataguard_fTask_name" "$Ldataguard_fLog_tmp" "$log_path" "$types"
+    fi
+}
+
+#######################################################
+#
+# set crontab
+#
+#######################################################
+Ldataguard_crond_control(){
+    local Ldataguard_fTid=$1
+    local Ldataguard_fProcess_name=$2
+    local Ldataguard_fCrond_action=$3
+    local Ldataguard_fAction=$4
+    local Ldataguard_fBackup_time="$5"
+
+    if [ "$Ldataguard_fCrond_action" == "add" ]; then
+        on_crontab=`grep -c " $Ldataguard_fProcess_name $Ldataguard_fAction $Ldataguard_fTid " $CROND_CONF`
+        if [ "${on_crontab}" -eq 0 ]; then
+            echo "$Ldataguard_fBackup_time $Ldataguard_fProcess_name $Ldataguard_fAction $Ldataguard_fTid > /dev/null 2>&1" >> $CROND_CONF
+        else
+            Ldataguard_fProcess_name=`echo $Ldataguard_fProcess_name | sed 's/\//\\\\\//g'`
+            cmd="sed -i 's/\(.*\)$Ldataguard_fProcess_name $Ldataguard_fAction $Ldataguard_fTid\(.*\)/'\"$Ldataguard_fBackup_time\"' $Ldataguard_fProcess_name $Ldataguard_fAction $Ldataguard_fTid > \/dev\/null 2>\&1/g' $CROND_CONF"
+            eval "$cmd"
+        fi
+    elif [ "$Ldataguard_fCrond_action" == "remove" ]; then
+        Ldataguard_fProcess_name=`echo $Ldataguard_fProcess_name | sed 's/\//\\\\\//g'`
+        sed -i '/ '$Ldataguard_fProcess_name' '$Ldataguard_fAction' '$Ldataguard_fTid' /d' $CROND_CONF
+    fi
+    cat $CROND_CONF | crontab - -u root
+}
+
+Ldataguard_check_iscsifolder(){
+    local Ldataguard_folder_path="$1"
+    if [ ! -f "$Ldataguard_folder_path"/.iscsi.bin ];then
+        echo "1"
+        return
+    fi
+    cd "$Ldataguard_folder_path"
+    des -D -k iscsi_zip .iscsi.bin .iscsi.tar.gz
+    tar zxvf .iscsi.tar.gz > /dev/null 2>&1
+    if [ ! -f "$Ldataguard_folder_path/iscsi_name" ] || [ ! -f "$Ldataguard_folder_path/size_data" ] || [ ! -f "$Ldataguard_folder_path/smb.db" ] || [ ! -f "$Ldataguard_folder_path/acl_data" ];then
+        ret=1
+    fi
+
+    rm -rf "$Ldataguard_folder_path/iscsi_name"
+    rm -rf "$Ldataguard_folder_path/smb.db"
+    rm -rf "$Ldataguard_folder_path/acl_data"
+    rm -rf "$Ldataguard_folder_path/.iscsi.tar.gz"
+    if [ "$ret" == "1" ]; then
+        rm -rf "$Ldataguard_folder_path/size_data"
+        echo "2"
+        return
+    fi
+
+    if [ ! -d /raid/data/tmp/check_iscsi ];then
+        mkdir /raid/data/tmp/check_iscsi
+    fi
+
+    mv "$Ldataguard_folder_path/size_data" /raid/data/tmp/check_iscsi
+    mv "$Ldataguard_folder_path/.iscsi.bin" /raid/data/tmp/check_iscsi
+    ls -l | awk -F ' ' '{printf("%s %s\n",$5,$9)}' > "/raid/data/tmp/check_iscsi/size_data_tmp"
+    checkdiff=`diff /raid/data/tmp/check_iscsi/size_data_tmp /raid/data/tmp/check_iscsi/size_data`
+    if [ "$checkdiff" != "" ];then
+        mv /raid/data/tmp/check_iscsi/.iscsi.bin "$Ldataguard_folder_path"
+        echo "3"
+        return
+    fi
+    mv /raid/data/tmp/check_iscsi/.iscsi.bin "$Ldataguard_folder_path"
+    rm -rf /raid/data/tmp/check_iscsi
+    echo "0"
+}
+
+Ldataguard_restore_volume(){
+    local Ldataguard_fTid="$1"
+    local Ldataguard_external_folder="$2"
+    local Ldataguard_fPath="$3"
+    local Ldataguard_fFolder="$4"
+    local Ldataguard_fTarget="$5"
+    local Ldataguard_fDevice_type="$6"
+
+    local Ldataguard_folder_path
+    local Ldataguard_folder_info
+    local Ldataguard_dest_folder
+    local Ldataguard_target
+    local Ldataguard_dest_folder1
+    local Ldataguard_dest_folder_n
+    local Ldataguard_check_iscsi
+
+    if [ "$Ldataguard_fDevice_type" == "0" ];then
+        if [ "$Ldataguard_fPath" != "" ];then
+            Ldataguard_folder_info="$Ldataguard_fPath""/$Ldataguard_fFolder"
+        else
+            Ldataguard_folder_info="/$Ldataguard_fFolder"
+        fi
+    else
+        if [ "$Ldataguard_fDevice_type" == "1" ];then
+            if [ "$Ldataguard_fPath" != "" ];then
+                Ldataguard_folder_info="$Ldataguard_external_folder""$Ldataguard_fPath""/$Ldataguard_fFolder"
+            else
+                Ldataguard_folder_info="$Ldataguard_external_folder""/$Ldataguard_fFolder"
+            fi
+        fi
+    fi
+    if [ "$Ldataguard_fDevice_type" == "0" ];then
+        Ldataguard_folder_path="/raid/data/ftproot"${Ldataguard_folder_info}
+    else
+        if [ "$Ldataguard_fDevice_type" == "1" ];then
+            Ldataguard_folder_path=$Ldataguard_folder_info
+        fi
+    fi
+    Ldataguard_check_iscsi=`Ldataguard_check_iscsifolder $Ldataguard_folder_path`
+    if [ "$Ldataguard_check_iscsi" != "0" ];then
+        echo "$Ldataguard_check_iscsi"
+        return
+    fi
+    if [ ! -d /raid/data/tmp/check_iscsi ];then
+        mkdir /raid/data/tmp/check_iscsi
+    fi
+    cd "$Ldataguard_folder_path"
+    des -D -k iscsi_zip .iscsi.bin .iscsi.tar.gz
+    tar zxvf .iscsi.tar.gz > /dev/null 2>&1
+    mv "$Ldataguard_folder_path/iscsi_name" /raid/data/tmp/check_iscsi
+    mv "$Ldataguard_folder_path/smb.db" /raid/data/tmp/check_iscsi
+    mv "$Ldataguard_folder_path/acl_data" /raid/data/tmp/check_iscsi
+    rm -rf "$Ldataguard_folder_path/size_data"
+    rm -rf "$Ldataguard_folder_path/acl_data"
+    rm -rf "$Ldataguard_folder_path/.iscsi.tar.gz"
+    Ldataguard_dest_folder=`cat /raid/data/tmp/check_iscsi/iscsi_name`
+    target=""
+    fRaidIdList=`Lraid_get_raidmd_list`
+    for fRaidmd in ${fRaidIdList}
+    do
+        flagc=`$Ldataguard_sqlite /raid$fRaidmd/sys/smb.db ".schema"|grep iscsi|wc -l`
+        if [ $flagc -gt 0 ];then
+            flagc=`$Ldataguard_sqlite /raid$fRaidmd/sys/smb.db "select * from iscsi where name='$Ldataguard_dest_folder'"|wc -l`
+            if [ $flagc -gt 0 ];then
+                raid_id="$fRaidmd"
+                Ldataguard_target="raid""$raid_id"
+                break
+            fi
+        fi
+    done
+    if [ "$Ldataguard_target" == "" ];then
+        Ldataguard_target="$Ldataguard_fTarget"
+        raid_id=`echo $Ldataguard_target|sed 's/\/raid//g'`
+    fi
+    Ldataguard_dest_folder1="/iSCSI_"$Ldataguard_dest_folder                    #Source path
+    Ldataguard_dest_folder_n="/raid$raid_id/data$Ldataguard_dest_folder1"       #Target path
+    rm -rf /raid/data/tmp/check_iscsi
+    echo "$Ldataguard_folder_path//$Ldataguard_dest_folder_n"
+}
+
+#################################################
+##       Check Raid Mount First
+#################################################
+check_raid(){
+  sys_path=`/bin/ls -l /raid/sys | awk -F' ' '{printf $11}'`
+  data_path=`/bin/ls -l /raid/data | awk -F' ' '{printf $11}'`
+  if [ "$sys_path" == "" ] || [ "$data_path" == "" ];
+  then
+    echo "Your Master RAID link is not exist"
+    exit
+  fi
+}

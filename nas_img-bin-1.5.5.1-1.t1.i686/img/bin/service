@@ -1,0 +1,169 @@
+#!/bin/sh
+
+if [ "$1" = "stop" ]; then
+  #upnpc might timeout. so is should run in background
+  /img/bin/rc/rc.router stop &
+  #stop
+  /img/bin/rc/rc.module stop
+  /img/bin/rc/rc.pkg stop
+  /img/bin/rc/rc.bonjour stop
+  /img/bin/rc/rc.badblock stop
+  /img/bin/rc/rc.samba stop
+  /img/bin/rc/rc.ftpd stop
+  /img/bin/rc/rc.cupsd stop
+  /img/bin/rc/rc.daapd stop
+  /img/bin/rc/rc.upnpd stop
+#  /img/bin/rc/rc.udhcpd_eth1 stop
+  /img/bin/rc/rc.atalk stop
+  /img/bin/rc/rc.nfsd stop
+  /img/bin/rc/rc.isomount stop
+  /img/bin/rc/rc.webcam stop
+  /img/bin/rc/rc.ups stop
+  /img/bin/rc/rc.rsyncd stop
+  /img/bin/rc/rc.snmpd stop
+  /img/bin/rc/rc.initiator stop
+  /img/bin/rc/rc.iscsi stop
+  /img/bin/rc/rc.user_quota stop
+  /img/bin/rc/rc.tftp stop
+  /img/bin/rc/rc.syslogd stop
+  /img/bin/rc/rc.ntp stop
+#  /img/bin/rc/rc.ddom_backup stop
+  /img/bin/rc/rc.ldap stop "no"
+  /img/bin/acl_backup.sh stop
+#  /img/bin/rc/rc.sshd stop
+  /img/bin/rc/rc.sys_monitor stop
+  /img/bin/rc/rc.dvd stop
+  /img/bin/rc/rc.dataguard stop
+  /img/bin/rc/rc.lbackup allstop
+  /img/bin/rc/rc.webdav stop &
+
+ 
+  /bin/sync
+  /bin/sync
+  /bin/sync
+  for j in `mount | grep -E "/raid[0-9]/data/USBHDD/|/raid6[0-9]/data/USBHDD/" | cut -d" " -f1`
+  do
+    /bin/umount -l $j
+  done
+
+  for j in `mount | grep -E "/raid[0-9]/data/eSATAHDD/|/raid6[0-9]/data/eSATAHDD/" | cut -d" " -f1`
+  do
+    /bin/umount -l $j
+  done
+
+  for j in `mount | grep "/raidsys/0/data/USBHDD/" | cut -d" " -f1`
+  do
+    /bin/umount -l $j
+  done
+
+  for j in `mount | grep "/raidsys/0/data/eSATAHDD/" | cut -d" " -f1`
+  do
+    /bin/umount -l $j
+  done
+
+  for j in `mount | grep "/raidsys/0/data/stackable/" | cut -d" " -f1`
+  do
+    /bin/umount -l $j
+  done
+
+  for j in `mount | grep "/dev/loop[^0-4] " | cut -d" " -f3`
+  do
+    /bin/umount -l $j
+  done
+
+  if [ -d /raid/sys/user/bootscript ]; then
+
+    cd /raid/sys/user/bootscript
+    for i in `ls`
+    do
+       ./$i stop
+    done
+    cd -
+
+  fi
+
+  killall mp3_ripper
+
+  sync;sync;sync
+  sleep 3
+
+elif [ "$1" = "boot" ]; then
+  #boot
+  /img/bin/rc/rc.sshd boot
+  /img/bin/rc/rc.syslogd boot
+  /img/bin/rc/rc.user_quota boot
+  /img/bin/rc/rc.iscsi boot
+  /img/bin/rc/rc.initiator start
+  /img/bin/rc/rc.samba boot
+  /img/bin/rc/rc.ftpd boot
+  /img/bin/rc/rc.cupsd boot
+  /img/bin/rc/rc.upnpd start
+  /img/bin/rc/rc.daapd boot
+  /img/bin/rc/rc.atalk boot
+  /img/bin/rc/rc.nfsd boot
+  /img/bin/rc/rc.isomount boot
+  /img/bin/rc/rc.webcam boot
+  /img/bin/rc/rc.bonjour boot
+  /img/bin/rc/rc.ups start
+#  /img/bin/rc/rc.cwireless boot
+  /img/bin/rc/rc.rsyncd boot
+  /img/bin/rc/rc.snmpd boot
+#  /img/bin/rc/rc.automodule boot
+  /img/bin/rc/rc.tftp boot
+  /img/bin/rc/rc.ntp start
+#  /img/bin/rc/rc.ddom_backup boot
+  /img/bin/rc/rc.scanad boot
+  /img/bin/rc/rc.ldap boot
+  /img/bin/rc/rc.sys_monitor boot
+  /img/bin/rc/rc.scanad boot
+  /img/bin/rc/rc.dataguard boot
+  /img/bin/rc/rc.lbackup boot
+  #upnpc might timeout, so it should be run in background
+  /img/bin/rc/rc.router boot &
+  /img/bin/rc/rc.webdav boot &
+
+  /img/bin/rc/rc.pkg boot
+  /img/bin/rc/rc.module boot
+  /img/bin/rc/rc.dvd start
+
+  if [ "`ps|grep '/opt/nodejs/js/server.js' | grep -v 'grep'`" == "" ];then
+    /img/bin/rc/rc.hv boot
+  fi
+
+  touch /tmp/boot_ok1
+else
+  #start
+  /img/bin/rc/rc.user_quota start
+  /img/bin/rc/rc.iscsi start
+  /img/bin/rc/rc.initiator start
+  /img/bin/rc/rc.samba start
+  /img/bin/rc/rc.ftpd boot
+  /img/bin/rc/rc.cupsd start
+  /img/bin/rc/rc.daapd boot
+  /img/bin/rc/rc.upnpd start
+#  /img/bin/rc/rc.udhcpd_eth1 boot
+  /img/bin/rc/rc.atalk start
+  /img/bin/rc/rc.nfsd start
+  /img/bin/rc/rc.isomount boot
+  /img/bin/rc/rc.webcam start
+  /img/bin/rc/rc.bonjour boot
+  /img/bin/rc/rc.ups start
+  /img/bin/rc/rc.rsyncd boot
+  /img/bin/rc/rc.snmpd boot
+#  /img/bin/rc/rc.automodule boot
+  /img/bin/rc/rc.tftp start
+  /img/bin/rc/rc.syslogd boot
+  /img/bin/rc/rc.ntp start
+#  /img/bin/rc/rc.ddom_backup boot
+  /img/bin/rc/rc.ldap start
+  /img/bin/rc/rc.ldap boot
+  /img/bin/rc/rc.sys_monitor start
+  /img/bin/rc/rc.pkg start
+  /img/bin/rc/rc.module start
+  /img/bin/rc/rc.dvd start
+  /img/bin/rc/rc.dataguard start
+  /img/bin/rc/rc.lbackup allstart
+  #upnpc might timeout, so it should be run in background
+  /img/bin/rc/rc.router start &
+  /img/bin/rc/rc.webdav start &
+fi

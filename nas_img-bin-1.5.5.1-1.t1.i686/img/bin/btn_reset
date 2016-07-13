@@ -1,0 +1,63 @@
+#!/bin/sh
+#/etc/cfg/cfg_nic0
+
+#Model=`cat /proc/thecus_io  | awk '/^MODELNAME:/{print $2}'`
+Model=`cat /var/run/model`
+/bin/tar zxf /img/bin/default.${Model}.tar.gz -C /tmp
+cp -f /tmp/opt/apache/conf/httpd.conf /opt/apache/conf/httpd.conf
+cp -f /tmp/opt/apache/conf/ssl.conf /opt/apache/conf/ssl.conf
+
+/usr/bin/sqlite /etc/cfg/conf.db "update conf set v='80' where k='httpd_port'"
+/usr/bin/sqlite /etc/cfg/conf.db "update conf set v='443' where k='httpd_ssl'"
+
+nic1_ip=`/usr/bin/sqlite /tmp/etc/cfg/conf.db "select v from conf where k='nic1_ip'"`
+nic1_netmask=`/usr/bin/sqlite /tmp/etc/cfg/conf.db "select v from conf where k='nic1_netmask'"`
+nic1_dhcp=`/usr/bin/sqlite /tmp/etc/cfg/conf.db "select v from conf where k='nic1_ipv4_dhcp_client'"`
+nic1_gateway=`/usr/bin/sqlite /tmp/etc/cfg/conf.db "select v from conf where k='nic1_gateway'"`
+nic1_hostname=`/usr/bin/sqlite /tmp/etc/cfg/conf.db "select v from conf where k='nic1_hostname'"`
+nic1_domainname=`/usr/bin/sqlite /tmp/etc/cfg/conf.db "select v from conf where k='nic1_domainname'"`
+nic1_dns=`/usr/bin/sqlite /tmp/etc/cfg/conf.db "select v from conf where k='nic1_dns'"`
+admin_pwd=`/usr/bin/sqlite /tmp/etc/cfg/conf.db "select v from conf where k='admin_pwd'"`
+nic2_ip=`/usr/bin/sqlite /tmp/etc/cfg/conf.db "select v from conf where k='nic2_ip'"`
+nic2_netmask=`/usr/bin/sqlite /tmp/etc/cfg/conf.db "select v from conf where k='nic2_netmask'"`
+
+/usr/bin/sqlite /etc/cfg/conf.db "update conf set v='${nic1_ip}' where k='nic1_ip'"
+/usr/bin/sqlite /etc/cfg/conf.db "update conf set v='${nic1_netmask}' where k='nic1_netmask'"
+/usr/bin/sqlite /etc/cfg/conf.db "update conf set v='${nic1_dhcp}' where k='nic1_ipv4_dhcp_client'"
+/usr/bin/sqlite /etc/cfg/conf.db "update conf set v='${nic1_gateway}' where k='nic1_gateway'"
+/usr/bin/sqlite /etc/cfg/conf.db "update conf set v='${nic1_hostname}' where k='nic1_hostname'"
+/usr/bin/sqlite /etc/cfg/conf.db "update conf set v='${nic1_domainname}' where k='nic1_domainname'"
+/usr/bin/sqlite /etc/cfg/conf.db "update conf set v='${nic1_dns}' where k='nic1_dns'"
+/usr/bin/sqlite /etc/cfg/conf.db "update conf set v='${admin_pwd}' where k='admin_pwd'"
+/usr/bin/sqlite /etc/cfg/conf.db "update conf set v='${nic2_ip}' where k='nic2_ip'"
+/usr/bin/sqlite /etc/cfg/conf.db "update conf set v='{$nic2_netmask}' where k='nic2_netmask'"
+
+/usr/bin/passwd "root" "${admin_pwd}"
+
+/usr/bin/sqlite /etc/cfg/conf.db "update conf set v='1500' where k='nic1_jumbo'"
+/usr/bin/sqlite /etc/cfg/conf.db "update conf set v='1500' where k='nic2_jumbo'"
+
+#disable user module
+if [ -f /raid/data/module/cfg/module.db ];then
+        mod=`/usr/bin/sqlite /raid/data/module/cfg/module.db "select name from module where enable = 'Yes'"`
+        for i in ${mod}
+        do
+                /raid/data/module/"${mod}"/shell/enable.sh "${mod}" Yes
+        done
+        /usr/bin/sqlite /raid/data/module/cfg/module.db "update module set enable = 'No' where enable = 'Yes'"
+fi
+
+if [ ${nic1_dhcp} -eq 1 ]; then
+  echo -e "#!/bin/sh\n/sbin/udhcpc -T 5 -b -h `hostname` -i eth0 > /dev/null 2>&1" > /etc/cfg/cfg_nic0
+else
+  echo -e "#!/bin/sh\n/sbin/ifconfig eth0 up\n/sbin/ifconfig eth0 ${nic1_ip} netmask ${nic1_netmask} broadcast +\n/sbin/route add default gw ${nic1_gateway}" > /etc/cfg/cfg_nic0
+fi
+
+echo -e "#!/bin/sh\n/sbin/ifconfig eth1 up\n/sbin/ifconfig eth1 ${nic2_ip} netmask ${nic2_netmask} broadcast +\n" > /etc/cfg/cfg_nic1
+chmod +x /etc/cfg/cfg_nic0
+chmod +x /etc/cfg/cfg_nic1
+if [ "${nic1_dns}" != "" ]; then
+  echo -e "nameserver\t${nic1_dns}" > /etc/resolv.conf
+else
+  echo "" > /etc/resolv.conf
+fi

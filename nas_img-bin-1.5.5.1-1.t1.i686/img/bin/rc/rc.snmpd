@@ -1,0 +1,96 @@
+#!/bin/sh 
+#################################################
+##	Vars defined
+#################################################
+pwd="/usr/sbin"
+sqlite="/usr/bin/sqlite"
+confdb="/etc/cfg/conf.db"
+open_snmpd=`/img/bin/check_service.sh netsnmp`
+TMPIPV6EN="/var/tmp/ipv6_en"
+ENABLE_IPV6=`cat ${TMPIPV6EN}`
+
+#################################################
+##	Declare subroutine
+#################################################
+
+get_snmpd_setting() {
+  sqlcmd="select v from conf where k='snmp_enabled'"
+  ${sqlite} ${confdb} "${sqlcmd}"
+}
+
+## simplify to start snmpd process
+start_snmpd() {
+  if [ "$open_snmpd" == "0" ];
+  then
+    echo "You dont have permission to start this service!"
+    exit
+  fi
+  cd ${pwd}
+  community=`$sqlite $confdb "select v from conf where k='snmp_read_comm'"`
+  contact=`$sqlite $confdb "select v from conf where k='snmp_sys_contact'"`
+  location=`$sqlite $confdb "select v from conf where k='snmp_sys_locate'"`
+  echo "rocommunity" $community > /etc/snmpd.conf
+  if [ "$ENABLE_IPV6" == "1" ];then
+    echo "rocommunity6" $community >> /etc/snmpd.conf
+  fi
+  echo "syscontact" $contact >> /etc/snmpd.conf
+  echo "syslocation" $location >> /etc/snmpd.conf
+  if [ "$ENABLE_IPV6" == "1" ];then
+    /usr/sbin/snmpd -c /etc/snmpd.conf udp:161,udp6:161 -p /var/run/snmpd.pid
+  else
+    /usr/sbin/snmpd -c /etc/snmpd.conf -p /var/run/snmpd.pid
+  fi
+  echo "SNMPD works now!!"
+}
+
+## simplify to stop snmpd process
+stop_snmpd() {
+  if [ -f /var/run/snmpd.pid ];then
+    pidofsnmpd=`cat /var/run/snmpd.pid`
+    kill -9 $pidofsnmpd
+    rm -f /var/run/snmpd.pid
+  fi
+  killall snmpd
+  echo "SNMPD stops."
+}
+
+## simplify to restart snmpd process
+restart_snmpd() {
+  stop_snmpd
+  start_snmpd
+  echo "SNMPD restarted."
+}
+
+bootup_snmpd(){
+  able=`get_snmpd_setting`
+  if [ "${able}" != "1" ];
+  then
+    stop_snmpd
+    echo "SNMPD is disable, not running ..."
+  else 
+    start_snmpd
+    echo "SNMPD is now working.."
+  fi
+}
+#################################################
+##	Main code
+#################################################
+
+case "$1"
+in
+  start)
+    start_snmpd
+  ;;
+  stop)			
+    stop_snmpd
+  ;;
+  restart)
+    restart_snmpd
+  ;;
+  boot)
+    bootup_snmpd
+  ;;
+  *)			
+  echo "Usage: $0 {start|stop|restart|boot}"
+  ;;
+esac

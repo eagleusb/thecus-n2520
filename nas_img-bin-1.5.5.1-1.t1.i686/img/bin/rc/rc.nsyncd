@@ -1,0 +1,110 @@
+#!/bin/sh 
+#################################################
+##	Vars defined
+#################################################
+pwd="/usr/sbin/"
+sqlite="/usr/bin/sqlite"
+confdb="/etc/cfg/conf.db"
+
+#################################################
+##	Declare subroutine
+#################################################
+
+get_nsync_target_setting() {
+	sqlcmd="select v from conf where k='nsync_target_enable'"
+	${sqlite} ${confdb} "${sqlcmd}"
+}
+
+nsync_target_default_setting() {
+	sqlcmd="insert into conf (k,v) values ('nsync_target_enable','1')"
+	${sqlite} ${confdb} "${sqlcmd}"
+}
+
+## simplify to start ftpd process
+start_ftpd() {
+	stop_ftpd
+	sleep 1
+	MacX=`ifconfig eth0 | awk -F: '/HWaddr/{print $6}'`
+	MacY=`ifconfig eth0 | awk -F: '/HWaddr/{print $7}'`
+	XX=`printf "%u" 0x$MacX`
+	YY=`printf "%u" 0x$MacY`
+	if [ $YY -eq 0 ];then
+		YY=1
+	fi
+	if [ $YY -eq 255 ];then
+		YY=254
+	fi
+	nsync_network="10.$XX.$YY.0"
+
+	/img/bin/openvpn/vpn_server.sh start $nsync_network 255.255.255.0
+	cd ${pwd}
+	cmd="./pure-ftpd -B -lextauth:/var/run/nsync.sock -AHM -S 2000 -g /var/run/nsync-td.pid"
+	sh -c "./pure-authd -p /var/run/nsync-au.pid -s /var/run/nsync.sock -r /usr/bin/ftp-auth-handler & "
+	sh -c "${cmd} -8 UTF-8 -9 UTF-8  --umask 0000 "
+	echo "Nsync Target Server works now!!"
+}
+
+## simplify to stop ftpd process
+stop_ftpd() {
+	if [ -f /var/run/nsync-td.pid ];then
+  		pidoftarget=`cat /var/run/nsync-td.pid`
+  		kill -9 $pidoftarget
+  		rm -f /var/run/nsync-td.pid
+	fi
+	if [ -f /var/run/nsync-au.pid ];then
+  		pidofauth=`cat /var/run/nsync-au.pid`
+  		kill -9 $pidofauth
+  		rm -f /var/run/nsync-au.pid
+	fi
+	if [ -f /var/run/openvpn.pid ];then
+  		pidofvpn=`cat /var/run/openvpn.pid`
+  		kill -9 $pidofvpn
+  		rm -f /var/run/openvpn.pid
+	fi
+	echo "Nsync Target Server stops."
+}
+
+## simplify to restart ftpd process
+restart_ftpd() {
+	stop_ftpd
+	start_ftpd
+	echo "Nsync Target Server restarted."
+}
+
+bootup_ftpd(){
+able=`get_nsync_target_setting`
+	if [ "${able}" = "" ];then
+		nsync_target_default_setting
+		able=1
+	fi
+	if [ "${able}" != "1" ];
+	then
+	stop_ftpd
+	echo "Nsync Target Server is disable, not running ..."
+	else 
+	start_ftpd
+	echo "Nsync Target Server is now working.."
+	fi
+}
+#################################################
+##	Main code
+#################################################
+
+case "$1"
+in
+	start)
+		start_ftpd
+		;;
+	stop)			
+		stop_ftpd
+		;;
+	restart)
+		restart_ftpd
+		;;
+	boot)
+		bootup_ftpd
+		;;
+	*)			
+		echo "Usage: $0 {start|stop|restart|boot}"
+		;;
+esac

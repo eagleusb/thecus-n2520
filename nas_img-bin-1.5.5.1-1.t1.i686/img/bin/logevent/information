@@ -1,0 +1,407 @@
+#!/bin/sh
+if [ $# -lt 1 ]; then 
+echo "Need At Least one argument : Event ID"
+exit 1
+fi
+
+. /img/bin/logevent/sysinfo
+. /img/bin/logevent/setsyslog
+event_id=$1
+param_1=${2}
+info_log_path=$log_path"information"
+
+Usage(){
+echo "Event : "$1
+echo "Argument Error : "$2
+}
+
+      case $event_id in
+           101)
+#001-101
+	      info_msg="[${host_name}] reboot."
+           ;;
+           102)
+#002-102
+	      info_msg="[${host_name}] boot successfully."
+           ;;
+           103)
+#003-103
+              info_msg="The system [${host_name}] shutdown."
+           ;;
+           104)
+#005-104
+	      username=$2
+	      if [ $# -eq 2 ]; then
+              info_msg="User $username has been added."
+	      else
+	      Usage "104" "UserName"
+	      fi
+	   ;;
+           105)
+#008-105
+              username=$2
+              if [ $# -eq 2 ]; then
+              info_msg="User ${username} has been deleted."
+              else
+              Usage "105" "UserName"
+              fi
+           ;;
+           106)
+#009-106
+              groupname=$2
+              if [ $# -eq 2 ]; then
+              info_msg="Group ${groupname} has been added."
+              else
+              Usage "106" "GroupName"
+              fi
+           ;;
+           107)
+#011-107
+              groupname=$2
+              if [ $# -eq 2 ]; then
+              info_msg="Group ${groupname} has been deleted."
+              else
+              Usage "107" "GroupName"
+              fi
+           ;;
+           108)
+#013-108
+              username=$2
+		if [ $# -eq 2 ]; then
+              info_msg="User $username's password changed."
+              else
+              Usage "108" "UserName"
+              fi
+           ;;
+           109)
+#019-109
+		folder=$2
+              if [ $# -eq 2 ]; then
+              info_msg="The ACL of folder ${folder} has been modified."
+              else
+              Usage "109" "FolderName"
+              fi
+           ;;
+           110)
+#020-110
+		username=$2
+		ip=$3
+              if [ $# -eq 3 ]; then
+              info_msg="User ${username} logged in from ${ip}"
+              else
+              Usage "110" "UserName IP"
+              fi
+           ;;
+           111)
+#022-111
+		old_host_name=$2
+		new_host_name=$3
+              if [ $# -eq 3 ]; then
+              info_msg="Server name was changed from [${old_host_name}] to [${new_host_name}]"
+              else
+              Usage "111" "Old_Host_Name New_Host_Name"
+              fi
+           ;;
+           112)
+#024-112
+              info_msg="The log file has been truncated successfully."
+           ;;
+           113)
+#028-113
+              info_msg="The system [${host_name}] temperature has been restored to normal."
+           ;;
+           114)
+#033-114
+		lan_interface=$2
+		lan_interface_dhcp_status=$3
+		lan_interface_ip=$4
+		lan_interface_gateway=$5
+		lan_interface_dns=$6
+              if [ $# -eq 3 ]; then
+              info_msg="Changed ${lan_interface} network setting, DHCP setting = ${lan_interface_dhcp_status}."
+              fi		
+              if [ $# -eq 6 ]; then
+              info_msg="Changed ${lan_interface} network setting, DHCP setting = ${lan_interface_dhcp_status} ,IP = ${lan_interface_ip}, Gateway = ${lan_interface_gateway}, DNS = ${lan_interface_dns}."
+              fi
+
+              if [ $# -ne 3 ] && [ $# -ne 6 ]; then
+              Usage  "114" "Lan_Interface DHCP_Status IP Gateway DNS."
+              fi
+           ;;
+           115)
+#035-115
+              info_msg="The system [${host_name}] $2 network was plugged."
+           ;;
+           116)
+#045-116
+              info_msg="Healthy: The RAID [${param_1}] on system "[${host_name}]" is healthy now."
+           ;;
+           117)
+#046-117
+		Disk_ID=$2
+              if [ $# -eq 2 ]; then
+              info_msg="New Disk ${Disk_ID} on [${host_name}] is detected."
+              else
+              Usage "117" "Disk_ID"
+              fi
+           ;;
+           118)
+#047-118
+		Disk_ID=$2
+              if [ $# -eq 2 ]; then
+              info_msg="Disk ${Disk_ID} on [${host_name}] has been added."
+              else
+              Usage "118" "Disk_ID"
+              fi
+           ;;
+           119)
+#049-119
+		Disk_ID=$2
+              if [ $# -eq 2 ]; then
+              info_msg="Disk ${Disk_ID} on [${host_name}] has been removed."
+              else
+              Usage "119" "Disk_ID"
+              fi
+           ;;
+           120)
+#057-120
+		Task=$2
+              if [ $# -eq 2 ]; then
+              info_msg="Network Synchronization: Task ${Task} has been added."
+              else
+              Usage "120" "Task"
+              fi
+           ;;
+           121)
+#058-121
+		Task=$2
+              if [ $# -eq 2 ]; then
+              info_msg="Network Synchronization: Task ${Task} has been deleted."
+              else
+              Usage "121" "Task"
+              fi
+           ;;
+           122)
+#059-122
+		Task=$2
+              if [ $# -eq 2 ]; then
+              info_msg="Network Synchronization: Task ${Task} has been modified."
+              else
+              Usage "122" "Task"
+              fi
+           ;;
+           123)
+#060-123
+		Task=$2
+              if [ $# -eq 2 ]; then
+              info_msg="Network Synchronization: Task ${Task} has started."
+              else
+              Usage "123" "Task"
+              fi
+           ;;
+           124)
+#061-124
+		Task=$2
+		Success_Result=$3
+              if [ $# -eq 3 ]; then
+              info_msg="Network Synchronization: Task ${Task} has been ${Success_Result}."
+              else
+              Usage "124" "Task"
+              fi
+           ;;
+           125)
+#064-125
+		Task=$2
+              if [ $# -eq 2 ]; then
+              info_msg="Network Synchronization: Restore Task ${Task} has started."
+              else
+              Usage "125" "Task"
+              fi
+           ;;
+           126)
+#065-126
+		Task=$2
+              if [ $# -eq 2 ]; then
+              info_msg="Network Synchronization: Restore Task ${Task} has been completed."
+              else
+              Usage "126" "Task"
+              fi
+           ;;
+           127)
+              mount_point=$2
+              if [ $# -eq 2 ]; then
+              info_msg="found Partition and mount at " "${mount_point}"
+              else
+              Usage "127" "Mount_Point"
+              fi
+           ;;
+           128)
+              info_msg="One touch copy success"
+           ;;
+           129)
+#081-129
+              info_msg="LCD password changed."
+           ;;
+           130)
+	              info_msg="Backup system dom success. $2"
+           ;;
+           131)
+#069-131
+              info_msg="FTP has been enabled on the system."
+           ;;
+           132)
+#070-132
+              info_msg="FTP has been disabled on the system."
+           ;;
+           133)
+#071-133
+              info_msg="AFP has been enabled on the system."
+           ;;
+           134)
+#072-134
+              info_msg="AFP has been disabled on the system."
+           ;;
+           135)
+#075-135
+              info_msg="PPPoE is connected."
+           ;;
+           136)
+#076-136
+              info_msg="PPPoE is disconnected."
+           ;;
+           137)
+#077-137
+              info_msg="PPPoE can not connect. Password is incorrect."
+           ;;
+           138)
+#078-138
+              info_msg="PPPoE can not connect. Service is not responding."
+           ;;
+           139)
+#079-139
+              info_msg="PPPoE is disconnected, timeout reached."
+           ;;
+           140)
+#227-140
+              Time=$2
+              info_msg="The system [${host_name}] booted at ${Time} as scheduled."
+           ;;
+           141)
+#228-141
+              Time=$2
+              info_msg="The system [${host_name}] is shutting down at ${Time} as scheduled."
+           ;;
+           142)
+#083-142
+              info_msg="The system [${host_name}] LAN network was plugged."
+           ;;
+           143)
+#085-143
+              New_Version=$2
+              Old_Version=$3
+              info_msg="System is being upgraded from v${Old_Version} to v${New_Version}."
+           ;;
+           144)
+#086-144
+	      New_Version=$2
+              info_msg="System has been upgraded successfully to ${New_Version}."
+           ;;
+           145)
+#087-145
+	      Reason=$2
+              info_msg="System upgrade failed - ${Reason}."
+           ;;
+           146)
+#073-146
+              info_msg="NFS has been enabled on the system."
+           ;;
+           147)
+#074-147
+              info_msg="NFS has been disabled on the system."
+           ;;
+           148)
+#231-148
+              info_msg="eSATA device on [${host_name}] has been added."
+           ;;
+           149)
+#232-149
+              info_msg="eSATA device on [${host_name}] has been removed."
+           ;;
+           150)
+              info_msg="SMB has been enabled on the system."
+           ;;
+           151)
+              info_msg="SMB has been disabled on the system."
+           ;;
+           152)
+              info_msg="HA has been enabled on the system."
+           ;;
+           153)
+              info_msg="HA has been disabled on the system."
+           ;;
+           154)
+              info_msg="HA change to active, get resoures."
+           ;;
+           155)
+              info_msg="HA change to standby, release resources."
+           ;;
+           156)
+              info_msg="HV has been enabled on the system."
+           ;;
+           157)
+              info_msg="HV has been disabled on the system."
+           ;;
+           158)
+              RAID_ID=$2
+              if [ $# -eq 2 ]; then
+              info_msg="RAID [${RAID_ID}] on [${host_name}] has been removed."
+              else
+              Usage "119" "RAID_ID"
+              fi
+           ;;
+           159)
+              RAID_ID=$2
+              if [ $# -eq 2 ]; then
+              info_msg="RAID [${RAID_ID}] on [${host_name}] was formatted complete."
+              else
+              Usage "119" "RAID_ID"
+              fi
+           ;;
+           160)
+              Enc_ID=$2
+              if [ $# -eq 2 ]; then
+              info_msg="D16000-${Enc_ID} on [${host_name}] has been added."
+              else
+              Usage "160" "D16000_ID"
+              fi
+           ;;
+           161)
+              Enc_ID=$2
+              if [ $# -eq 2 ]; then
+              info_msg="D16000-${Enc_ID} on [${host_name}] has been removed."
+              else
+              Usage "161" "D16000_ID"
+              fi
+           ;;
+           217)
+	              info_msg="The AC Power has recovered for system [${host_name}]."
+             ;;
+           425)
+              info_msg="Network Synchronization : Task $2 status [ $3 ]."
+           ;;
+           997)
+             info_msg="$3"
+           ;;
+           999)
+#081-999   any message
+              info_msg="$2"
+           ;;
+	   *)
+	      echo "No Such Event ID In Information Pool"
+	   ;;
+      esac
+
+if [ "${info_msg}" != "" ]; then
+      $sqlite $db_path "insert into sysinfo(Date_time,Details,level) values('${time_stamp}',\"[${host_name}] : ${info_msg}\",'Info')"
+      set_syslog "info" "${info_msg}"
+fi

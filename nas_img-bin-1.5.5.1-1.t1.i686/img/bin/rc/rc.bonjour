@@ -1,0 +1,125 @@
+#!/bin/sh
+#################################################
+##	Vars define
+#################################################
+sqlite="/usr/bin/sqlite"
+confdb="/etc/cfg/conf.db"
+Bonjour_conf="/var/run/mDNSResponderPosix.conf"
+
+#################################################
+##	Declare subroutine
+#################################################
+get_bonjour_setting() {
+  sqlcmd="select v from conf where k='bonjour_enable'"
+  bonjour_setting=`${sqlite} ${confdb} "${sqlcmd}"`
+  echo $bonjour_setting
+}
+
+get_hostname(){
+  sqlcmd="select v from conf where k='ha_enable'"
+  ha_enable=`${sqlite} ${confdb} "${sqlcmd}"`
+  if [ "$ha_enable" = "1" ];then
+    sqlcmd="select v from conf where k='ha_virtual_name'"
+  else
+    sqlcmd="select v from conf where k='nic1_hostname'"
+  fi
+  hostname=`${sqlite} ${confdb} "${sqlcmd}"`
+  echo $hostname
+}
+
+## simplify to start bonjour process
+start_bonjour() {
+  stop_bonjour
+  sleep 1
+  hostname=`get_hostname`
+  sqlcmd="select v from conf where k='httpd_port'"
+  port=`${sqlite} ${confdb} "${sqlcmd}"`
+  http_enable=`${sqlite} ${confdb} "select v from conf where k='httpd_nic1_httpd'"`
+  samba_enable=`${sqlite} ${confdb} "select v from conf where k='httpd_nic1_cifs'"`
+  bonjour_enable=`${sqlite} ${confdb} "select v from conf where k='bonjour_enable'"`
+  ftp_enable=`${sqlite} ${confdb} "select v from conf where k='ftp_ftpd'"`
+  ftp_port=`${sqlite} ${confdb} "select v from conf where k='ftp_port'"`
+  https_enable=`${sqlite} ${confdb} "select v from conf where k='httpd_nic1_ssl'"`
+  https_port=`${sqlite} ${confdb} "select v from conf where k='httpd_ssl'"`
+  
+  if [ "$http_enable" = "1" ];then
+      echo $hostname >> $Bonjour_conf
+      echo "_http._tcp." >> $Bonjour_conf
+      echo $port >> $Bonjour_conf
+      echo "path=/" >> $Bonjour_conf
+      echo "" >> $Bonjour_conf
+  fi
+  if [ "$samba_enable" = "1" ];then
+      echo $hostname >> $Bonjour_conf
+      echo "_smb._tcp." >> $Bonjour_conf
+      echo "139" >> $Bonjour_conf
+      echo "path=/" >> $Bonjour_conf
+      echo "" >> $Bonjour_conf
+  fi
+  if [ "$bonjour_enable" = "1" ];then
+      echo $hostname >> $Bonjour_conf
+      echo "_afpovertcp._tcp." >> $Bonjour_conf
+      echo "548" >> $Bonjour_conf
+      echo "path=/" >> $Bonjour_conf
+      echo "" >> $Bonjour_conf
+  fi
+  if [ "$ftp_enable" = "1" ];then
+      echo $hostname >> $Bonjour_conf
+      echo "_ftp._tcp." >> $Bonjour_conf
+      echo $ftp_port >> $Bonjour_conf
+      echo "path=/" >> $Bonjour_conf
+      echo "" >> $Bonjour_conf
+  fi
+  if [ "$https_enable" = "1" ];then
+      echo $hostname >> $Bonjour_conf
+      echo "_https._tcp." >> $Bonjour_conf
+      echo $https_port >> $Bonjour_conf
+      echo "path=/" >> $Bonjour_conf
+      echo "" >> $Bonjour_conf
+  fi
+  
+  /usr/bin/mDNSResponderPosix -f ${Bonjour_conf} -b -P '/var/run/mDNSResponderPosix.pid' > /dev/null 2>&1
+  ##/usr/bin/mDNSResponderPosix -n $hostname -t _http._tcp. -p $port -b -P '/var/run/mDNSResponderPosix.pid'
+  echo "Bonjour works now!!"
+}
+
+## simplify to stop bonjour process
+stop_bonjour() {
+  if [ -f /var/run/mDNSResponderPosix.pid ];then
+    pidoftarget=`cat /var/run/mDNSResponderPosix.pid`
+    kill -9 $pidoftarget
+    rm -f /var/run/mDNSResponderPosix.pid
+  fi
+  rm -f ${Bonjour_conf}
+  echo "Bonjour service stops."
+}
+
+bootup_bonjour(){
+  able=`get_bonjour_setting`
+  if [ "${able}" != "1" ];
+	then
+    stop_bonjour
+    echo "Bonjour service is disable, not running ..."
+  else 
+    start_bonjour
+    echo "Bonjour service is now working.."
+  fi
+}
+#################################################
+##	Main code
+#################################################
+case "$1"
+in
+  start)
+    start_bonjour
+    ;;
+  stop)
+    stop_bonjour
+    ;;
+  boot)
+    bootup_bonjour
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|boot}"
+    ;;
+esac

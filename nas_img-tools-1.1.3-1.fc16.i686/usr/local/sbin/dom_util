@@ -1,0 +1,66 @@
+#!/bin/sh
+
+PATH=$PATH:/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin
+
+show_usage(){
+	echo "Usage:"
+	echo " `basename $0` <Device> <Options> <file>"
+	echo 
+	echo "  Device:                       Target device, ex. /dev/sdaaa1"
+	echo 
+	echo "  Options:"
+	echo "   -k | --kernel <file>         Update kernel by file"
+	echo "   -i | --initrd <file>         Update initramfs by file"
+
+	exit $RET
+}
+
+init_env(){
+	DEVICE="$1"
+	OPT="$2"
+	IMAGE="$3"
+	DOMMNT="/dev/shm/dom"
+	KERNEL="$DOMMNT/kernel"
+	RAMDISK="$DOMMNT/initramfs"
+	RET=0
+
+	mkdir -p $DOMMNT
+}
+
+update_item(){
+	eval "TARGET=\$$1"
+	mount $DEVICE $DOMMNT > /dev/null 2>&1
+	[ "$?" -ne 0 ] && echo "mount DOM device failed!" && return 1
+
+	/bin/cp -f $IMAGE $TARGET
+	sync
+
+	umount $DOMMNT
+
+	return 0
+}
+
+if [ ! -e "$1" -o -z "$2" -o ! -f "$3" ];then
+	RET=1
+	show_usage
+fi
+
+init_env "$@"
+
+if [ -e $DEVICE ];then
+	case "$OPT" in
+	-k|--kernel)
+		update_item "KERNEL"
+		;;
+	-i|--initrd)
+		update_item "RAMDISK"
+		;;
+	esac
+	RET=$?
+	rm -rf $DOMMNT
+else
+	echo "$DEVICE is not found!"
+	RET=1
+fi
+
+exit $RET

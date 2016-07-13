@@ -1,0 +1,55 @@
+#!/bin/sh
+sqlite="/usr/bin/sqlite"
+db_path="/syslog/sys_log.db"
+
+set_syslog() {
+	level=$1
+	msg=$2
+
+	sqlite="/usr/bin/sqlite"
+	confdb="/etc/cfg/conf.db"
+	sqlcmd="select v from conf where k like 'syslogd_level'"
+	syslog_level=`${sqlite} ${confdb} "${sqlcmd}"`
+
+	if [ "$syslog_level" != "all" ]; then
+		if [ "$syslog_level" == "warning" ] && [ "$level" != "warning" ] && [ "$level" != "error" ]; then
+			exit 1
+		elif [ "$syslog_level" == "error" ] && [ "$level" != "error" ]; then
+			exit 1
+		fi
+	fi
+
+	`logger -p local7."$level" "$level: $msg"`
+}
+
+if [ ! -f "$db_path" ];then
+    $sqlite $db_path "create table sysinfo(Date_time,Details,level)"
+fi
+
+if [ -f "/syslog/information" ];then
+    cat /syslog/information | sed -nr 's/(.{19}) (.*)/\1|\2/p' > /syslog/information_tmp
+    cat /syslog/information_tmp | sed -nr 's/(.{4})\/(.{2})\/(.*)/\1-\2-\3/p' > /syslog/information
+    cat /syslog/information | sed -nr 's/(^.*)/\1|Info/p' > /syslog/information_tmp
+    $sqlite $db_path ".import /syslog/information_tmp sysinfo"
+    rm -rf /syslog/information_tmp
+    rm -rf /syslog/information
+fi
+
+if [ -f "/syslog/warning" ];then
+    cat /syslog/warning | sed -nr 's/(.{19}) (.*)/\1|\2/p' > /syslog/warning_tmp
+    cat /syslog/warning_tmp | sed -nr 's/(.{4})\/(.{2})\/(.*)/\1-\2-\3/p' > /syslog/warning
+    cat /syslog/warning | sed -nr 's/(^.*)/\1|Warning/p' > /syslog/warning_tmp
+    $sqlite $db_path ".import /syslog/warning sysinfo"
+    rm -rf /syslog/warning_tmp
+    rm -rf /syslog/warning
+fi
+
+if [ -f "/syslog/error" ];then
+    cat /syslog/error | sed -nr 's/(.{19}) (.*)/\1|\2/p' > /syslog/error_tmp
+    cat /syslog/error_tmp | sed -nr 's/(.{4})\/(.{2})\/(.*)/\1-\2-\3/p' > /syslog/error
+    cat /syslog/error | sed -nr 's/(^.*)/\1|Error/p' > /syslog/error_tmp
+    $sqlite $db_path ".import /syslog/error sysinfo"
+    rm -rf /syslog/error_tmp
+    rm -rf /syslog/error
+fi
+

@@ -1,0 +1,253 @@
+<?
+session_start();
+require_once('../../../function/conf/localconfig.php');
+require_once(INCLUDE_ROOT.'session.php');
+    
+require_once("GlobalVars.html");
+require_once("functions.html");
+check_auth($_SESSION);
+
+include("../../../inc/exif_php.inc.php");
+require_once(WEBCONFIG);
+$words=$session->PageCode("photoshow");
+$gwords=$session->PageCode("global");
+function view(){
+	require_once("HtmlHeader.html");
+	body();	  
+}
+$_GET['album']=fix_post($_GET['album']);
+if (User_exist($_GET['id'])){
+	if (Album_exist($_GET['id'],$_GET['album'])){
+		if ($_SESSION['id']==$_GET['id'])  $Level="advance";
+		$obj = ScanDirs($_GET['id'],$_GET['album']);
+		$AlbumNum = 0;
+		$obj_num = count($obj);
+		$PageSize = 1 ;
+		$NextPageSize = 5 ;
+		$PageNum = $obj_num / $PageSize;
+		if (($obj_num % $PageSize)!=0) $PageNum=floor($PageNum) + 1;
+		if($PageNum==0) $PageNum=1;
+		$PageIndex=1;	
+
+		if($_GET['Page']) $PageIndex=$_GET['Page'];
+		if( $PageIndex > $PageNum) $PageIndex=$PageNum;
+	
+		$From=($PageIndex-1)*$PageSize;
+		$To=$PageIndex*$PageSize-1;
+		if ($To>$obj_num-1) $To=$obj_num-1;
+		view();
+		exit;
+	}
+	else
+	   direct_out("iframe_gallery.html");
+}
+else
+       direct_out("iframe_gallery.html");
+?>
+<?function Paging(){
+	global $words;
+?>
+<script type="text/javascript" language="javascript" src="/usr/gallery/js/cookie.js"></script>
+<script type="text/javascript" language="javascript" src="/usr/gallery/js/prototype.js"></script>
+<script type="text/javascript" language="javascript" src="/usr/gallery/js/rico.js"></script>
+<script language="javascript">
+function showEXIF() {
+    if(document.getElementById("exif").style.visibility == "hidden") {            
+        document.getElementById("exif").style.visibility = "visible";         
+        document.getElementById("exif").style.display="";      
+        document.getElementById("exifswitch").style.color='#ff0000';
+        Set_Cookie( 'exif', 'on', '', '/', '', '' );
+    }                                                                                     
+    else {                                                                                
+        document.getElementById("exif").style.display = "none";               
+        document.getElementById("exif").style.visibility = "hidden";    
+	document.getElementById("exifswitch").style.color='#0000ff'; 
+        Delete_Cookie('exif', '/', '');   
+    }                              
+
+}
+function roundCorner() {
+	new Rico.Effect.Round( null, 'roundNormal' ); 
+}
+</script>
+      <br>
+        <table width="500" border="0" cellspacing="0" cellpadding="0">
+          <tr>
+            <td width="20%" align="right">
+		<?$From = floor(( $GLOBALS['PageIndex'] - 1 )/$GLOBALS['NextPageSize']) * $GLOBALS['NextPageSize'] +1 ;?>
+		<?if (( $From -  $GLOBALS['NextPageSize'] ) > 0){?>
+		<a href="PhotoShow.html?Page=<?echo $From - $GLOBALS['NextPageSize'];?>&id=<?=Fix_encode($_GET['id'])?>&album=<?=Fix_encode($_GET['album'])?>" onMouseOver="MM_swapImage('pgup_1','','/usr/gallery/img/button_pgup_2.gif',1)" onMouseOut="MM_swapImgRestore()"><img src="/usr/gallery/img/button_pgup_1.gif" name="pgup_1" width="25" height="25" border="0" id="pgup_1" title="<?=$words['PreviousPage']?>"></a>
+		<?}?>
+            </td>
+            <td align="center">
+              <table width="0" border="0" cellspacing="1" cellpadding="1">
+                <tr>
+                  <?
+                  for($i=$From ,$j=1;$i <= $GLOBALS['PageNum'] && $j<= $GLOBALS['NextPageSize'] ; $i++,$j++){
+                    $picname = Fix_encode($GLOBALS['obj'][$i-1][1]);
+                    echo '<td width="50" height="50" align="center"><a style=text-decoration:none href=PhotoShow.html?id=' . Fix_encode($_GET['id']) .'&album=' . Fix_encode($_GET['album']) . "&Page={$i}>";
+                    echo GetImgSrc(Fix_encode($_GET['id']),Fix_encode($_GET['album']),$picname,"50x50","small");
+                    echo "</td>" ;
+                  }	
+?>
+                </tr>
+              </table>
+            </td>
+            <td width="20%" align="left">
+               <?if (( $From + $GLOBALS['NextPageSize'] - 1 ) < $GLOBALS['PageNum']) $ActiveNext=true; else  $ActiveNext=false;?>
+               <?if( $ActiveNext){?>
+               <a href="PhotoShow.html?Page=<?echo $From + $GLOBALS['NextPageSize'];?>&id=<?=Fix_encode($_GET['id'])?>&album=<?=Fix_encode($_GET['album'])?>" onMouseOver="MM_swapImage('pgdn_1','','/usr/gallery/img/button_pgdn_2.gif',1)" onMouseOut="MM_swapImgRestore()"><img src="/usr/gallery/img/button_pgdn_1.gif" name="pgdn_1" width="25" height="25" border="0" id="pgdn_1" title="<?=$words['NextPage']?>"></a>
+               <?}?>
+            </td>
+          </tr>
+       </table>
+<?}?>
+<?function body(){
+global $words;
+?>
+<?
+$picname = Fix_encode($GLOBALS['obj'][$GLOBALS['PageIndex']-1][1]);
+$PhotoSubject =rawurldecode(AlbumRoot . "{$_GET['id']}/{$_GET['album']}/{$picname}.Subject");
+$PhotoDesp = rawurldecode(AlbumRoot . "{$_GET['id']}/{$_GET['album']}/{$picname}.Desp");
+?>
+<body bgcolor="#686868" text="#ffffff" leftmargin="0" topmargin="0" marginwidth="0" marginheight="0" onload="roundCorner();">
+<table width="719px" border="0" cellspacing="0" cellpadding="0" align="center" class="outerpage">
+  <? require_once("HtmlBanner.html"); ?>
+  <tr>
+    <td align="center" valign="top">
+        <table width="95%"  border="0" cellpadding="0" cellspacing="0">
+          <tr>
+            <td width="70%" align="left">
+                <span class="style1"><a href="iframe_gallery.html" target="_self"><?=$words['gallery']?></a> &gt;  <a href="album.html?id=<?=fix_encode($_GET['id'])?>"><?=$_GET['id']?><?=str_replace("\\'","'",$words['owner'])?></a> &gt;  <a href="photo.html?id=<?=fix_encode($_GET['id'])?>&album=<?=Fix_encode($_GET['album'])?>"><?=$_GET['album']?></a> &gt;
+                <?
+		$Subject=ParseObj($PhotoSubject);
+		$fileName=fix_post($GLOBALS['obj'][$GLOBALS['PageIndex']-1][1]);
+		if(trim($Subject)=="") $Subject=$fileName;
+		echo $Subject;
+		?>
+                </span>
+            </td>
+            <td width="30%" align="right">
+                <?
+                $tmp1=rawurldecode(AlbumRoot . Fix_encode($_GET['id']) . '/' . Fix_encode($_GET['album']) . '/');
+                echo "<a href=\"slideshow.html?id=".Fix_encode($_GET['id'])."&album=".Fix_encode($_GET['album'])."&Page=".$_GET['Page']."&slideshow=1\">";
+	        echo "<img src=\"/usr/gallery/img/slideshow.png\" border=\"0\" alt=\"{$words['altStartSlide']}\" />";
+                echo "</a>";
+               ?>
+	    </td>
+          </tr>
+        </table>
+        <br>
+        <table width="100%"  border="0" cellpadding="0" cellspacing="0">
+          <tr>
+            <td align="center" valign="middle">
+              <table width="0%" height="300"  border="0" cellpadding="2" cellspacing="0" bordercolor="#666666">
+                <tr>
+                  <td bgcolor="#FFFFFF">
+		    <?$picname = Fix_encode($GLOBALS['obj'][$GLOBALS['PageIndex']-1][1]);?>
+		    <div class="shadow11">
+                      <div class="shadow21">
+                        <div class="shadow31"><!-- Thumbnail -->
+<a href="GetPic.html?PicName=<?=$picname?>&id=<?=Fix_encode($_GET['id'])?>&album=<?=Fix_encode($_GET['album'])?>&mode=original" target=_blank><?=GetImgSrc( fix_encode($_GET['id']), fix_encode($_GET['album']) ,$picname,"300x300","medium")?></a>
+		        </div>
+                      </div>
+                    </div>
+                  </td>
+		  <!--<td>
+                    <DIV onclick="showEXIF()" class="style1" style="cursor: pointer; text-align:center; border-style:dotted;">E<br>X<br>I<br>F</DIV> 
+                  </td>			
+                  <td>-->
+		    <? if (isset($_COOKIE["exif"])){
+                         echo "<td>\n";
+                         echo "<DIV id=\"exifswitch\" class=\"style1\" name=\"exifswitch\"  onclick=\"showEXIF()\" style=\"cursor: pointer;color:#ff0000; text-align:center; border-style:solid;\">E<br>X<br>I<br>F</DIV>\n";
+                         echo "</td>\n";
+                         echo "<td>\n";
+                         echo "<div id=\"exif\" name=\"exif\" style=\"visibility:visible; display:inline; white-space:nowrap;\">";
+                       }
+                       else {
+                         echo "<td>\n";                                                                                                  
+                         echo "<DIV id=\"exifswitch\" class=\"style1\" name=\"exifswitch\" onclick=\"showEXIF()\" style=\"cursor: pointer; color: #0000ff;text-align:center; border-style:solid;\">E<br>X<br>I<br>F</DIV>\n";
+                         echo "</td>\n";
+                         echo "<td>\n";
+                         echo "<div id=\"exif\" name=\"exif\" style=\"visibility:hidden; display:none; white-space:nowrap;\">";
+                       }
+                    ?>
+<!--                    <table border="4" cellpadding="2" cellspacing="0">
+                      <tr>
+                        <td>-->
+<?
+# Sanitize the data - to fix the XSS vulnerability - Aditya
+function sanitize_data(&$value, $key)
+{
+        if (is_array($value)) {
+                array_walk($value, 'sanitize_data');
+        } else {
+                # sanitize against sql/html injection; trim any nongraphical non-ASCII character:
+                $value = trim(htmlentities(strip_tags(trim($value,"\x7f..\xff\x0..\x1f")),ENT_QUOTES));
+        }
+}
+
+$path_to_pic=AlbumRoot . Fix_encode($_GET['id']) . "/" . $_GET['album'] . "/" . $picname;
+$path_to_pic=rawurldecode($path_to_pic);
+
+$exif = exif_parse_file($path_to_pic);
+$size=sprintf("%lu", filesize($path_to_pic));
+$info = array ( 'Filename' => rawurldecode($picname),
+		'File Size' => "$size bytes");
+ 
+if (isset($exif) && is_array($exif)) {
+  array_walk($exif, 'sanitize_data');
+  $info = array_merge($info,$exif);
+}
+echo '<p class=style2 style="TEXT-ALIGN: left" align=left>';
+echo "\n&nbsp;" . $words['Filename'] ." : " .$info['Filename']."<BR>\n";
+echo "&nbsp;" .$words['File Size'] ." : " .$info['File Size']."<BR>\n";
+echo "&nbsp;" .$words['ExifImageHeight'] ." : " .$info['ExifImageHeight']."<BR>\n";
+echo "&nbsp;" .$words['ExifImageWidth'] ." : " .$info['ExifImageWidth']."<BR>\n";
+echo "&nbsp;" .$words['Make'] ." : " .$info['Make']."<BR>\n";
+echo "&nbsp;" .$gwords['model'] ." : " .$info['Model']."<BR>\n";
+echo "&nbsp;" .$words['DateTimeOriginal'] ." : " .$info['DateTimeOriginal']."<BR>\n";
+echo "&nbsp;" .$words['Flash'] ." : " .$info['Flash']."<BR>\n";
+echo "&nbsp;" .$words['FocalLength'] ." : " .$info['FocalLength']."<BR>\n";
+echo "&nbsp;" .$words['ExposureTime'] ." : " .$info['ExposureTime']."<BR>\n";
+echo "&nbsp;" .$words['FNumber'] ." : " .$info['FNumber']."<BR>\n";
+echo "&nbsp;" .$words['MaxApertureValue'] ." : " .$info['MaxApertureValue']."<BR>\n";
+if($info['ISOSpeedRatings']==""){
+  $info['ISOSpeedRatings']="Auto";
+}
+echo "&nbsp;" .$words['ISOSpeedRatings'] ." : " .$info['ISOSpeedRatings']."<BR>\n";
+echo "&nbsp;" .$words['WhiteBalance'] ." : " .$info['WhiteBalance']."<BR>\n";
+echo "&nbsp;" .$words['MeteringMode'] ." : " .$info['MeteringMode']."<BR>\n";
+echo "</p>";
+?>
+<!--                        </td>
+                      </tr>
+                    </table>--></div>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          <tr>
+            <td align="center" valign="middle"><table width="80%"  border="0" cellpadding="0" cellspacing="0">
+              <tr>
+                <td align=center width="600">
+<P class=style2 style="TEXT-ALIGN: center" align=left>
+<?=Fix_UTF8(ParseObj($PhotoDesp),100)?>
+</P>
+                </td>
+              </tr>
+            </table></td>
+          </tr>
+        </table>
+		<? Paging();
+		?>
+	</TD>
+  </TR>
+  <? require_once("HtmlBottom.html"); ?>
+</TABLE>
+</body>
+</html>
+<?
+}
+?>

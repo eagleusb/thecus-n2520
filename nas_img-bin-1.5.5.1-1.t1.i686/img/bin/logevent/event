@@ -1,0 +1,541 @@
+#!/bin/sh
+if [ $# -lt 1 ]; then 
+echo "Need At Least one argument : Event ID"
+exit 1
+fi
+
+event_id=$1
+
+act_information="/img/bin/logevent/information"
+act_warning="/img/bin/logevent/warning"
+act_error="/img/bin/logevent/error"
+act_email="/img/bin/logevent/email"
+
+      case $event_id in
+
+####################################################################
+#Error Warn Start
+####################################################################
+           001)
+              ${act_warning} ${event_id} "$2" 
+           ;;
+           002)
+              ${act_warning} ${event_id}
+           ;;
+           003)
+              ${act_warning} ${event_id} "$2"
+             ;;
+####################################################################
+#Error Event End
+####################################################################
+
+####################################################################
+#Information Event Start
+####################################################################
+           101)
+	      ${act_information} ${event_id}
+           ;;
+           102)
+              ${act_information} ${event_id}
+           ;;
+           103)
+              ${act_information} ${event_id}
+           ;;
+           104)
+		${act_information} ${event_id} "$2"
+	      ;;
+           105)
+	         ${act_information} ${event_id} "$2"
+           ;;
+           106)
+              ${act_information} ${event_id} "$2"
+           ;;
+           107)
+              ${act_information} ${event_id} "$2"
+           ;;
+           108)
+              ${act_information} ${event_id} "$2"
+           ;;
+           109)
+              ${act_information} ${event_id} "$2"
+           ;;
+           110)
+              ${act_information} ${event_id} "$2" "$3"
+           ;;
+           111)
+              ${act_information} ${event_id} "$2" "$3"
+           ;;
+           112)
+              ${act_information} ${event_id} 
+           ;;
+           113)
+              ${act_information} ${event_id} 
+           ;;
+           114)
+              if [ $# -eq 3 ];then
+                 ${act_information} ${event_id} "$2" "$3"
+              fi
+              if [ $# -eq 6 ];then
+                 ${act_information} ${event_id} "$2" "$3" "$4" "$5" "$6"
+              fi
+           ;;
+           115)
+              ${act_information} ${event_id} "$2" 
+           ;;
+           116)
+              ${act_information} ${event_id} "$2"
+           ;;
+           117)
+              ${act_information} ${event_id} "$2"
+           ;;
+           118)
+              ${act_information} ${event_id} "$2"
+           ;;
+           119)
+              ${act_information} ${event_id} "$2"
+           ;;
+           120)
+              ${act_information} ${event_id} "$2"
+           ;;
+           121)
+              ${act_information} ${event_id} "$2"
+           ;;
+           122)
+              ${act_information} ${event_id} "$2"
+           ;;
+           123)
+              ${act_information} ${event_id} "$2"
+           ;;
+           124)
+              ${act_information} ${event_id} "$2" "$3"
+           ;;
+           125)
+              ${act_information} ${event_id} "$2"
+           ;;
+           126)
+              ${act_information} ${event_id} "$2"
+           ;;
+           127)
+              ${act_information} ${event_id} "$2"
+           ;;
+           128)
+              ${act_information} ${event_id}
+           ;;
+           129)
+              ${act_information} ${event_id}
+           ;;
+           130)
+              ${act_information} ${event_id}
+           ;;
+           131)
+              ${act_information} ${event_id}
+           ;;
+           132)
+              ${act_information} ${event_id}
+           ;;
+           133)
+              ${act_information} ${event_id}
+           ;;
+           134)
+              ${act_information} ${event_id}
+           ;;
+           135)  
+	      #I075E
+              ${act_information} ${event_id}
+           ;;
+           136)  
+    	      #I076E
+              ${act_information} ${event_id}
+           ;;
+           137)  
+	      #I077E
+              ${act_information} ${event_id}
+           ;;
+           138)  
+	      #I078E
+              ${act_information} ${event_id}
+           ;;
+           139)  
+	      #I079E
+              ${act_information} ${event_id}
+           ;;
+           140)  
+	      #I227E
+              ${act_information} ${event_id} "$2"
+           ;;
+           141)  
+	      #I228E
+              ${act_information} ${event_id} "$2"
+           ;;
+           142)
+	      #I083E
+              ${act_information} ${event_id}
+           ;;
+           143)
+	      #I085E
+              ${act_information} ${event_id} "$2" "$3"
+           ;;
+           144)
+	      #I086E
+              ${act_information} ${event_id} "$2"
+           ;;
+           145)
+	      #I087E
+              ${act_information} ${event_id} "$2"
+           ;;
+           146)
+	      #I073E
+              ${act_information} ${event_id} "$2"
+           ;;
+           147)
+	      #I074E
+              ${act_information} ${event_id} "$2"
+           ;;
+           148)
+	      #I231E
+              ${act_information} ${event_id}
+           ;;
+           149)
+	      #I232E
+              ${act_information} ${event_id}
+           ;;
+           152)
+              ${act_information} ${event_id}
+           ;;
+           153)
+              ${act_information} ${event_id}
+           ;;
+           154)
+              ${act_information} ${event_id}
+           ;;
+           155)
+              ${act_information} ${event_id}
+           ;;
+           156)
+              ${act_information} ${event_id}
+           ;;
+           157)
+              ${act_information} ${event_id}
+           ;;
+           158)
+              ${act_information} ${event_id} "$2"
+           ;;
+           159)
+              ${act_information} ${event_id} "$2"
+           ;;
+           160)
+              ${act_information} ${event_id} "$2"
+           ;;
+           161)
+              ${act_information} ${event_id} "$2"
+           ;;
+           425)
+              ${act_information} ${event_id} "$2" "$3"
+           ;;
+####################################################################
+#Information Event End
+####################################################################
+
+####################################################################
+#Error mail Start
+####################################################################
+           201)
+              ${act_email} ${event_id}
+           ;;
+           202)
+              ${act_email} ${event_id}
+           ;;
+           203)
+              ${act_email} ${event_id}
+             ;;
+           204)
+              ${act_email} ${event_id} "$2"
+           ;;
+           205)
+              ${act_email} ${event_id} "$2"
+           ;;
+           206)
+              ${act_email} ${event_id} "$2"
+             ;;
+           207)
+              ${act_email} ${event_id} "$2"
+           ;;
+           208)
+              ${act_email} ${event_id} "$2"
+             ;;
+           209)
+              ${act_email} ${event_id}
+             ;;
+           210)
+              ${act_email} ${event_id} "$2"
+             ;;
+           211)
+              ${act_email} ${event_id} "$2"
+             ;;
+           212)
+              ${act_email} ${event_id} "$2"
+             ;;
+           213)
+              ${act_email} ${event_id} 
+             ;;
+           214)
+              ${act_email} ${event_id} "$2"
+             ;;
+           215)
+              ${act_email} ${event_id} "$2"
+             ;;
+           216)
+              ${act_email} ${event_id} 
+             ;;
+##UPS event             
+           217)
+              ${act_information} ${event_id}
+              ${act_email} ${event_id}
+             ;;
+           218)
+              ${act_warning} ${event_id}
+              ${act_email} ${event_id} "$2" "$3"
+             ;;
+           219)
+              ${act_warning} ${event_id}
+              ${act_email} ${event_id}
+             ;;
+           220)
+              ${act_warning} ${event_id}
+              ${act_email} ${event_id}
+             ;;
+           221)
+              ${act_warning} ${event_id}
+              ${act_email} ${event_id}
+             ;;
+           222)
+              ${act_warning} ${event_id}
+              ${act_email} ${event_id}
+             ;;
+           223)
+              ${act_warning} ${event_id}
+              ${act_email} ${event_id}
+             ;;
+           224)
+              ${act_error} ${event_id}
+              ${act_email} ${event_id}
+             ;;
+           225)
+              ${act_error} ${event_id}
+              ${act_email} ${event_id}
+             ;;
+           226)
+              ${act_error} ${event_id}
+              ${act_email} ${event_id}
+             ;;
+           227)
+              ${act_email} ${event_id} "$2"
+             ;;
+           228)
+              ${act_email} ${event_id} "$2" "$3" "$4"
+             ;;
+           229)  
+              ${act_email} ${event_id} "$2"
+           ;;
+           230)  
+              ${act_email} ${event_id} "$2"
+           ;;
+           231)
+              ${act_email} ${event_id}
+             ;;
+           232)
+              ${act_email} ${event_id} "$2"
+             ;;
+           233)
+              ${act_email} ${event_id} "$2"
+            ;;
+####################################################################
+#Error Event End
+####################################################################
+
+####################################################################
+#Error Event Start
+####################################################################
+           301)
+              ${act_error} ${event_id} "$2"
+           ;;
+           302)
+              ${act_error} ${event_id} "$2"
+           ;;
+           303)
+              ${act_error} ${event_id} "$2"
+             ;;
+           304)
+              ${act_error} ${event_id} "$2"
+	   ;;
+           305)
+              ${act_error} ${event_id} "$2" "$3"
+           ;;
+           306)
+              ${act_error} ${event_id} "$2"
+           ;;
+           307)
+              ${act_error} ${event_id}
+            ;;
+           308)
+              ${act_error} ${event_id}
+           ;;
+           309)
+              ${act_error} ${event_id}
+           ;;
+           310)
+              ${act_error} ${event_id} "$2"
+           ;;
+           311)
+              ${act_error} ${event_id} "$2"
+           ;;
+           312)
+              ${act_error} ${event_id} "$2"
+           ;;
+           313)
+              ${act_error} ${event_id} "$2"
+           ;;
+           314)
+              ${act_error} ${event_id} "$2"
+           ;;
+           315)
+              ${act_error} ${event_id} "$2"
+           ;;
+           316)
+              ${act_error} ${event_id} 
+           ;;
+           317)
+              ${act_error} ${event_id} "$2"
+            ;;
+           318)
+              ${act_error} ${event_id} "$2" "$3"
+           ;;
+           319)
+              ${act_error} ${event_id} "$2"
+           ;;
+           320)
+              ${act_error} ${event_id} "$2"
+           ;;
+           321)
+              ${act_error} ${event_id} "$2"
+           ;;
+           322)
+              ${act_error} ${event_id}
+           ;;
+           323)
+	      ${act_error} ${event_id}
+	      ;;
+           330)
+              ${act_error} ${event_id}
+           ;;
+           331)
+              ${act_error} ${event_id}
+           ;;
+           332)
+              ${act_error} ${event_id}
+           ;;
+           333)
+              ${act_error} ${event_id}
+           ;;
+           334)
+              ${act_error} ${event_id}
+           ;;
+           335)
+              ${act_error} ${event_id}
+           ;;
+           336)
+              ${act_error} ${event_id}
+           ;;
+           337)
+              ${act_error} ${event_id}
+           ;;
+           338)
+              ${act_error} ${event_id}
+           ;;
+           339)
+              ${act_error} ${event_id} "$2"
+              ${act_email} ${event_id} "$2"
+           ;;
+####################################################################
+#Error Event End
+####################################################################
+####################################################################
+#Logevent By Language
+####################################################################
+           997)
+             #########################################################
+             #    $1=event_id
+             #    $2=event_message_if
+             #    $3=level
+             #    $4=email
+             #    $5=tmp1
+             #    $6=tmp2
+             #    $7=tmp3
+             #    $8=tmp4
+             #    $9=tmp5
+             #    $10=tmp6
+             #########################################################
+             . /img/bin/logevent/event_message.sh
+             body=`get997msg $2`
+			 msg=`printf "${body}"`
+             if  [ "$5" != "" ] && [ "$6" = "" ] && [ "$7" = "" ] && [ "$8" = "" ] && [ "$9" = "" ] && [ "${10}" = "" ];
+             then
+               msg=`printf "${body}" "$5"`
+             elif [ "$5" != "" ] && [ "$6" != "" ] && [ "$7" = "" ] && [ "$8" = "" ] && [ "$9" = "" ] && [ "${10}" = "" ];
+             then
+               msg=`printf "${body}" "$5" "$6"`
+             elif [ "$5" != "" ] && [ "$6" != "" ] && [ "$7" != "" ] && [ "$8" = "" ] && [ "$9" = "" ] && [ "${10}" = "" ];
+             then
+               msg=`printf "${body}" "$5" "$6" "$7"`
+             elif [ "$5" != "" ] && [ "$6" != "" ] && [ "$7" != "" ] && [ "$8" != "" ] && [ "$9" = "" ] && [ "${10}" = "" ];
+             then
+               msg=`printf "${body}" "$5" "$6" "$7" "$8"`
+             elif [ "$5" != "" ] && [ "$6" != "" ] && [ "$7" != "" ] && [ "$8" != "" ] && [ "$9" != "" ] && [ "${10}" = "" ];
+             then
+               msg=`printf "${body}" "$5" "$6" "$7" "$8" "$9"`
+             elif [ "$5" != "" ] && [ "$6" != "" ] && [ "$7" != "" ] && [ "$8" != "" ] && [ "$9" != "" ] && [ "${10}" != "" ];
+             then
+               msg=`printf "${body}" "$5" "$6" "$7" "$8" "$9" "${10}"`
+             fi
+             if [ "$msg" != "" ];
+             then
+               if [ "$3" = "info" ];
+               then
+                 $act_information $event_id $2 "$msg"
+               elif [ "$3" = "warning" ];
+               then
+                 $act_warning $event_id $2 "$msg"
+               elif [ "$3" = "error" ];
+               then
+                 $act_error $event_id $2 "$msg"
+               else
+                 echo "No such event function"
+               fi
+               if [ "$4" = "email" ];
+               then
+                 $act_email $event_id "$2" "$3" "$msg"
+               fi
+             fi
+           ;;
+           998)
+             lang=`/usr/bin/sqlite /etc/cfg/conf.db "select v from conf where k='admin_lang'"`
+             msg=`cat /var/www/html/language/$lang/$3 | grep [\'\"]$4[\'\"] | awk -F"=" '{printf("%s",$2)}' | awk -F"[\']" '{printf("%s",$2)}'`
+             if [ "$2" = "info" ];
+             then
+               $act_information $event_id "$msg"
+             elif [ "$2" = "warning" ];
+             then
+               $act_warning $event_id "$msg"
+             elif [ "$2" = "error" ];
+             then
+               $act_error $event_id "$msg"
+             else
+               echo "No such event function"
+             fi
+             #echo $lang
+             #echo $msg
+           ;;
+	   *)
+	      echo "No Such Event ID : $event_id"
+	   ;;
+      esac

@@ -1,0 +1,24 @@
+#!/bin/sh
+block_log_path="/var/tmp/HD/hdbtmp"
+
+
+block_stop(){
+  echo "bad block scan stop"
+  scan_file=`ls ${block_log_path}* | awk '{print substr(\$1,25,length(\$1))}'`
+
+  for hd_id in $scan_file
+  do
+    hd_sn=`cat "${block_log_path}"${hd_id}`
+    /img/bin/block_scan.sh stop ${hd_id} ${hd_sn}
+  done
+}
+
+case "$1" in
+'stop')
+  block_stop
+  ;;
+*)
+  echo "Usage: $0 {stop}"
+  ;;
+esac
+      

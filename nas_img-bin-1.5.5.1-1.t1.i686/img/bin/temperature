@@ -1,0 +1,104 @@
+#!/bin/sh
+
+check(){
+
+# only retry 5 times
+for try in 1 2 3 4 5
+do
+  temp1=`/bin/cat /proc/hwm |grep "Temp 1" |cut -d" " -f3`
+  temp2=`/bin/cat /proc/hwm |grep "Temp 2" |cut -d" " -f3`
+  if [ "$temp1" != "" ] && [ "$temp2" != "" ]; then
+    break
+  fi
+  sleep 1
+done
+
+if [ "${temp1}" = "" ]; then
+  temp1=0
+fi
+if [ "${temp2}" = "" ]; then
+  temp2=0
+fi
+
+if [ "${temp1}" -ge "${temp2}" ];then
+  temp=$temp2
+else
+  temp=$temp1
+fi
+
+}
+
+test(){
+  check
+  tempone=$temp
+  sleep 2
+  check
+  temptwo=$temp
+  sleep 2
+  check
+  tempthree=$temp
+}
+
+halt_it(){
+  echo "Buzzer 0" > /proc/thecus_io
+  echo "Busy 2" > /proc/thecus_io
+  /bin/touch /etc/warning
+  sync
+  /img/bin/sys_halt
+}
+
+isover(){
+  HOT=1
+  while [ ${HOT} -ge 1 ] 
+  do
+
+    test
+    if [ $tempone -ge 100 ] && [ $temptwo -ge 100 ] && [ $tempthree -ge 100 ];then
+      exit
+    fi
+
+    if [ $tempone -ge 70 ] && [ $temptwo -ge 70 ] && [ $tempthree -ge 70 ];then
+      echo "too hot"
+      /img/bin/logevent/event 306
+      halt_it
+    fi
+
+    if [ $tempone -ge 65 ] && [ $temptwo -ge 65 ] && [ $tempthree -ge 65 ];then
+      if [ ${HOT} -eq 1 ]; then
+        HOT=2
+        echo "Buzzer 1" > /proc/thecus_io
+        /img/bin/logevent/event 201
+        /img/bin/logevent/event 002
+      fi
+    else
+      if [ ${HOT} -eq 2 ]; then
+        HOT=0
+        echo "Buzzer 0" > /proc/thecus_io
+        /bin/rm -fr /var/lock/temperature.lock
+        /img/bin/logevent/event 113
+        /img/bin/logevent/event 202
+      fi
+      HOT=0
+    fi
+
+  done
+
+}
+
+#detect fan1 rpm fail
+temp1=$(cat /proc/hwm | grep "Temp 1:" | sed -e 's/^.*Temp 1: //' | cut -d" " -f1)
+rpm1=`cat /proc/hwm | grep "FAN 1 RPM" | cut -d":" -f2 | cut -d"(" -f1`
+if [ ${temp1} -ge 30 ] && [ ${rpm1} -le 500 ]; then
+  echo "Buzzer 1" > /proc/thecus_io
+  /img/bin/logevent/event 308
+  /img/bin/logevent/event 216
+  sleep 30
+  echo "Buzzer 0" > /proc/thecus_io
+fi
+
+running=`/bin/ps |grep [t]emperature |wc -l`
+echo $running
+if [ $running -le 3 ]; then
+  isover
+fi
+

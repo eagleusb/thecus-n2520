@@ -1,0 +1,1188 @@
+#!/bin/sh
+#################################################
+##	Vars define
+#################################################
+sqlite="/usr/bin/sqlite"
+confdb="/etc/cfg/conf.db"
+logevent="/img/bin/logevent/event"
+CONFIGFS="/sys/kernel/config"
+TARGET="${CONFIGFS}/target/core"
+FABRIC="${CONFIGFS}/target/iscsi"
+ISCSID="/sbin/iscsid"
+ISCSIADM="/sbin/iscsiadm"
+hv_raid_ip="/etc/hv_raid_ip"
+hv_client="/tmp/hv_client"
+hv_client_conn="${hv_client}/connect"
+hv_client_speed="${hv_client}/speed"
+client_js="/opt/nodejs/js/client.js"
+server_js="/opt/nodejs/js/server.js"
+manage_js="/opt/nodejs/js/manage.js"
+crond_conf="/etc/cfg/crond.conf"
+status_file="${hv_client}/hv.status"
+ethtool="/sbin/ethtool"
+gdisk="/usr/sbin/gdisk"
+sgdisk="/usr/sbin/sgdisk"
+gdisk_conf="/img/bin/gdisk.conf"
+nodejs="/usr/bin/node"
+mdadm="/sbin/mdadm"
+iscsi_list=`cat /proc/scsi/scsi | grep "Intf:iSCSI" | cut -d":" -f4 | cut -d" " -f1`
+
+PATH="${PATH}:/usr/bin"
+export NODE_PATH=/usr/lib/node_modules
+
+if [ ! -d "${hv_raid_ip}" ];then
+  mkdir ${hv_raid_ip}
+fi
+
+if [ ! -d "${hv_client}" ];then
+  mkdir ${hv_client}
+fi
+
+if [ ! -d "${hv_client_conn}" ];then
+  mkdir "${hv_client_conn}"
+fi
+
+if [ ! -d "${hv_client_speed}" ];then
+  mkdir "${hv_client_speed}"
+fi
+#################################################
+##	Raid subroutine
+#################################################
+## call to get disk UUID
+get_uuid() {
+  UUID=`mdadm --examine /dev/${1}3 2>/dev/null | awk 'BEGIN{OFS=";";FS=" : "}{if($1~/UUID/ && UUID==""){UUID=$2}if($1~/Raid Level/){TYPE=$2}}END{if(TYPE!="" && UUID!="")print TYPE,UUID}'`
+  echo ${UUID}
+}
+
+## use to group the disks into several groups
+group_devide_uuid() {
+  ##result key name is
+  ## igroup : group counter by uuid
+  ## disk_group : group content by uuid
+  list=$1
+  echo "list=$list"
+  
+  disk_counter="0"
+  for i in $list
+  do
+    disk_counter=$(($disk_counter+1))
+    disk_uuid[$disk_counter]=`get_uuid ${i}`
+    disk_name[$disk_counter]="$i"
+    echo "i=$i disk_counter=$disk_counter"
+  done
+  
+  idisk="0"
+  jdisk="0"
+  igroup="1"
+  while [ $idisk -le $disk_counter ]
+  do
+    idisk=$(($idisk+1))
+    disk_group[$igroup]=""
+    disk_group_count[$igroup]="0"
+    if [ "${disk_uuid[$idisk]}" != "" ] && [ "${disk_name[$idisk]}" != "" ];then
+      disk_group[$igroup]=${disk_name[$idisk]}
+      jdisk=$(($idisk+1))
+      disk_group_count[$igroup]="1"
+      disk_group_type[$igroup]=`echo "${disk_uuid[$idisk]}" | awk 'BEGIN{FS=";"}{print $1}'`
+
+      swap_disk="$swap_disk /dev/${disk_name[$idisk]}1"
+      swap_count=$(($swap_count+1))
+      echo "idisk=$idisk"
+      echo "jdisk=$jdisk"
+      echo "disk_counter=$disk_counter"
+      while [ $jdisk -le $disk_counter ]
+      do
+        echo "${disk_uuid[$idisk]} || ${disk_uuid[$jdisk]}"
+        if [ "${disk_uuid[$idisk]}" = "${disk_uuid[$jdisk]}" ];then
+          disk_group[$igroup]="${disk_group[$igroup]} ${disk_name[$jdisk]}"
+          disk_name[$jdisk]=""
+          disk_group_count[$igroup]=$((${disk_group_count[$igroup]}+1))
+        fi
+        jdisk=$(($jdisk+1))
+      done
+      echo "disk_group[$igroup]=${disk_group[$igroup]}"
+      igroup=$(($igroup+1))
+    fi
+  done
+  group_count=$(($igroup-1))
+}
+
+## call to decorate sata string for use
+decorate_sata() {
+  for i in ${sata}
+  do
+    mdadm_targets=${mdadm_targets}"/dev/${i}2 "
+    mdadm_sys_targets=${mdadm_sys_targets}"/dev/${i}3 "
+  done
+}
+
+stop_sys() {
+  sysnum=`expr $mdnum + 50`
+  umount /dev/md$sysnum
+  ${mdadm} -S /dev/md$sysnum
+  rm -rf /raidsys/$mdnum
+}
+
+stop_raid() {
+  umount /raid$mdnum
+  mdadm -S /dev/md$mdnum
+  rm -rf /raid$mdnum
+  rm /tmp/raid$mdnum
+}
+
+## final run mdadm command to combine disks to raid
+final_run_mdadm() {
+  sh -x /img/bin/mksinglesys_md.sh "${disk_group_count[$igroup]}" "${mdadm_sys_targets}" $mdnum > /tmp/mksys_md$mdnum.log 2>&1
+  if [ ! -e "/raidsys/$mdnum" ];then
+    return 1
+  fi
+
+  fsmode=`sqlite /raidsys/$mdnum/smb.db "select v from conf where k='filesystem'"`
+  if [ "$fsmode" = "" ];then
+    stop_sys
+    return 1
+  fi
+
+  raid_num=$mdnum
+  raid_name="raid$raid_num"
+  mddisk="/dev/md$mdnum"
+  mdname="md$mdnum"
+
+  if [ ! -e "/dev/md$mdnum" ];then
+    mknod /dev/md$mdnum b 9 $mdnum
+  fi
+
+  if [ `cat /proc/mdstat | grep "^md$mdnum " | wc -l` -eq 0 ]; then
+    if [ "${force_assemble}" == "True" ];then
+      ${mdadm} -A -R -f /dev/md$mdnum ${mdadm_targets}
+    else
+      ${mdadm} -A -R /dev/md$mdnum ${mdadm_targets}
+    fi
+    if [ "$?" != "0" ];then
+      stop_raid
+      stop_sys
+      return 1
+    fi
+  fi
+
+  post_mount
+  return 1;
+}
+
+## do post mount raid action
+post_mount() {
+  /usr/bin/blockdev --setra 4096 $work_disk
+  mkdir -p /raid$mdnum
+
+  sleep 1
+
+  case "$fsmode" in
+    xfs)
+      mount -t xfs -o attr2,noatime,nodiratime,nobarrier,inode64 $work_disk /raid$mdnum
+      if [ "$?" != "0" ];then
+        /img/bin/logevent/event 997 819 error email ${work_disk}
+        /img/bin/pic.sh LCM_MSG "Check FS," "Please wait."
+        xfs_repair ${work_disk}
+        if [ "$?" = "2" ];then
+          xfs_repair -L ${work_disk}
+        fi
+        mount -t xfs -o attr2,noatime,nodiratime,nobarrier,inode64 $work_disk /raid$mdnum 
+        if [ "$?" != "0" ];then
+          /img/bin/logevent/event 997 820 error email ${work_disk}
+          /img/bin/pic.sh LCM_MSG "Repair FS," "Failed!"
+        else
+          /img/bin/logevent/event 997 488 info email ${work_disk}
+          /img/bin/pic.sh LCM_MSG "Repair FS," "Success!"
+        fi
+      fi
+    ;;
+    ext3)
+      mount -t ext3 -o user_xattr,acl,rw,data=writeback,noatime,nodiratime,barrier=0,errors=remount-ro $work_disk /raid$mdnum
+    ;;
+    ext4)
+      mount -t ext4 -o user_xattr,acl,rw,data=writeback,noatime,nodiratime,barrier=0,errors=remount-ro $work_disk /raid$mdnum
+    ;;
+    btrfs)
+      mount -t btrfs -o rw,noatime,nodiratime $work_disk /raid$mdnum
+    ;;
+  esac
+
+  if [ $? -eq 0 ];then
+    mkdir -p /tmp/raid$mdnum
+    rm /raid$mdnum/sys
+    ln -sf /raidsys/$mdnum /raid$mdnum/sys
+    sqlite /etc/cfg/conf.db "update conf set v='1' where k='hv_enable'"
+  else
+    #abnormal raid... stop all raid and remove folder
+    stop_raid
+    stop_sys
+  fi
+}
+
+HugeVolume_start() {
+  check_active=`sqlite /etc/cfg/conf.db "select v from conf where k='hv_enable'"`
+  if [ ! "${check_active}" = "1" ] && [ ! "${check_active}" = "3" ];then
+    return
+  fi
+  
+  success="0"
+  mdnum=0
+  md_list=`cat /proc/mdstat | awk -F: '/^md[0-9] :/{print substr($1,3)}' | sort -u`
+  for mdnum in $md_list
+  do
+    if [ -f /raidsys/$mdnum/HugeVolume ];then
+      exit
+    fi
+    mdnum=$(($mdnum+1))
+  done
+  
+  group_devide_uuid "$iscsi_list"
+
+  igroup="1"
+  work_disk="/dev/md$mdnum"
+  while [ $igroup -le $group_count ]
+  do
+    sata=""
+    mdadm_targets=""
+    mdadm_sys_targets=""
+    sata=${disk_group[$igroup]}
+    echo "sata=$sata"
+    if [ ! "${sata}" = "" ]
+    then
+      decorate_sata
+      final_run_mdadm
+      mdchk=`${mdadm} -D $mddisk >/dev/null`
+      if [ $? -eq 0 ];then
+        raidid=`sqlite /raidsys/$mdnum/smb.db "select v from conf where k='raid_name'"`
+        ${logevent} 997 808 info email "$raidid"
+        mdnum=$(($mdnum+1))
+        work_disk="/dev/md$mdnum"
+        success="1"
+        break
+      fi
+    fi
+
+    igroup=$(($igroup+1))
+  done
+  
+  if [ $success = "1" ];
+  then
+    /img/bin/service stop
+    /img/bin/set_masterraid.sh
+    /img/bin/service start
+    
+    mdnum=$(($mdnum-1))
+    #tray_list=`cat /tmp/raid${mdnum}/disk_tray |sed 's/"//g'`
+    #cp_raidtray_ip "${tray_list}"
+    cp_raidtray_ip "$sata"
+  fi
+}
+
+HugeVolume_stop() {
+  /img/bin/service stop
+  
+  md_list=`cat /proc/mdstat | awk -F: '/^md[0-9] :/{print substr($1,3)}' | sort -u`
+  for mdnum in $md_list
+  do
+    if [ -f /raidsys/$mdnum/HugeVolume ];then
+      raidid=`sqlite /raidsys/$mdnum/smb.db "select v from conf where k='raid_name'"`
+      /img/bin/stop_volume.sh $mdnum
+      mdadm -S /dev/md$mdnum
+      sysmdnum=`expr $mdnum + 50`
+      mdadm -S /dev/md$sysmdnum
+      ${logevent} 997 809 warning email "$raidid"
+    fi
+  done
+  /img/bin/service start
+}
+
+HugeVolume_restart() {
+  HugeVolume_stop
+  sleep 2
+  HugeVolume_start
+}
+
+HugeVolume_boot() {
+  return  
+}
+
+#################################################
+##	HV subroutine
+#################################################
+reverse_domain() {
+  domain1=$1
+  domain2=$2
+  domain3=$3
+  rdomain=""
+
+  if [ "$domain3" != "" ];then
+    rdomain="$domain3"
+  fi
+  if [ "$domain2" != "" ];then
+    if [ "$rdomain" != "" ];then
+      rdomain="$rdomain.$domain2"
+    else
+      rdomain="$domain2"
+    fi
+  fi
+  if [ "$domain1" != "" ];then
+    if [ "$rdomain" != "" ];then
+      rdomain="$rdomain.$domain1"
+    else
+      rdomain="$domain1"
+    fi
+  fi
+
+  echo -n $rdomain |tr [:upper:] [:lower:]
+}
+
+set_iqn()
+{
+  t_mdnum=$1
+  
+  # get domain
+  hostname=`/bin/hostname`
+  strExec="/bin/hostname --fqdn | sed 's/^${hostname}.//g'"
+  domain=`eval "${strExec}" | awk -F. '{print $1 " " $2 " " $3}'`
+
+  revdomain=`reverse_domain $domain`
+
+  scst_date="2012-01"
+  name=`echo ${hostname} | sed 's/_//g' | tr [:upper:] [:lower:]`
+
+  # set iqn
+  macaddr=`ifconfig eth0|awk '/HWaddr/{print $5}'|awk -F: '{printf("%s%s%s%s%s%s",$1,$2,$3,$4,$5,$6)}'|tr /A-Z/ /a-z/`
+  DEF_IQN="iqn.$scst_date.$revdomain.nas:hv${t_mdnum}.$macaddr"
+}
+
+check_hvraid() {
+  t_mdnum=$1
+  
+  if [ "${t_md}" == "" ];then
+    echo "0"
+  fi
+
+  strExec="cat /proc/mdstat | awk '{if (\$1==\"md${t_md}\") print \$1}'"
+  hvraid=`eval "${strExec}"`
+  
+  if [ "${hvraid}" == "" ];then
+    echo "1"
+  else
+    echo "0"
+  fi
+}
+
+build_iscsi() {
+  mdnum=$1
+  acl_iqn=$2
+  #acl_iqn="iqn.2007-08.com.thecus:stackable-server.0014fd14e07d"
+  smbdb="/raidsys/${mdnum}/smb.db"
+  umount /dev/md${mdnum}
+  
+  ret=`check_hvraid ${mdnum}`
+  if [ "${ret}" == "1" ];then
+    ${logevent} 997 803 error email
+    echo "No Raid md${mdnum}"
+    exit 803
+  fi
+  
+  hv_nic=`${sqlite} ${smbdb} "select v from conf where k='hv_nic'"`
+  if [ "$hv_nic" == "" ];then
+    echo "No the nic value for member to build iscsi target!"
+    exit
+  fi
+  
+  PORTAL=`ifconfig ${hv_nic}|awk '/inet addr/{print toupper($2)}'| awk -F':' '{print $2}'`
+  if [ "$PORTAL" == "" ];then
+      ${logevent} 997 818 error email
+      echo "No the nic IP for member to build iscsi target!"
+      exit
+  fi
+              
+  if [ "${acl_iqn}" == "" ];then
+    hv_mip=`${sqlite} ${smbdb} "select v from conf where k='hv_mip'"`
+    hv_iqn=`${sqlite} ${smbdb} "select v from conf where k='hv_iqn'"`
+    
+    if [ "${hv_mip}" == "" ];then
+      echo "HV master IP is null."
+      exit
+    fi
+    
+    acl_iqn=`m_iqn "${hv_mip}"`
+    
+    if [ "${acl_iqn}" == "100" ] || [ "${acl_iqn}" == "101" ];then
+      acl_iqn=${hv_iqn}
+    else
+      if [ "${acl_iqn}" != "${hv_iqn}" ];then
+        ${sqlite} ${smbdb} "update conf set v='${acl_iqn}' where k='hv_iqn'"
+        #${logevent} 997 804 error email
+      fi
+    fi
+  
+    if [ "${acl_iqn}" == "" ];then
+      ${logevent} 997 805 error email
+      echo "Need HV master iqn to set acl."
+      exit 805
+    fi
+  fi
+  
+  modexist=`lsmod | grep configfs`
+  if [ "${modexist}" == "" ];then
+    modprobe configfs
+  fi
+  modexist=`lsmod | grep target_core_mod`
+  if [ "${modexist}" == "" ];then
+    modprobe target_core_mod
+  fi
+  modexist=`lsmod | grep iscsi_target_mod`
+  if [ "${modexist}" == "" ];then
+    modprobe iscsi_target_mod
+  fi
+  
+  configfs_exist=`mount | awk '{if($3=="/sys/kernel/config") print $0}'`
+  if [ "${configfs_exist}" == "" ];then
+    mount -t configfs none ${CONFIGFS}
+  fi
+
+  set_iqn "${mdnum}"
+  
+  if [ -d "$FABRIC/$DEF_IQN/" ];then
+    echo "The iSCSI Target had built."
+    exit 1
+  fi
+  
+  crc_data="None"
+  crc_header="None"
+  connection_id="8"
+  error_recovery_id="2"
+
+  mkdir -p ${TARGET}/iblock_0/hv${mdnum}
+  echo -n "udev_path=/dev/md${mdnum}" > ${TARGET}/iblock_0/hv${mdnum}/control
+  echo -n 1 > ${TARGET}/iblock_0/hv${mdnum}/enable
+  echo -n 512 > ${TARGET}/iblock_0/hv${mdnum}/attrib/block_size
+
+  mkdir -p "$FABRIC/$DEF_IQN/tpgt_1/lun/lun_0"
+  ln -s $TARGET/iblock_0/hv${mdnum} "$FABRIC/$DEF_IQN/tpgt_1/lun/lun_0/lio_west_port"
+
+  mkdir -p "$FABRIC/$DEF_IQN/tpgt_1/np/${PORTAL}:3260"
+  
+  add_acl ${mdnum} ${acl_iqn}
+              
+  echo ${crc_data} > $FABRIC/$DEF_IQN/tpgt_1/param/DataDigest
+  echo ${crc_header} > $FABRIC/$DEF_IQN/tpgt_1/param/HeaderDigest
+  echo ${error_recovery_id} > $FABRIC/$DEF_IQN/tpgt_1/param/ErrorRecoveryLevel
+  echo ${connection_id} > $FABRIC/$DEF_IQN/tpgt_1/param/MaxConnections
+  echo "HugeVolume Target" > $FABRIC/$DEF_IQN/tpgt_1/param/TargetAlias
+  #echo 1 > $FABRIC/$DEF_IQN/tpgt_1/attrib/generate_node_acls
+  echo 0 > $FABRIC/$DEF_IQN/tpgt_1/attrib/demo_mode_write_protect
+  echo -n 0 > $FABRIC/$DEF_IQN/tpgt_1/attrib/authentication
+  echo -n 1 > $FABRIC/$DEF_IQN/tpgt_1/enable
+}
+
+del_iscsi(){
+  mdnum=$1
+  set_iqn "${mdnum}"
+  echo -n 0 > $FABRIC/$DEF_IQN/tpgt_1/enable
+  rmdir ${FABRIC}/${DEF_IQN}/tpgt_1/np/*
+    
+  for TMP_DIR in `ls $FABRIC/$DEF_IQN/tpgt_1/acls/`
+  do
+    for TMP_LUN in `ls $FABRIC/$DEF_IQN/tpgt_1/acls/${TMP_DIR}/ | grep "lun_"`
+    do
+      rm $FABRIC/$DEF_IQN/tpgt_1/acls/${TMP_DIR}/${TMP_LUN}/${TMP_LUN}
+      rmdir $FABRIC/$DEF_IQN/tpgt_1/acls/${TMP_DIR}/${TMP_LUN}
+    done
+                                    
+    rmdir $FABRIC/$DEF_IQN/tpgt_1/acls/${TMP_DIR}
+  done
+                                          
+  for TMP_DIR in `ls $FABRIC/$DEF_IQN/tpgt_1/lun/`
+  do
+    for TMP_LUN in `ls $FABRIC/$DEF_IQN/tpgt_1/lun/${TMP_DIR}/ | grep "lio_"`
+    do
+      rm $FABRIC/$DEF_IQN/tpgt_1/lun/${TMP_DIR}/${TMP_LUN}
+    done
+                                                                    
+    rmdir $FABRIC/$DEF_IQN/tpgt_1/lun/${TMP_DIR}
+  done
+  
+  rmdir $FABRIC/$DEF_IQN/tpgt_1/
+  rmdir $FABRIC/$DEF_IQN
+  
+  #disable the lun and remove the folder in the kernel, and delete the files
+  if [ -d "$TARGET/iblock_0/hv${mdnum}" ];then
+    rmdir $TARGET/iblock_0/hv${mdnum}
+  fi
+}
+
+add_acl()
+{
+  acl_iqn_name=`echo $2 | tr [:upper:] [:lower:]`
+  acl_lunid=0
+  
+  mdnum=$1
+  set_iqn "${mdnum}"
+  
+  lun_list=`ls "$FABRIC/$DEF_IQN/tpgt_1/lun/"`
+  for lun in ${lun_list}
+  do
+    acl_lunid=`echo $lun|awk -F'_' '{print $2}'`
+  done
+  
+  if [ ! -d "$FABRIC/$DEF_IQN/tpgt_1/acls/$acl_iqn_name" ];then
+    mkdir -p "$FABRIC/$DEF_IQN/tpgt_1/acls/$acl_iqn_name"
+  fi
+  
+  echo -n "15" > "$FABRIC/$DEF_IQN/tpgt_1/acls/$acl_iqn_name/attrib/dataout_timeout"
+  echo -n "15" > "$FABRIC/$DEF_IQN/tpgt_1/acls/$acl_iqn_name/attrib/nopin_response_timeout"
+  echo -n "15" > "$FABRIC/$DEF_IQN/tpgt_1/acls/$acl_iqn_name/attrib/nopin_timeout"
+
+  if [ ! -d "$FABRIC/$DEF_IQN/tpgt_1/acls/$acl_iqn_name/lun_${acl_lunid}" ];then
+    mkdir -p "$FABRIC/$DEF_IQN/tpgt_1/acls/$acl_iqn_name/lun_${acl_lunid}"
+    ln -s "$FABRIC/$DEF_IQN/tpgt_1/lun/lun_$acl_lunid" "$FABRIC/$DEF_IQN/tpgt_1/acls/$acl_iqn_name/lun_${acl_lunid}/."
+  fi
+
+  echo -n 0 > "$FABRIC/$DEF_IQN/tpgt_1/acls/$acl_iqn_name/lun_$acl_lunid/write_protect"
+}
+
+#test the client connection
+#@param none.
+#@returns 0:client iscsi ready, 1:connected, 2:no the client iscsi  
+test_cli_conn(){
+  iscsi_portal=$1
+  iscsi_iqn=$2
+  
+  $ISCSIADM -m discovery -tst --portal $iscsi_portal
+  TARGETS=`$ISCSIADM -m node |grep  $iscsi_portal|grep $iscsi_iqn | sed 's@\[\(.*\)\] .*@\1@g'`
+  if [ "$TARGETS" != "" ];then
+    echo 0
+  else
+    echo 1
+  fi
+}
+
+conn_cli_iscsi(){
+  iscsi_portal=$1
+  iscsi_iqn=$2
+  
+  if [ "${iscsi_portal}" == "" ] || [ "${iscsi_iqn}" == "" ];then
+    return
+  fi
+  
+  $ISCSIADM -m discovery -tst --portal $iscsi_portal
+  ret=`$ISCSIADM -m node |grep  $iscsi_portal|grep $iscsi_iqn | sed 's@\[\(.*\)\] .*@\1@g'`
+  #ret=`test_cli_conn "${iscsi_portal}" "${iscsi_iqn}"`
+  
+  if [ "${ret}" != "" ];then
+    ret=`$ISCSIADM -m node -T ${iscsi_iqn} -p ${iscsi_portal}:3260 --login`
+  fi
+  #15 - session exists
+}
+
+initiatior_status(){
+  mdnum=$1
+  set_iqn "${mdnum}"
+
+  tiqn=`ls "$FABRIC/$DEF_IQN/tpgt_1/acls/"`
+  
+  if [ -f "$FABRIC/$DEF_IQN/tpgt_1/acls/${tiqn}/info" ];then
+    iqn_status=`cat "$FABRIC/$DEF_IQN/tpgt_1/acls/${tiqn}/info" | grep "No active iSCSI Session for Initiator Endpoint"`
+    if [ "${iqn_status}" == "" ];then
+      cat "$FABRIC/$DEF_IQN/tpgt_1/acls/${tiqn}/info" | awk '/^InitiatorName|^Session|Address/ {printf("%s\n", $0)}' | sed 's/TCP.*$//g'
+      exit
+    fi
+  fi
+}
+
+target_enable(){
+  mdnum=$1
+  set_iqn "${mdnum}"
+  if [ -f "$FABRIC/$DEF_IQN/tpgt_1/enable" ];then
+    cat "$FABRIC/$DEF_IQN/tpgt_1/enable"
+  fi
+}
+
+conn_hvclient(){
+  portal=$1
+  iqn=$2
+  host=$3
+  spare=$4
+  raidid=$5
+  raidlevel=$6
+
+#  hv_enable=`${sqlite} ${confdb} "select v from conf where k='hv_enable'"`
+#  if [ "${hv_enable}" != "1" ];then
+#    echo "This NAS is not master, it can't connect client."
+#    exit
+#  fi
+  /img/bin/rc/rc.initiator start_iscsid
+
+  if [ -f "${hv_client_conn}/${portal}" ];then
+    disk=`cat ${hv_client_conn}/${portal} | awk -F'|' '{print $4}'`
+    /img/bin/HVdisk.sh remove "${disk}"
+    #logout_hvclient "${disk}"
+  fi
+
+  conn_cli_iscsi ${portal} ${iqn}
+    
+  iscsi_traykey=`$ISCSIADM -m session |grep ${portal} | grep ${iqn} | head -1|awk '{print $2}'|sed 's/\[//'|sed 's/\]//'`
+  if [ "${iscsi_traykey}" != "" ];then
+    sleep 3
+    diskname=`ls -laR /sys/class/iscsi_session/session${iscsi_traykey}/device/ | awk -F/ '/block\/sd.*:$/&&!/block\/sd.*\//{print substr($10,0,length($10)-1)}'`
+    strExec="cat /proc/partitions | awk '{if (\$4==\"${diskname}\") print \$4}'"
+    diskname_exist=`eval "$strExec"`
+      
+    if [ "${diskname_exist}" != "" ];then
+      strExec="cat /proc/partitions | awk '{if (\$4==\"${diskname}2\") print \$4}'"
+      partition2_exist=`eval "$strExec"`
+
+      echo "${portal}|${iqn}|${host}|${diskname}|${spare}|${raidid}|${raidlevel}" > ${hv_client_conn}/${portal}
+    fi
+  fi
+}
+
+logout_hvclient(){
+  disk=$1
+  
+  if [ "${disk}" != "" ];then
+    strExec="cat ${hv_client_conn}/* | awk -F'|' '{if (\$4==\"${disk}\") print \$0}'"
+  else
+    strExec="cat ${hv_client_conn}/*"
+  fi
+  
+  client_list=`eval "$strExec"`
+  
+  for client in $client_list
+  do
+    portal=`echo ${client} | awk -F'|' '{print $1}'`
+    iqn=`echo ${client} | awk -F'|' '{print $2}'`
+  
+    $ISCSIADM -m node -T ${iqn} -p ${portal}:3260 --logout
+    rm ${hv_client_conn}/${portal} 
+  done
+}
+
+m_iqn(){
+  hv_mip=$1
+
+  if [ "$hv_mip" == "" ];then
+    echo "Need master IP!"
+    exit
+  fi
+
+  ret=`${nodejs} ${client_js} query_iqn "${hv_mip}"`
+  err=`echo "${ret}" | grep "^HVError-" | awk -F'-' '{print $2}'`
+  
+  if [ "${err}" == "" ];then
+    echo "${ret}"
+  elif [ "${err}" == "101" ];then
+    echo "${err}"
+  else
+    echo "100"
+  fi
+}
+
+check_nodejs(){
+  hv_mip=$1
+
+  if [ "$hv_mip" == "" ];then
+    echo "Need master IP!"
+    exit
+  fi
+
+  ret=`${nodejs} ${client_js} getvar "${hv_mip}" "admin_lang"`
+  err=`echo "${ret}" | grep "^HVError-" | awk -F'-' '{print $2}'`
+  
+  if [ "${err}" == "" ];then
+    echo "${ret}"
+  elif [ "${err}" == "101" ];then
+    echo "${err}"
+  else
+    echo "100"
+  fi
+}
+
+check_conn(){
+  md_list=`cat /proc/mdstat | awk -F: '/^md1[1-9] :/{print substr($1,3)}' | sort -u`
+  for mdnum in $md_list
+  do
+    conn_flag="/raidsys/${mdnum}/connect_ok"
+    rss=`cat /var/tmp/raid${mdnum}/rss`
+
+    if [ "${rss}" == "Healthy" ] || [ "${rss}" == "Degrade" ] || [ "`echo ${rss} | grep '^Recovering'`" != "" ];then
+      status=`initiatior_status ${mdnum}`
+    else
+      echo "The status of md${mdnum} is ${rss} now."
+      continue
+    fi
+
+    if [ "${status}" == "" ];then
+      smbdb="/raidsys/${mdnum}/smb.db"
+      hv_mip=`${sqlite} ${smbdb} "select v from conf where k='hv_mip'"`
+      hv_nic=`${sqlite} ${smbdb} "select v from conf where k='hv_nic'"`
+      host=`${sqlite} ${confdb} "select v from conf where k='nic1_hostname'"`
+      PORTAL=`ifconfig ${hv_nic}|awk '/inet addr/{print toupper($2)}'| awk -F':' '{print $2}'`
+      sparenum=`cat /raidsys/${mdnum}/mdstatus | grep "Spare Devices :" | awk -F":" '{print $2}' | sed 's/ //g'`
+      g_spare=`${sqlite} ${smbdb} "select count(*) as tf from hot_spare"`
+      raidid=`cat /var/tmp/raid${mdnum}/raid_id`
+      raidlevel=`cat /var/tmp/raid${mdnum}/raid_level`
+      
+      if [ -f ${conn_flag} ];then
+        ${logevent} 997 814 warning email "${hv_mip}" "${PORTAL}"
+        rm -f ${conn_flag} 
+      fi
+
+      spare=""
+      if [ ${sparenum} -gt 0 ];then
+          sparelist=`cat /raidsys/${mdnum}/mdstatus | grep 'spare' | awk '{print $6}' | awk -F '/' '{print $3}'`
+          for disk in ${sparelist}
+          do
+              if [ "${disk}" == "" ];then
+                  continue
+              fi
+              
+              disk=`echo "${disk}" | sed 's/[0-9]//g'`
+              traynum=`cat /proc/scsi/scsi |awk /Disk:${disk}/'{if($3=="'Disk:${disk}'") print $2}' | awk -F: '{print $2}'`
+              loc=`expr $traynum / 26 - 1`
+              pos=`expr $traynum % 26`
+              if [ $loc -gt 0 ];then
+                spare="${spare}J$loc-$pos,"
+              else
+                spare="${spare}${pos},"
+              fi
+          done
+      fi
+      
+      if [ "${spare}" == "" ];then
+          spare="N/A"
+      else
+          spare=`echo "${spare}" | sed 's/,$//g'`
+      fi
+    
+      if [ "${hv_nic}" == "" ] || [ "${PORTAL}" == "" ];then
+        echo "No the nic for master!"
+        exit
+      fi
+
+      iqn=`${nodejs} ${client_js} query_iqn "${hv_mip}"`
+      err=`echo "${ret}" | grep "^HVError-" | awk -F'-' '{print $2}'`
+    
+      if [ "$err" == "" ];then
+        set_iqn "${mdnum}" 
+        ${nodejs} ${client_js} "hvconnect" "${hv_mip}" "${PORTAL}" "${DEF_IQN}" "${host}" "${spare}" "${raidid}" "${raidlevel}"
+        status=`initiatior_status ${mdnum}`
+        if [ "${status}" != "" ];then
+            touch ${conn_flag}
+        fi
+      elif [ "${err}" == "101" ];then
+        echo "${err}"
+      else
+        echo "100"
+      fi
+    fi
+  done
+}
+
+cron_add(){
+  check_cron_exit=`cat ${crond_conf} | grep "rc.hv check_conn"`
+  if [ "${check_cron_exit}" == "" ];then
+    echo "*/5 * * * * /img/bin/rc/rc.hv check_conn > /dev/null 2>&1" >> ${crond_conf}
+    /usr/bin/killall crond
+    sleep 1
+    /usr/sbin/crond
+    /usr/bin/crontab ${crond_conf} -u root
+  fi
+}
+
+cron_del(){
+  check_cron_exit=`cat ${crond_conf} | grep "rc.hv check_conn"`
+  if [ "${check_cron_exit}" != "" ];then
+    cat ${crond_conf} | grep -v "/img/bin/rc/rc.hv check_conn" > /tmp/crond.conf1
+    cp /tmp/crond.conf1 ${crond_conf}
+    /usr/bin/killall crond
+    sleep 1
+    /usr/sbin/crond
+    /usr/bin/crontab ${crond_conf} -u root
+    rm /tmp/crond.conf1
+  fi
+}
+
+server_on(){
+  pid=`/bin/ps | grep -v "grep" | grep "${server_js}" | awk '{print $1}'`
+  if [ "${pid}" == "" ];then
+    ${nodejs} ${server_js} > /dev/null & 2>&1
+  fi
+  
+  sleep 5
+  setrole
+}
+
+server_off(){
+  pid=`/bin/ps | grep -v "grep" | grep "${server_js}" | awk '{print $1}'`
+  if [ "${pid}" != "" ];then
+    kill ${pid}
+  fi
+}
+
+#record the client ip of HV Master Volume
+cp_raidtray_ip(){
+    traylist=$1
+    rm ${hv_raid_ip}/*
+    for tray in ${traylist}
+    do
+        dev=`awk '/ Tray:'${tray}' /{print $3}' /proc/scsi/scsi | awk -F':' '{print $2}'`
+        if [ "${dev}" == "" ];then
+          dev=${tray}
+        fi
+        ip=`cat ${hv_client_conn}/* | grep "|${dev}|" | awk -F'|' '{print $1}'`
+        cp ${hv_client_conn}/${ip} ${hv_raid_ip}
+    done
+}
+
+speedTest(){
+    traylist=$1
+    size=$2
+    count=$3
+    
+    now_num=0
+    test_num=`echo "${traylist}"|awk -F' ' '{print NF}'`
+    rm ${hv_client_speed}/*
+    for tray in ${traylist}
+    do
+        echo "${size} ${count} ${test_num} ${now_num}" > ${hv_client_speed}/status
+        dev=`awk '/ Tray:'${tray}' /{print $3}' /proc/scsi/scsi | awk -F':' '{print $2}'`
+        ddspeed "${dev}" "${size}" "${count}"
+        now_num=$((${now_num}+1))
+    done
+    echo "${size} ${count} ${test_num} ${now_num}" > ${hv_client_speed}/status
+}
+
+ddspeed(){
+  diskname=$1
+  size=$2
+  count=$3
+  
+  if [ "$diskname" == "" ];then
+    echo "Need Diskname!"
+    exit
+  fi
+  
+  if [ "$size" == "" ];then
+    size=400
+  fi
+  
+  if [ "$count" == "" ];then
+    count=1
+  fi
+
+#  strExec="cat /proc/partitions | awk '{if (\$4==\"${diskname}\") print \$4}'"
+#  diskname_exist=`eval "$strExec"`
+      
+#  if [ "${diskname_exist}" != "" ];then
+#    ${sgdisk} -Z /dev/${diskname} > /dev/null 2>&1
+#    ${gdisk} /dev/${diskname} < ${gdisk_conf} > /dev/null 2>&1
+  
+    strExec="cat /proc/partitions | awk '{if (\$4==\"${diskname}1\") print \$4}'"
+    partition1_exist=`eval "$strExec"`
+
+    if [ "${partition1_exist}" == "" ];then
+#      /sbin/mke2fs -t ext4 -m 0 -b 4096 -i 4096 -F /dev/${diskname}1 > /dev/null 2>&1
+#      mkdir ${hv_client}/${diskname}
+#      /bin/chown nobody:users ${hv_client}/${diskname}
+#      /bin/chmod 777 ${hv_client}/${diskname}
+#      mount -t ext4 -o "acl,rw,noatime" /dev/${diskname}1 ${hv_client}/${diskname}
+      
+      i=0
+      date1=`date +%s`
+      while [ ${i} -lt ${count} ]
+      do
+#        tfile="${hv_client}/${diskname}/${diskname}1"
+#        /bin/dd if=/dev/zero of=${tfile} bs=1M count=${size} conv=fsync > /dev/null 2>&1
+#        rm ${tfile}
+        /bin/dd if=/dev/zero of=/dev/${diskname} bs=1M count=${size} conv=fsync > /dev/null 2>&1
+        i=$(($i+1))
+      done
+      
+      date2=`date +%s`
+      spendtime=$((${date2} - ${date1}-1))
+      
+      total=$((${size}*${count}*10))
+      spend=$((${total}/$spendtime))
+#      umount ${hv_client}/${diskname}
+#      rmdir ${hv_client}/${diskname}
+      
+      echo "${spend}" > ${hv_client_speed}/${diskname}
+#    else
+#      echo 0 > ${hv_client_speed}/${diskname}
+#    fi        
+  fi
+}
+
+static_nic(){
+  nic_list=`ifconfig | grep HWaddr | awk '{print $1}' | grep "^geth"`
+  
+  for nic in ${nic_list}
+  do
+    link=`${ethtool} ${nic} | grep "Link detected: yes"`
+      
+    if [ "${link}" != "" ];then
+      PORTAL=`ifconfig ${nic} |awk '/inet addr/{print $2}' | awk -F':' '{print $2}'`
+      Mask=`ifconfig ${nic} |awk '/inet addr/{print $4}' | awk -F':' '{print $2}'`
+        
+      if [ "${PORTAL}" != "" ];then
+        echo "${nic}|${PORTAL}|${Mask}"
+      fi
+    fi 
+  done
+}
+
+first_nic(){
+  nic_list=`ifconfig | grep HWaddr | awk '{print $1}' | grep "^geth"`
+  
+  for nic in ${nic_list}
+  do
+    link=`${ethtool} ${nic} | grep "Link detected: yes"`
+      
+    if [ "${link}" != "" ];then
+      PORTAL=`ifconfig ${nic} |awk '/inet addr/{print $2}' | awk -F':' '{print $2}'`
+      Mask=`ifconfig ${nic} |awk '/inet addr/{print $4}' | awk -F':' '{print $2}'`
+        
+      if [ "${PORTAL}" != "" ];then
+        echo "${nic}|${PORTAL}"
+        return
+      fi
+    fi 
+  done
+}
+
+raidstatus(){
+  raidid=$1
+  md_list=`cat /proc/mdstat | awk -F: '/^md1[1-9] :/{print substr($1,3)}' | sort -u`
+  for mdnum in $md_list
+  do
+    t_raidid=`cat /var/tmp/raid${mdnum}/raid_id`
+    
+    if [ "${raidid}" == "${t_raidid}" ];then
+      cat /var/tmp/raid${mdnum}/rss
+    fi
+  done
+}
+
+get_clientstatus(){
+  hv_mip=$1
+  raidid=$2
+  ret=`${nodejs} ${client_js} get_raidstatus "${hv_mip}" "${raidid}"`
+  echo ${ret}
+}
+
+check_provider(){
+  md_list=`cat /proc/mdstat | awk -F: '/^md1[1-9] :/{print substr($1,3)}' | sort -u`
+  if [ "${md_list}" != "" ];then
+    echo "1"
+  else
+    echo "0"
+  fi
+}
+
+setrole(){
+  role=$1
+  
+  if [ "${role}" == "" ];then
+    hv_enable=`sqlite /etc/cfg/conf.db "select v from conf where k='hv_enable'"`
+    
+    if [ "${hv_enable}" == "1" ];then
+      role=1
+    else
+      role=0
+    fi
+  fi
+  
+  hv_mip=`first_nic | awk -F'|' '{print $2}'`
+  ret=`${nodejs} ${manage_js} setrole "${hv_mip}" "${role}"`
+}
+
+getrole(){
+  hv_mip=`first_nic | awk -F'|' '{print $2}'`
+  ret=`${nodejs} ${manage_js} getrole "${hv_mip}"`
+  echo ${ret}
+}
+
+start(){
+  check_service=`sqlite /etc/cfg/conf.db "select v from conf where k='hv_service'"`
+  if [ "${check_service}" != "1" ];then
+    exit
+  fi
+
+  server_on
+  md_list=`cat /proc/mdstat | awk -F: '/^md1[1-9] :/{print substr($1,3)}' | sort -u`
+  for mdnum in $md_list
+  do
+    conn_flag="/raidsys/${mdnum}/connect_ok"
+    rm -f ${conn_flag}
+    build_iscsi "${mdnum}"
+  done
+                          
+  if [ "${md_list}" != "" ];then
+    check_conn
+    cron_add
+  else
+    cron_del
+  fi
+}
+
+stop(){
+  logout_hvclient
+  md_list=`cat /proc/mdstat | awk -F: '/^md1[1-9] :/{print substr($1,3)}' | sort -u`
+  for mdnum in $md_list
+  do
+    del_iscsi "${mdnum}"
+  done
+  cron_del
+  server_off
+}
+
+remove_iscsi_disk(){
+  client_ip=$1
+  
+  disk=`cat ${hv_raid_ip}/* | grep "^${client_ip}|" | awk -F'|' '{print $4}'`
+  
+  if [ "${disk}" != "" ];then
+    echo "1" 
+  else
+    disk=`cat ${hv_client_conn}/* | grep "^${client_ip}|" | awk -F'|' '{print $4}'`
+    inraid1=`cat /proc/mdstat | grep "${disk}2\["`
+    inraid2=`cat /proc/mdstat | grep "${disk}3\["`
+    
+    if [ "${disk}" != "" ];then
+        if [ "${inraid1}" != "" ] || [ "${inraid2}" != "" ];then
+            echo "1"
+        else
+            logout_hvclient "${disk}" > /dev/null 2>&1
+            echo "0"
+        fi
+    else
+        echo "1"
+    fi
+  fi
+}
+
+remove_master_disk(){
+  hv_mip=$1
+  client_ip=$2
+  
+  if [ "$hv_mip" == "" ] || [ "$client_ip" == "" ];then
+    echo "Need master and client IP!"
+    exit
+  fi
+              
+  ret=`${nodejs} ${client_js} remove_master_disk "${hv_mip}" "${client_ip}"`
+  err=`echo "${ret}" | grep "^HVError-" | awk -F'-' '{print $2}'`
+                  
+  if [ "${err}" == "" ];then
+    echo "${ret}"
+  elif [ "${err}" == "101" ];then
+    echo "${err}"
+  else
+    echo "100"
+  fi
+}
+
+#################################################
+##	Main code
+#################################################
+case "$1"
+in
+  HugeVolume_start)
+    HugeVolume_start
+    ;;
+  HugeVolume_stop)
+    HugeVolume_stop
+    ;;
+  boot|start)
+    if [ "`/img/bin/check_service.sh hv`" == "1" ];then
+        start
+    fi
+    ;;
+  stop)
+    HugeVolume_stop
+    stop
+    ;;
+  build_iscsi)
+    build_iscsi "$2" "$3"
+    ;;
+  del_iscsi)
+    del_iscsi "$2"
+    ;;
+  conn_hvclient)
+    conn_hvclient "$2" "$3" "$4" "$5" "$6" "$7"
+    ;;
+  logout)
+    logout_hvclient "$2"
+    ;;
+  initiatior_status)
+    initiatior_status "$2"
+    ;;
+  check_conn)
+    check_conn
+    ;;
+  cron_add)
+    cron_add
+    ;;
+  cron_del)
+    cron_del
+    ;;
+  check_nodejs)
+    check_nodejs "$2"
+    ;;
+  m_iqn)
+    m_iqn "$2"
+    ;;
+  speedTest)
+    speedTest "$2" "$3" "$4"
+    ;;
+  ddspeed)
+    ddspeed "$2" "$3" "$4"
+    ;;
+  nic)
+    static_nic
+    ;;
+  server_on)
+    server_on
+    ;;
+  server_off)
+    server_off
+    ;;
+  set_iqn)
+    set_iqn "$2"
+    ;;
+  first_nic)
+    first_nic
+    ;;
+  raidstatus)
+    raidstatus "$2"
+    ;;
+  get_clientstatus)
+    get_clientstatus "$2" "$3"
+    ;;
+  cp_raidtray_ip)
+    cp_raidtray_ip "$2"
+    ;;
+  check_provider)
+    check_provider
+    ;;
+  setrole)
+    setrole "$2"
+    ;;
+  getrole)
+    getrole
+    ;;
+  remove_iscsi_disk)
+    remove_iscsi_disk "$2"
+    ;;
+  remove_master_disk)
+    remove_master_disk "$2" "$3"
+    ;;
+  *)
+    echo "Usage: $0 {boot|start|stop|build_iscsi|conn_hvclient|logout|initiatior_status|check_conn|cron_add|cron_del|check_master|m_iqn|ddspeed|nic}"
+    ;;
+esac

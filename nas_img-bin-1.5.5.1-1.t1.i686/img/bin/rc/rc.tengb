@@ -1,0 +1,418 @@
+#!/bin/sh
+#################################################
+##      Vars defined
+#################################################
+TENGBNICK="geth"
+GBNICK="eth"
+SQLITE="/usr/bin/sqlite"
+CONFDB="/etc/cfg/conf.db"
+DRIVERDB="/img/bin/driver.db"
+LSPCI="/sbin/lspci -n"
+FIND="/usr/bin/find"
+TMP_JUMBO="/tmp/tengb_jumbo"
+IFCONFIG="/sbin/ifconfig"
+RM="/bin/rm"
+TENGB_FILE="/tmp/tengb_data"
+LOGEVENT="/img/bin/logevent/event"
+TMP_CMD_FILE="/tmp/tengb_cmd"
+TMP_IP="/tmp/tengb_ip"
+IPV6CHECK="/usr/bin/ipv6check -c"
+
+. /img/bin/function/libnetwork
+. /img/bin/function/vardef.conf
+
+TengbMac=""
+
+if [ ! -e "${DRIVERDB}" ];then
+    echo "Database is not exist!"
+    exit 1
+fi
+
+TableExist=`${SQLITE} ${DRIVERDB} "select name from sqlite_master where type='table'"`
+
+if  [ "${TableExist}" == "" ];
+then
+    echo "Database is not exist!"
+    exit 1
+fi
+#################################################
+##      Declare subroutine
+#################################################
+
+#################################################
+##      Get Driver list in driver.db
+#################################################
+get_driver_list(){
+    local fSqlCmd="select * from driver"
+
+    ${SQLITE} ${DRIVERDB} "${fSqlCmd}"
+}
+
+#################################################
+##      Get Tengb total setting in conf.db
+#################################################
+get_tengb_db(){
+    local fTengbInterface=$1
+    local fSqlCmd="select * from conf where k like '${fTengbInterface}%'"
+
+    ${SQLITE} ${CONFDB} "${fSqlCmd}"
+}
+
+#################################################
+##      Write Tengb conf.db setting in tmp file
+#################################################
+write_tmp_conf(){
+    local fTengbList=$1
+    local fTengbData
+    
+    echo -e "${fTengbList}" | \
+    while read fTengbData
+    do
+        echo $fTengbData >> ${TENGB_FILE}
+    done
+}
+
+#################################################
+##      Get Tengb single setting
+#################################################
+get_tengb_data(){
+    local fTengbInterface=$1
+    local fFieldName=$2
+    local SqlCmd="cat ${TENGB_FILE} | awk -F'|' '/${fTengbInterface}_${fFieldName}/{print \$2}'"
+    local fInfo
+    
+    fInfo=`eval ${SqlCmd}`
+    echo "${fInfo}"
+}
+
+#################################################
+##      Get Tengb total setting in tmp file
+#################################################
+get_conf_info(){
+    local fTengbInterface=$1
+
+    TengbMac=`get_tengb_data ${fTengbInterface} mac`
+}
+
+
+#################################################
+##      Check mac consistence 
+#################################################
+check_mac(){
+    local fTengbInterface=$1
+    local fDbMac=$2
+    local fStr="${IFCONFIG} ${fTengbInterface} | grep ' HWaddr ' |awk '{print \$5}'"
+    local fRealMac=`eval ${fStr}`
+
+  if [ "${real_mac}" != "${fDbMac}" ];then
+    echo "change mac db"
+    fStr="update conf set v='${fRealMac}' where k='${fTengbInterface}_mac'"
+    $SQLITE $CONFDB "${fStr}"
+    fStr="update conf set v='1500' where k='${fTengbInterface}_jumbo'"
+    $SQLITE $CONFDB "${fStr}"
+    ${LOGEVENT} 997 509 warning email
+  fi
+}
+
+#################################################
+##      Get interface max jumbo 
+#################################################
+get_max_jumbo(){
+    local fTengbInterface=$1
+    local fMaxJumbo=""
+    local fDriverList
+    local fDriverData
+    local fVender
+    local fProduct
+    local fJumbo
+    local fStr
+    local fPciData
+    local fPciId
+    local fDeviceFolder
+    local fDir
+    local fMac
+    local fInterface
+    local fEthDevice
+
+    fDriverList=`get_driver_list`
+    if [ "${fDriverList}" != "" ];then
+        echo -e "${fDriverList}" | \
+        while read fDriverData
+        do
+            if [ "${fMaxJumbo}" != "" ];then
+                continue
+            fi
+
+            fVender=`echo "${fDriverData}" | awk -F '|' '{print $1}'`
+            fProduct=`echo "${fDriverData}" | awk -F '|' '{print $2}'`
+            fJumbo=`echo "${fDriverData}" | awk -F '|' '{print $4}'`
+
+            if [ "${fVender}" == "" ] || [ "${fProduct}" == "" ];then
+                continue
+            fi
+      
+            fStr="${LSPCI} | awk '/${fVender}:${fProduct}/{print \$1}'"
+            fPciData=`eval ${fStr}`
+
+            if [ "${fPciData}" != "" ];then
+                for fPciId in $fPciData
+                do
+                    fStr="${FIND} /sys/devices/ | awk -F '/' '/${fPciId}\/net\/${TENGBNICK}[0-9]*$/||/${fPciId}\/net\/${GBNICK}[0-9]*$/{if(\$1!=\"eth0\" && \$1!=\"eth1\") print \$0}' | grep -v 'eth0:0' |sort"
+                    fDeviceFolder=`eval $fStr`
+
+                    if [ "${fDeviceFolder}" == "" ];then
+                        continue
+                    fi
+
+                    echo -e "$fDeviceFolder" |\
+                    while read fDir
+                    do
+                        fMac=`cat $fDir/address |awk '{print toupper($1)}'`
+                        fStr="${IFCONFIG} -a | awk '/ HWaddr $fMac /{print \$1}'"
+                        fInterface=`eval $fStr`
+
+                        if [ "${fInterface}" == "${fTengbInterface}" ];then
+                            fMaxJumbo=${fJumbo}
+                            echo ${fMaxJumbo} > /tmp/${fTengbInterface}jumbo
+                            break
+                        fi
+                    done
+                done
+            fi
+        done
+    fi
+
+    fMaxJumbo=`cat /tmp/${fTengbInterface}jumbo`
+    if [ "${fMaxJumbo}" != "" ];then
+        echo "${fMaxJumbo}"
+    else
+        fEthDevice=`echo $fTengbInterface | grep ^"eth"`
+
+        if [ "${fEthDevice}" != "" ];then
+            echo "9000"
+        else
+            echo "16000"
+        fi
+    fi
+    ${RM} /tmp/${fTengbInterface}jumbo
+}
+
+#################################################
+##      Start Ten gb
+#################################################
+turn_on(){
+    local fDeviceList
+    local fInterface
+    local fJumbo
+    local fTengbList
+    local fIPInfo
+    local fIPv6Info
+    local fNowIP
+    local fIP
+    local fExistIP
+    local fExitFlag
+    local fDefaultIP
+    local fDefaultMask
+    local fStrExec
+    local fMac
+    local fDefaultJumbo
+    local fDHCPClient
+    local fDHCPServer
+    local fDefaultStartIP
+    local fDefaultEndIP
+    local fSelectCmd
+    local fDefaultIPv6En
+    local fDefaultIPv6Type
+    local fDefaultIPv6Addr
+    local fDefaultIPv6Prefix
+    local fDefaultIPv6Gateway
+    local fDefaultIPv6DHCPEN
+    local fDefaultIPv6DHCPPrefix
+    local fDefaultIPv6DHCPLen
+    local fDbTengbData
+    local fIndex=3
+    local fNowIndex
+    local fNewIPv6
+    local fTmpIPv61
+    local fTmpIPv62
+    local fAllField
+    local fAllVal
+    local fSqlStr
+    local fRet
+    local fHasInEth
+
+    echo "Start turn on teg gb"
+    if [ -f "${TMP_JUMBO}" ];then
+        rm ${TMP_JUMBO}
+    fi
+
+    fDeviceList=`${IFCONFIG} -a | awk '/^eth[0-9]* *Link/||/^geth[0-9]* *Link/{if($1!="eth0" && $1!="eth1") print $1}'|grep -v ':'`
+
+    echo -e "$fDeviceList" |\
+    while read fInterface
+    do
+        if [ "${fInterface}" == "" ];then
+            continue
+        fi
+
+        fStrExec="${IFCONFIG} ${fInterface} | grep ' HWaddr ' |awk '{print \$5}'"
+        fMac=`eval ${fStrExec}`
+        fHasInEth=`awk '/^'${fInterface}'\|/{print $0}' ${Lnet_ALL_NET_INTERFACE}`
+        if [ "${fHasInEth}" == "" ];then
+            echo "${fInterface}|${fIndex}|${fMac}" >> ${Lnet_ALL_NET_INTERFACE}
+            fNowIndex=$(($fIndex+1))
+            fIndex=${fNowIndex}
+        fi
+
+        fJumbo=`get_max_jumbo "${fInterface}"`
+        echo "${fInterface} ${fJumbo}" >> $TMP_JUMBO
+        fTengbList=`get_tengb_db ${fInterface}`
+
+    #-----------------------------------
+    #  caculate ipv4 ip
+    #-----------------------------------
+        fNowIP=`Lnet_get_ipv4 "${fInterface}"`
+    #-----------------------------------
+    #  caculate ipv6 ip
+    #-----------------------------------
+        fNewIPv6=`Lnet_get_default_ipv6 "${fInterface}"`
+
+        fDefaultIP="${fNowIP}254"
+        fDefaultMask="255.255.255.0"
+        fDefaultJumbo="1500"
+        fDHCPClient="0"
+        fDHCPServer="0"
+        fDefaultStartIP="${fNowIP}1"
+        fDefaultEndIP="${fNowIP}100"
+        fDefaultGateway=""
+        fDefaultDHCPGateway=""
+        fDefaultDHCPDNS=""
+        fDefaultIPv6En="0"
+        fDefaultIPv6Type="0"
+        fDefaultIPv6Addr="${fNewIPv6}"
+        fDefaultIPv6Prefix="64"
+        fDefaultIPv6Gateway=""
+        fDefaultIPv6DHCPEN="0"
+        fDefaultIPv6DHCPPrefix=""
+        fDefaultIPv6DHCPLen=""
+        fDefaultIPv4En="1"
+        fDefaultDesp=""
+
+        fAllField=("${fInterface}_ip" "${fInterface}_ipv4_default_ip" "${fInterface}_netmask" "${fInterface}_gateway" "${fInterface}_mac" "${fInterface}_jumbo" "${fInterface}_ipv4_dhcp_client" "${fInterface}_ipv4_dhcp_server" "${fInterface}_startip" "${fInterface}_endip" "${fInterface}_dhcp_server_gateway" "${fInterface}_dhcp_server_dns" "${fInterface}_ipv6_enable" "${fInterface}_ipv6_connection_type" "${fInterface}_ipv6_addr" "${fInterface}_ipv6_default_addr" "${fInterface}_ipv6_prefixlen" "${fInterface}_ipv6_gateway" "${fInterface}_ipv6_dhcp_server" "${fInterface}_ipv6_dhcp_server_prefix" "${fInterface}_ipv6_dhcp_server_len" "${fInterface}_dynamic_gateway" "${fInterface}_ipv4_enable" "${fInterface}_desp")
+        fAllVal=("${fDefaultIP}" "${fDefaultIP}" "${fDefaultMask}" "${fDefaultGateway}" "${fMac}" "${fDefaultJumbo}" "${fDHCPClient}" "${fDHCPServer}" "${fDefaultStartIP}" "${fDefaultEndIP}" "${fDefaultDHCPGateway}" "${fDefaultDHCPDNS}" "${fDefaultIPv6En}" "${fDefaultIPv6Type}" "${fDefaultIPv6Addr}" "${fDefaultIPv6Addr}" "${fDefaultIPv6Prefix}" "${fDefaultIPv6Gateway}" "${fDefaultIPv6DHCPEN}" "${fDefaultIPv6DHCPPrefix}" "${fDefaultIPv6DHCPLen}" "${fDefaultGateway}" "${fDefaultIPv4En}" "${fDefaultDesp}")
+        fSqlStr=""
+
+        for ((i=0; i<${#fAllField[@]}; i++))
+        do
+            fStrExec=`Lnet_insert_cmd_str "0" "${fAllField[$i]}" "${fAllVal[$i]}"`
+            fSqlStr="${fSqlStr}${fStrExec}"
+        done
+
+        if [ "${fSqlStr}" != "" ];then
+            echo "BEGIN TRANSACTION;${fSqlStr}COMMIT;" | ${SQLITE} ${CONFDB}
+        fi
+
+    ### check interface in conf db ###
+        if [ "${fTengbList}" == "" ];then
+            fRet=`Lnet_check_ha_interface "${fInterface}"`
+            if [ "${fRet}" == "0" ];then
+                touch `printf $SYS_ETH_UP_FLAG ${fInterface}`
+                Lnet_up_net "${fInterface}" "yes"
+                sleep 1
+            fi
+        else            
+            write_tmp_conf "fTengbList"
+            get_conf_info ${fInterface}
+
+      ### check db mac and real mac ###
+            check_mac "${fInterface}" "${TengbMac}"
+           
+      ### start interface ###
+            echo "start interface -- set ip"
+            fRet=`Lnet_check_ha_interface "${fInterface}"`
+            if [ "${fRet}" == "0" ];then
+                touch `printf $SYS_ETH_UP_FLAG ${fInterface}`
+                Lnet_up_net "${fInterface}"
+                sleep 1 
+            fi
+
+            ${RM} $TENGB_FILE
+        fi
+
+        echo " k not like '${fInterface}%' and " >> $TMP_CMD_FILE
+        
+    done
+
+    if [ -f $TMP_CMD_FILE ];then
+        fSelectCmd=`cat ${TMP_CMD_FILE}`
+    fi
+
+    fSelectCmd="${fSelectCmd} (k like '${TENGBNICK}%' or k like '${GBNICK}%')"
+    fStrExec="${SQLITE} ${CONFDB} \"select k from conf where ${fSelectCmd}\""
+    fDbTengbData=`eval $fStrExec`
+
+    if [ "$fDbTengbData" != "" ];then
+        echo "delete not exist data"
+        ${SQLITE} ${CONFDB} "delete from conf where ${fSelectCmd}"
+    fi
+    
+    if [ -f $TMP_CMD_FILE ];then
+        ${RM} $TMP_CMD_FILE
+    fi
+}
+
+#################################################
+##      Stop Ten gb
+#################################################
+turn_off(){
+    local fStr
+    local fStartdList
+    local fInterface
+    local fIsHeartBeat
+
+    echo "Stop 10Gbe"
+    if [ -f "${TMP_JUMBO}" ];then
+        ${RM} $TMP_JUMBO
+    fi
+
+    fStartdList=`${IFCONFIG} -a | awk '/^'${TENGBNICK}'[0-9]* *Link/||/^'${GBNICK}'[0-9]* *Link/{if($1!="eth0" && $1!="eth1") print $1}' | grep -v 'eth0:0' `
+
+
+    echo -e "$fStartdList" | \
+    while read fInterface
+    do
+        fIsHeartBeat=`Lnet_check_ha_interface "${fInterface}"`
+        if [ "$fIsHeartBeat" == "0" ];then
+            touch `printf $SYS_ETH_DOWN_FLAG ${fInterface}`
+            ${IFCONFIG} $fInterface down
+            sleep 1
+        fi
+    done
+}
+
+#################################################
+##      Ten gb boot
+#################################################
+bootup(){
+    turn_on
+}
+
+#################################################
+##      Main
+#################################################
+case "$1"
+in
+        start)
+                turn_on 
+                ;;
+        stop)
+                turn_off 
+                ;;
+        boot)
+                bootup
+                ;;
+        *)
+                echo "Usage: $0 {start|stop|dhcp_start interface|dhcp_stop interface|boot}"
+                ;;
+esac
+

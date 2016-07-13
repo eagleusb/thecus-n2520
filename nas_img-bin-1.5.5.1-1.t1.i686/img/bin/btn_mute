@@ -1,0 +1,4 @@
+#!/bin/sh
+echo Buzzer 0 > /proc/thecus_io
+echo Buzzer 0 > /tmp/joey
+

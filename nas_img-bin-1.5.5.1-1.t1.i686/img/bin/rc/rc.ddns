@@ -1,0 +1,95 @@
+#!/bin/sh 
+#################################################
+##	Vars defined
+#################################################
+prog="/usr/sbin/inadyn"
+sqlite="/usr/bin/sqlite"
+confdb="/etc/cfg/conf.db"
+
+# Those variables used to other DDNS model
+DDNS_PID="/var/run/DDNS_PID"
+DDNS_LOG="/dev/shm/DDNS_LOG"
+#################################################
+##	Declare subroutine
+#################################################
+
+get_setting() {
+	${sqlite} ${confdb} "select v from conf where k='ddns_ddns'"
+}
+
+# To start the OEM's DDNS process every 10 minutes.
+enable_other_DDNS(){
+    local uname=$1
+    local password=$2
+    while true;do
+        /usr/bin/curl http://"${uname}":"${password}"@members.clear-net.jp/ddns/nsupdate.php > $DDNS_LOG
+        sleep 600
+    done 
+}
+
+## simplify to start ftpd process
+start_service() {
+	reg=`${sqlite} ${confdb} "select v from conf where k='ddns_reg'"`
+	uname=`${sqlite} ${confdb} "select v from conf where k='ddns_uname'"`
+	password=`${sqlite} ${confdb} "select v from conf where k='ddns_password'"`
+	domain=`${sqlite} ${confdb} "select v from conf where k='ddns_domain'"`
+#For OEM, if $reg = "clear-net.jp", then use other DDNS server.
+        if [ $reg != "clear-net.jp" ]; then
+	    ${prog} --dyndns_system ${reg} -u ${uname} -p ${password} -a ${domain} --update_period_sec 600 --background
+        else
+            enable_other_DDNS $uname $password &
+            echo $! > $DDNS_PID  
+        fi 
+}
+
+
+## simplify to stop ftpd process
+stop_service() {
+        if [ -f $DDNS_PID ];then
+            local PID=`cat $DDNS_PID`
+            kill $PID
+            rm -f $DDNS_PID
+        else 
+            killall inadyn
+            echo "DDNS stops."
+        fi
+}
+
+## simplify to restart ftpd process
+restart_service() {
+	stop_service
+	start_service
+	echo "DDNS restarted."
+}
+
+bootup_service(){
+	able=`get_setting`
+	if [ ${able} -eq 1 ]; then
+	  start_service
+	else 
+	  stop_service
+	fi
+}
+#################################################
+##	Main code
+#################################################
+
+case "$1"
+in
+	start)
+		stop_service
+		start_service
+		;;
+	stop)			
+		stop_service
+		;;
+	restart)
+		restart_service
+		;;
+	boot)
+		bootup_service
+		;;
+	*)			
+		echo "Usage: $0 {start|stop|restart|boot}"
+		;;
+esac

@@ -1,0 +1,150 @@
+#!/bin/sh
+#==================================================
+#        FILE:  folder library
+# DESCRIPTION:  library for share folder
+#       NOTES:  none
+#      AUTHOR:  enian
+#     VERSION:  1.0.0
+#     CREATED:  2011/6/30
+#    REVISION:  2011/6/30
+#==================================================
+
+#==================================================
+#   Include File
+#==================================================
+. /img/bin/function/libraid
+
+
+#==================================================
+#  Function Defined
+#==================================================
+
+#################################################
+#         NAME:  Lshare_get_raid_share
+#  DESCRIPTION:  get all share folder name in one raid
+#      PARAM 1:  Lshare_fMd: raid md number 
+#       RETURN:  folder list
+#       AUTHOR:  enian
+#      CREATED:  30,06,2011
+#################################################
+Lshare_get_raid_share(){
+    local Lshare_fMd="$1"
+    local Lshare_fIsMaster=`Lraid_check_ismasterraid "${Lshare_fMd}"`  # is master
+    local Lshare_fRaidId=`Lraid_md_to_raidid "${Lshare_fMd}"`          # raid id
+    local Lshare_fDB                                                   # raid db
+    local Lshare_fShareList                                            # share list
+    local Lshare_fShare                                                # share name
+    local Lshare_fSysShare="/etc/cfg/sysshare.db"                      # sys db for 32bit
+    local Lshare_fTmpDb="sysshare"                                     # tmp sys db name
+    local Lshare_fTmpName="sys"                                        # tmp nic name for db
+
+    if [ "${Lraid_NasKey}" == "x86_32" ];then
+       Lshare_fDB="/raid${Lshare_fRaidId}/sys/raid.db"
+       if [ -f "${Lshare_fDB}" ];then
+           if [ "${Lshare_fIsMaster}" == "1" ];then
+               Lshare_fShareList=`${Lraid_Sqlite} ${Lshare_fDB} "select share from folder"`
+           else
+               cd "/raid${Lshare_fRaidId}/sys/"
+               cp ${Lshare_fSysShare} ${Lshare_fTmpDb}
+               Lshare_fShareList=`${Lraid_Sqlite} ${Lshare_fDB} "attach $Lshare_fTmpDb as $Lshare_fTmpName; select share from folder where share not in (select share from $Lshare_fTmpName.sysshare)"`
+               rm ${Lshare_fTmpDb}
+               cd - > /dev/null
+           fi
+       fi   
+    else
+       Lshare_fDB="/raidsys/${Lshare_fRaidId}/smb.db"
+       if [ -f "${Lshare_fDB}" ];then 
+           if [ "${Lshare_fIsMaster}" == "1" ];then
+               Lshare_fShareList=`${Lraid_Sqlite} ${Lshare_fDB} "select share from smb_specfd union select share from smb_userfd"`
+           else
+               Lshare_fShareList=`${Lraid_Sqlite} ${Lshare_fDB} "select share from smb_userfd"`
+           fi
+       fi
+    fi
+    echo -e "${Lshare_fShareList}" | \
+    while read Lshare_fShare 
+    do
+        if [ "${Lshare_fShare}" != "" ];then
+            echo "${Lshare_fShare}"
+        fi
+    done
+}
+
+#################################################
+#         NAME:  Lshare_get_share_attr
+#  DESCRIPTION:  get share attr
+#      PARAM 1:  Lshare_fMd: raid md number
+#      PARAM 2:  Lshare_fName: share name
+#      PARAM 3:  Lshare_fAttr: attribute
+#       RETURN:  folder list
+#       AUTHOR:  enian
+#      CREATED:  30,06,2011
+#################################################
+Lshare_get_share_attr(){
+    local Lshare_fMd="$1"
+    local Lshare_fName="$2"
+    local Lshare_fAttr="$3"
+    local Lshare_fIsMaster=`Lraid_check_ismasterraid "${Lshare_fMd}"`  # is master
+    local Lshare_fRaidId=`Lraid_md_to_raidid "${Lshare_fMd}"`          # raid id
+    local Lshare_fDB                                                   # raid db
+    local Lshare_fVal                                            # share list
+
+    if [ "${Lraid_NasKey}" == "x86_32" ];then
+       Lshare_fDB="/raid${Lshare_fRaidId}/sys/raid.db"
+       if [ -f "${Lshare_fDB}" ];then
+           if [ "${Lshare_fIsMaster}" == "1" ];then
+               Lshare_fVal=`${Lraid_Sqlite} ${Lshare_fDB} "select \"${Lshare_fAttr}\" from folder where share='${Lshare_fName}'"`
+           fi
+       fi   
+    else
+       Lshare_fDB="/raidsys/${Lshare_fRaidId}/smb.db"
+       if [ -f "${Lshare_fDB}" ];then 
+           if [ "${Lshare_fIsMaster}" == "1" ];then
+               Lshare_fVal=`${Lraid_Sqlite} ${Lshare_fDB} "select \"${Lshare_fAttr}\" from smb_specfd where share='${Lshare_fName}' union select \"${Lshare_fAttr}\" from smb_userfd where share='${Lshare_fName}'"`
+           else
+               Lshare_fVal=`${Lraid_Sqlite} ${Lshare_fDB} "select \"${Lshare_fAttr}\" from smb_userfd where share='${Lshare_fName}'"`
+           fi
+       fi
+    fi
+     echo "${Lshare_fVal}"
+}
+
+#################################################
+#         NAME:  Lshare_set_share_attr
+#  DESCRIPTION:  set share attr
+#      PARAM 1:  Lshare_fMd: raid md number
+#      PARAM 2:  Lshare_fName: share name
+#      PARAM 3:  Lshare_fAttr: attribute
+#      PARAM 3:  Lshare_fVal: attribute value
+#       RETURN:  folder list
+#       AUTHOR:  enian
+#      CREATED:  30,06,2011
+#################################################
+Lshare_set_share_attr(){
+    local Lshare_fMd="$1"
+    local Lshare_fName="$2"
+    local Lshare_fAttr="$3"
+    local Lshare_fVal="$4"
+    local Lshare_fIsMaster=`Lraid_check_ismasterraid "${Lshare_fMd}"`  # is master
+    local Lshare_fRaidId=`Lraid_md_to_raidid "${Lshare_fMd}"`          # raid id
+    local Lshare_fDB                                                   # raid db
+
+    if [ "${Lraid_NasKey}" == "x86_32" ];then
+       Lshare_fDB="/raid${Lshare_fRaidId}/sys/raid.db"
+       if [ -f "${Lshare_fDB}" ];then
+           if [ "${Lshare_fIsMaster}" == "1" ];then
+               ${Lraid_Sqlite} ${Lshare_fDB} "update folder set \"${Lshare_fAttr}\"='${Lshare_fVal}' where share='${Lshare_fName}'"
+           fi
+       fi   
+    else
+       Lshare_fDB="/raidsys/${Lshare_fRaidId}/smb.db"
+       if [ -f "${Lshare_fDB}" ];then 
+           if [ "${Lshare_fIsMaster}" == "1" ];then
+               ${Lraid_Sqlite} ${Lshare_fDB} "update smb_specfd set \"${Lshare_fAttr}\"='${Lshare_fVal}' where share='${Lshare_fName}'"
+               ${Lraid_Sqlite} ${Lshare_fDB} "update smb_userfd set \"${Lshare_fAttr}\"='${Lshare_fVal}' where share='${Lshare_fName}'"
+           else
+               ${Lraid_Sqlite} ${Lshare_fDB} "update smb_userfd set \"${Lshare_fAttr}\"='${Lshare_fVal}' where share='${Lshare_fName}'"
+           fi
+       fi
+    fi
+}

@@ -1,0 +1,113 @@
+input, select { font-size: 10px;  border: 1px solid silver; }
+textarea      { font-size: 11px;  border: 1px solid silver; }
+
+.rowdata {
+	background-color: #EAECEE;
+}
+
+.rowdatasel {
+	background-color: #D8E1EB;
+}
+
+td.header {
+	background-color: #DDDDDD;
+	vertical-align: middle;
+}
+
+td.title {
+	background-repeat: repeat-x;
+	background-image: url(./tablebg.gif);
+	font-weight: bold;
+	font-size: 13;
+	border-top: solid 1px #000000;
+	border-bottom: solid 1px #000000;
+}
+
+small {
+	font-size: 10;
+}
+
+
+a, a:link, a:visited {
+
+	text-decoration: none;
+}
+
+a:hover, a:active {
+
+	text-decoration: none;
+}
+.ext_error, .ext_message {
+	font-size: 120%;
+  	margin-top: 0.8em;
+  	margin-left: auto;
+  	margin-right: auto;
+  	width: 70% !important;
+  	clear: both;
+  	text-align: justify;
+  	vertical-align: middle;
+  	border-collapse: collapse;
+  	padding: 15px 20px 15px 80px;
+  	background-position: 20px 50%;
+  	background-repeat: no-repeat;
+  	-moz-border-radius: 20px;
+  	-khtml-border-radius: 20px;
+  	border-radius: 20px;
+}
+.ext_error {
+  	background-color: #fdd;
+	background-image: url( ../images/log_error.png );
+}
+.ext_message {
+  	background-color: #f1f3f5;
+	background-image: url( ../images/_info.gif );
+}
+.x-layout-panel-north, .ytheme-gray .x-layout-panel-north{
+	/*background-image: url( ../scripts/extjs/images/vista/layout/panel-title-light-bg.gif );*/
+  	background-color: #eeeeee;
+	font:bold 12px verdana, helvetica;
+	overflow:hidden;
+	padding:4px;
+	border:0px none;
+	border-bottom:2px solid #c3daf9;
+}
+.ytheme-gray .x-layout-panel-north{
+	border-bottom:2px solid #f3f2e7;
+}
+.x-tabs-item-body {padding:10px;}
+.ext_statusbar {
+	font-family: Arial, Helvetica, sans-serif;
+	font-size:8pt;
+	background-image: url('../scripts/extjs/images/default/grid/loading.gif');
+	background-repeat: no-repeat;
+	background-position: left;
+	padding-left:20px;
+	padding-top:3px;
+	height:18px;
+}
+.done {
+	background-image: url('../scripts/extjs/images/default/grid/done.gif');
+}
+*.donebar {
+    background-image: url('../scripts/extjs/images/default/grid/donebar.gif');
+}
+.success {
+	font-weight: bold;
+	color: green;
+}
+.error {
+	font-weight: bold;
+	color: red;
+}
+
+.scroll {
+	overflow-y:scroll;
+	overflow-x:hidden;
+	width:580px;
+	height:260px;
+} 
+
+
+
+
+

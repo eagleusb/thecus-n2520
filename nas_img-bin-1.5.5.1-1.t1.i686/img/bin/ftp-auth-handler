@@ -1,0 +1,13 @@
+#! /bin/sh
+/img/bin/auth.sh ${AUTHD_ACCOUNT} ${AUTHD_PASSWORD}
+check=$?
+echo ${check}
+if [ $check -ne 0 ]; then
+	echo 'auth_ok:0'
+else
+	echo 'auth_ok:1'
+	echo 'uid:'`/usr/bin/getent passwd | /bin/grep "^$AUTHD_ACCOUNT:"|/usr/bin/awk -F":" '{print $3}'`
+	echo 'gid:'`/usr/bin/getent passwd | /bin/grep "^$AUTHD_ACCOUNT:"|/usr/bin/awk -F":" '{print $4}'`
+	echo 'dir:/raid/ftproot/'
+fi
+echo 'end'

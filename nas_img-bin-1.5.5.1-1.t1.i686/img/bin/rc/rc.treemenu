@@ -1,0 +1,600 @@
+#!/bin/sh
+lang_path="/var/www/html/language/language.db"
+tmp_path="/var/tmp/www"
+tmp_lang="${tmp_path}/language.db"
+model=`cat /proc/thecus_io | awk '/MODELNAME:/{print $2}'`
+sys_conf_file="/img/bin/conf/sysconf.${model}.txt"
+sys_conf=`cat ${sys_conf_file}`
+sqlite="/usr/bin/sqlite"
+conf_field=""
+conf_value=""
+producer=`awk '/producer/{print $2}' /etc/manifest.txt`
+default_producer="THECUS"
+ifconfig="/sbin/ifconfig"
+conf_db="/etc/cfg/conf.db"
+pkg_rawdata="/var/www/html/language/rawdata"
+
+if [ ! -d "$tmp_path" ];then
+  mkdir -p "$tmp_path"
+fi
+#############################################
+#  function : get_sysconf_info
+#  para : sys_conf -> sys conf file
+#  desp : get all sys conf seeting
+#############################################
+function get_sysconf_info(){
+  sys_conf=$1
+  for conf in ${sys_conf}
+  do
+    col1=`echo "$conf" | awk -F'=' '{print $1}'` 
+    col2=`echo "$conf" | awk -F'=' '{print $2}'` 
+    if [ "$col1" != "" ];then 
+      conf_field="${conf_field}
+${col1}"
+      conf_value="${conf_value} 
+${col2}" 
+    fi
+  done
+  
+}
+
+#############################################
+#  function : update_lang_db
+#  para : tree_id      -> tree id
+#         tree_value   -> on/off
+#         tree_cateid  -> tree cate id
+#         tree_lang    -> tree lang index
+#         tree_fun     -> tree fun name 
+#  desp : update tree db
+#############################################
+function update_lang_db(){
+  tree_id=$1
+  tree_value=$2
+  tree_cateid=$3
+  tree_lang=$4
+  tree_fun=$5
+  
+  if [ "${tree_id}" == "0" ];then
+     fFunId=`${sqlite} ${tmp_lang} "select treeid from treemenu where fun='${tree_fun}'"`
+     if [ "${fFunId}" == "" ];then
+       lastid=`$sqlite $tmp_lang "select treeid from treemenu order by treeid asc" | tail -n 1`
+       newid=$((${lastid}+1))     
+       $sqlite $tmp_lang "insert into treemenu values('${newid}','${tree_cateid}','${tree_lang}','${tree_fun}','${tree_value}')"
+     else
+       $sqlite $tmp_lang "update treemenu set status='${tree_value}' where fun='${tree_fun}'"
+     fi
+  else
+     for ((i=0; i<=10; i++))
+     do
+         $sqlite $tmp_lang "update treemenu set status='$tree_value' where treeid='${tree_id}'"
+         if [ $? -eq 0 ]; then
+             break
+         else
+             sleep 1
+         fi
+     done
+  fi
+}
+
+#############################################
+#  function : get_sysconf_value
+#  para : conf_field   -> all sys conf field  
+#         conf_value   -> all sys conf value
+#         sys_name     -> single sys name
+#  return : sys value
+#  desp : get one sys item value
+#############################################
+function get_sysconf_value(){
+  conf_field=$1
+  conf_value=$2
+  sys_name=$3
+  sys_value=""
+   
+  str="echo -e \"${conf_field}\" | awk '/^${sys_name}\$/{print NR}'"
+  sys_line=`eval "$str"`
+  if [ "${sys_line}" != "" ];then
+    str="echo -e \"${conf_value}\" | awk 'NR == $sys_line {print \$1}'"
+    sys_value=`eval "$str"`
+  fi
+
+  echo "$sys_value"
+}
+
+#############################################
+#  function : settengbtree
+#  para : id   -> tree id  
+#  desp : check 10Gbe and set in tree db
+#############################################
+function settengbtree(){
+  id=$1
+  fStatus=$2
+  nickname="eth"
+  amount=0
+  eth2_add=0
+  lan3=`get_sysconf_value "${conf_field}" "${conf_value}" "lan3"`
+  ha=`get_sysconf_value "${conf_field}" "${conf_value}" "ha"`
+  if [ "${lan3}" == "1" ] && [ "${ha}" == "1" ];then
+    str="$ifconfig -a | awk '/^${nickname}/{if(\$1!=\"eth0\" && \$1!=\"eth1\" && \$1!=\"eth2\") print \$1}' |grep -v ':'"
+  else
+    str="$ifconfig -a | awk '/^${nickname}/{if(\$1!=\"eth0\" && \$1!=\"eth1\") print \$1}' |grep -v ':'"
+    eth2_add=1
+  fi
+  eth_name=`eval "$str"`
+ 
+  if [ "${eth_name}" != "" ];then
+    for nic in $eth_name
+    do
+       if [ "$nic" != "" ];then
+         if [ "${fStatus}" != "update" ];then
+           num=`echo "$nic" | awk '{print substr($0,4)}'`
+           num=$(($num+$eth2_add))
+           update_lang_db "$id" "1" "3" "tree_10gbe" "tengb&tid=$nic&num=$num"
+         fi
+         amount=$((${amount}+1))
+       fi
+    done
+  fi  
+
+  nickname="geth"
+  str="$ifconfig -a | awk '/^${nickname}/{print \$1}'"
+  geth_name=`eval "$str"`
+ 
+  hd_enable=`${sqlite} ${conf_db} "select v from conf where k='ha_enable'"`
+  if [ "${hd_enable}" == "1" ];then
+    hd_net=`${sqlite} ${conf_db} "select v from conf where k='ha_heartbeat'"`
+  fi
+  if [ "${geth_name}" != "" ];then
+    for nic in $geth_name 
+    do
+       if [ "$nic" != "" ];then
+         t_num=`echo "$nic" | awk '{print substr($0,5)}'`
+         num=$((${t_num}+3+${amount}))
+         if [ "${hd_net}" != "${nic}" ];then
+           update_lang_db "$id" "1" "3" "tree_10gbe" "tengb&tid=$nic&num=$num"
+         else
+           update_lang_db "$id" "0" "3" "tree_10gbe" "tengb&tid=$nic&num=$num"
+         fi
+       fi
+    done
+  fi  
+}
+
+#############################################
+#  function : check_fun
+#  para : sys_value   -> sys item value
+#  return : 1/0 (on/off)  
+#  desp : check common attribute
+#############################################
+function check_fun(){
+  sys_value=$1
+  value="0"
+  if [ "${sys_value}" != "0" ] && [ "$sys_value" != "" ];then
+    value="1"
+  fi
+  echo "${value}"
+}
+
+#############################################
+#  function : check_online
+#  para : sys_value   -> sys conf online value
+#         producer -> nas producer
+#  return : 1/0 (on/off) 
+#  desp : check has online register
+#############################################
+function check_online(){
+  sys_value=$1
+  producer=$2
+  ret=0    
+  fun_status=`check_fun "$sys_value"` 
+
+  if [ "${fun_status}" == "1" ] && [ "${producer}" == "${default_producer}" ];then
+    ret=1
+  fi
+  
+  echo "${ret}"
+}
+
+#############################################
+#  function : check_wol
+#  para : sys_value -> sys conf wol value
+#         model -> nas model
+#  return :1/0 (on/off)  
+#  desp : check has wol
+#############################################
+function check_wol(){
+  sys_value=$1
+  model=$2
+  ret=0
+  gpio_status=""
+  sys_status=`check_fun "$sys_value"` 
+  
+  if [ "${sys_status}" == "1" ];then
+    ret=1
+  fi
+  
+  echo "${ret}"
+}
+
+#############################################
+#  function : check_snmp
+#  para : sys_value -> sys conf snmp value
+#  return :1/0 (on/off)  
+#  desp : check has snmp
+#############################################
+function check_snmp(){
+  sys_value=$1
+  ret=0
+  fun_status=`check_fun "$sys_value"` 
+  
+  if [ "${fun_status}" == "1" ];then
+    ret=1
+  fi
+  
+  echo "${ret}"
+}
+
+#############################################
+#  function : set_hsdpa
+#  para : sys_value -> sys conf hsdpa value
+#  return :1/0 (on/off)  
+#  desp : check has hsdpa
+#############################################
+function set_hsdpa(){
+  tree_id=`$sqlite $tmp_lang "select treeid from treemenu_sysconfig where sysconfig='hsdpa'"`
+  old_status=`$sqlite $tmp_lang "select status from treemenu where treeid='${tree_id}'"`
+  sys_value=`awk -F'=' '/^hsdpa/{print $2}' ${sys_conf_file}`
+  ret=0
+  fun_status=`check_fun "$sys_value"` 
+  
+  if [ "${fun_status}" == "1" ];then
+    lang=`$sqlite /etc/cfg/conf.db "select v from conf where k='admin_lang'"`
+    has_usb=`ls /dev/ttyUSB0 | awk '/ttyUSB0/{print $0}'`
+    
+    if [ "$lang" == "tw" ] && [ "${has_usb}" != "" ];then
+      ret=1
+    fi
+  fi
+  
+  if [ "${ret}" != "${old_status}" ];then 
+    update_lang_db "$tree_id" "${ret}"
+  fi
+}
+
+#############################################
+#  function : check_media
+#  para : sys_value -> sys conf media value
+#  return :1/0 (on/off)  
+#  desp : check has media
+#############################################
+function check_media(){
+  sys_value=$1
+  ret=0
+  fun_status=`check_fun "$sys_value"`
+  
+  /img/bin/check_twonky > /dev/null 2>&1
+  has_twonky=$?
+  
+  if [ "${fun_status}" == "1" ] && [ "$has_twonky" != "1" ];then
+    ret=1  
+  fi
+  echo "${ret}"
+}
+
+#############################################
+#  function : check_wireless_client
+#  para : sys_value -> sys conf wirless client value
+#  return :1/0 (on/off)  
+#  desp : check has wireless client
+#############################################
+function check_wireless_client(){
+  sys_value=$1
+  ret=0
+  fun_status=`check_fun "$sys_value"` 
+  has_eth2=`$ifconfig -a eth2`
+  has_wth=`$ifconfig -a wth0`
+  if [ "${fun_status}" == "1" ] && ([ "$has_eth2" != "" ] || [ "$has_wth" != "" ]);then
+    ret=1  
+  fi
+
+  echo "${ret}"
+}
+
+#############################################
+#  function : check_space_alloc
+#  para : field_info -> tree db field name
+#         conf_field   -> all sys conf field  
+#         conf_value   -> all sys conf value
+#  return :1/0 (on/off)  
+#  desp : check has space allocate
+#############################################
+function check_space_alloc(){
+  field_info=$1
+  conf_field=$2
+  conf_value=$3
+  ret=0
+  field_count=`echo "$field_info" | awk -F':' '{print NF}'`
+  if [ "${field_count}" != "" ];then
+    for((i=0;i<=${field_count};i++))
+    do
+      str="echo "$field_info" | awk -F':' '{print \$$i}'"
+      field=`eval "$str"`
+      sys_value=`get_sysconf_value "${conf_field}" "${conf_value}" "${field}"`
+      fun_status=`check_fun "$sys_value"`
+
+      if [ "${fun_status}" == "1" ];then
+        ret=1
+        break 
+      fi
+    done
+  fi
+  echo "${ret}"
+}
+
+#############################################
+#  function : check_wireless
+#  return :1/0 (on/off)  
+#  desp : check has space allocate
+#############################################
+function check_wireless(){
+  ret=0
+  wireless_exist=`$ifconfig -a wlan0`
+  if [ "$wireless_exist" != "" ];then
+    ret=1
+  fi
+  echo ${ret}
+}
+
+function get_value(){
+  strval=$1
+  webfile="/var/www/html/webinfo/webconfig"
+  str="cat ${webfile} | awk -F'=' '/^\\\$webconfig\['\''odm'\''\]\['\''${strval}'\''\]/{print substr(\$2,2,1)}'" 
+  val=`eval "${str}"`
+  echo ${val} 
+}
+        
+function check_ui_fun(){
+  ret=0
+  webdisk=`get_value "webdisk_odm"`
+  photoserver=`get_value "photoserver_odm"`
+  module=`get_value "module_odm"`
+  if [ "${webdisk}" == "1" ] || [ "${photoserver}" == "1" ] || [ "${module}" == "1" ];then
+    ret=1
+  fi
+  echo ${ret}
+}
+
+#############################################
+#  function : set_init
+#  desp : init tree menu db
+#############################################
+function set_init(){
+  need_set_info=`$sqlite $tmp_lang "select * from treemenu_sysconfig"`
+  
+  for value in $need_set_info
+  do
+    tree_id=`echo "$value" | awk -F'|' '{print $1}'` 
+    sys_name=`echo "$value" | awk -F'|' '{print $2}'`
+    sys_value=`get_sysconf_value "${conf_field}" "${conf_value}" "${sys_name}"`
+    ret=0 
+    if [ "$sys_name" != "" ];then 
+      case "$sys_name" in
+        'hsdpa'|'wireless_client'|'wireless'|'cwireless')
+          ret=$sys_value
+          ;;
+        'thecusid')
+          ret=$sys_value
+          ;;
+	'led_control')
+	  ret=$sys_value
+	  ;;
+        'amazon_s3')
+          ret=$sys_value
+          ;;
+        'tengb')
+          settengbtree "$tree_id"
+          continue
+          ;;
+        'online_register')
+          ret=`check_online "${sys_value}" "${producer}"`
+          ;;
+        'wol')
+          ret=`check_wol "${sys_value}" "${model}"`
+          ;;
+        'netsnmp')
+          ret=`check_snmp "${sys_value}"`
+          ;;
+        'lan')
+          lan_exist=`$ifconfig -a eth1`
+          if [ "$lan_exist" != "" ];then
+            ret=1
+          fi
+          ;;
+        'target_usb:iscsi_limit')
+          ret=`check_space_alloc "$sys_name" "${conf_field}" "${conf_value}" `
+          ;; 
+        'media')
+          ret=`check_media "${sys_value}"`
+          ;;
+        'ups')
+          if [ "$model" != "N0204" ];then
+            ret=1
+          fi
+          ;;
+        'ui_fun')
+          ret=`check_ui_fun`
+          ;;
+        *)
+          ret=`check_fun $sys_value`
+          ;;
+      esac 
+      
+      update_lang_db "$tree_id" "${ret}" 
+    fi
+  done
+  
+}
+
+#############################################
+#  function : set_hotplug
+#  para : sys item name
+#  desp : set hotplug item
+#############################################
+function set_hotplug(){
+  sys_name=$1
+  act=$2
+  tree_id=`$sqlite $tmp_lang "select treeid from treemenu_sysconfig where sysconfig='${sys_name}'"`
+  old_status=`$sqlite $tmp_lang "select status from treemenu where treeid='${tree_id}'"`
+  case "$sys_name" in
+  'wireless')
+    ret=`check_wireless`
+    ;;
+  'wireless_client')
+    value=`awk -F'=' '/^wireless_client/{print $2}' ${sys_conf_file}`
+    ret=`check_wireless_client "${value}"`
+    ;;
+  esac
+  ret=0
+  if [ "${old_status}" != "${ret}" ];then 
+    update_lang_db "$tree_id" "${ret}"
+    if [ "$act" == "" ];then
+      echo "1" > ${tmp_path}/change_tree
+    fi
+  fi
+}
+
+#############################################
+#  function : set_hotplug_item
+#  desp : set hotplug item
+#############################################
+function set_hotplug_item(){
+  act=$1
+  ### wireless ap ###
+  set_hotplug "wireless" "$act"
+  ### wireless client ###
+  set_hotplug "wireless_client" "$act"
+}
+
+#############################################
+#  function : copy_shortcut
+#  desp : copy /etc/cfg/shortcut.db to
+#         /var/tmp/www/language.db
+#############################################
+function copy_shortcut(){
+  shortcut_db="/etc/cfg/shortcut.db"
+  tmp_db="${tmp_path}/shortcut.db"
+
+  if [ -L "${shortcut_db}" ] || [ ! -f "${shortcut_db}" ];then
+    cp -f /img/bin/default_cfg/default/etc/cfg/shortcut.db ${shortcut_db}
+  fi
+  
+  is_new_tb=`${sqlite} ${shortcut_db} "PRAGMA table_info(shortcut)" |wc -l`
+  if [ ${is_new_tb} -eq 2 ];then
+    if [ "`${sqlite} ${tmp_lang} \"select * FROM sqlite_master WHERE type='table' and name='shortcut'\"`" != "" ];then
+        ${sqlite} ${tmp_lang} "delete from shortcut"
+    fi
+
+    for ((i=0;i<3;i++))
+    do
+        ${sqlite} $shortcut_db ".dump" | ${sqlite} ${tmp_lang}
+        if [ $? -eq 0 ]; then
+            break
+        fi
+
+        sleep 1
+    done
+  else
+    ${sqlite} ${tmp_lang} "create table shortcut (treeid integer,sortid integer)"
+    touch ${tmp_db}
+    ${sqlite} ${tmp_db} "create table shortcut (treeid integer,sortid integer)"
+    ${sqlite} ${tmp_db} "delete from shortcut"
+    ${sqlite} ${tmp_lang} "delete from shortcut"
+    data=`${sqlite} ${shortcut_db} "select * from shortcut"`
+    for val in ${data}
+    do
+      tree_name=`echo $val | awk -F'|' '{print $1}'`
+      sortid=`echo $val | awk -F'|' '{print $2}'`
+      tree_id=`${sqlite} ${tmp_lang} "select treeid from treemenu where fun='${tree_name}'"`
+      if [ "${tree_id}" != "" ] && [ "${tree_name}" != "tengb" ];then
+        for ((i=0; i<3 ;i++))
+        do
+            ${sqlite} ${tmp_lang} "insert into shortcut values('${tree_id}','${sortid}')"
+            LANG_RETURN=$?
+            ${sqlite} ${tmp_db} "insert into shortcut values('${tree_id}','${sortid}')"
+            SHOR_RETURN=$?
+           
+            if [ $LANG_RETURN -eq 0 ] && [ $SHOR_RETURN -eq 0 ]; then
+                break
+            fi
+
+            sleep 1
+        done
+      fi
+    done
+    mv ${tmp_db} ${shortcut_db}
+  fi
+}
+
+hd_tree_act(){
+  fAct=$1
+  fHaFile="/tmp/ha_role"
+  if [ -f "${fHaFile}" ];then
+    fHaStatus=`cat "${fHaFile}" | awk '{print $0}'`
+    if [ "${fHaStatus}" == "active" ];then
+      ${fAct} "init"
+      ${sqlite} ${tmp_lang} "update treemenu set status='0' where treeid IN (select treeid from ha_hide_tree)" 
+    else
+      ${sqlite} ${tmp_lang} "update treemenu set status='0' where treeid IN (select treeid from ha_ctrl_tree)"
+    fi
+  else
+    ${fAct} "init"
+  fi
+  copy_shortcut
+  echo "1" > ${tmp_path}/change_tree    
+}
+
+pkg_lang_init(){
+    sql_list=`ls ${pkg_rawdata} | grep "sql$"`
+    dat_list=`ls ${pkg_rawdata} | grep "dat$"`
+
+    echo "${sql_list}" | \
+    while read sql
+    do
+        /img/bin/rc/rc.pkg treeid_add
+    done
+
+    echo "${dat_list}" | \
+    while read pkg
+    do
+        /var/www/html/utility/wording.sh import dat "${pkg_rawdata}/${pkg}"
+    done
+}
+
+#############################################
+#       Main   
+#############################################
+case "$1" in
+  'init')
+    pkg_lang_init
+    cp ${lang_path} ${tmp_lang}
+    get_sysconf_info "$sys_conf"
+    set_init
+    set_hotplug_item "init"
+    set_hsdpa
+    copy_shortcut
+    ;;
+  'hotplug')
+    set_hotplug_item
+    ;;
+  'hd_tree')
+    hd_tree_act $0
+    ;;
+  'hd_tengb_tree')
+   settengbtree "0" "update"
+    ;;
+  'check_hsdpa')
+    set_hsdpa
+    ;;
+  *)
+    echo "Usage : { init | hotplug | check_hsdpa | hd_tree | hd_tengb_tree "nic interface"}"
+    ;;
+esac

@@ -1,0 +1,55 @@
+BODY{
+}
+.page{
+   text-align:center;
+   width: 100%;
+   top: 30;
+   padding: 30 30 30 30;
+   background-color:#cfcfcf;
+}
+/* form division */
+.Option{
+   border: 1 solid;
+}
+/* hide javascript multi-lingual wordings */
+.hidden{
+   visibility:hidden;
+   line-height: 1px;
+   font-size: 1px;
+   margin:0px;
+   padding: 0px;
+}
+/* Help Tips */
+span.Tip{
+   border: 2 outset ;
+   border-color: #ffff00 ;
+}
+div.domTTClassic {
+    border: 1px solid black;
+    background-color: #FBF4D4;
+}
+div.domTTClassicCaption {
+    font-family: serif;
+    font-size: 12px;
+    font-weight: bold;
+    /*font-style: italic;*/
+    padding: 1px 2px;
+    background-color: #ff0068;
+}
+div.domTTClassicContent {
+    font-size: 12px;
+    font-family: Arial, sans-serif;
+    padding: 1px 2px 0 2px;
+}
+
+.msgbox{
+    border: solid 1;
+    background-color:#ff0000;
+    color: #ffffff;
+}
+.step_warning{
+    font-weight: bold;
+    color: #FFFF00;
+font-size: 12px;
+}
+

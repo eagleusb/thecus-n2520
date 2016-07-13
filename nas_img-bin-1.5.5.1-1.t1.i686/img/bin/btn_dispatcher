@@ -1,0 +1,84 @@
+#!/bin/sh 
+sleep_secs=1
+bat_mode="/var/tmp/power/bat_mode"
+event="/img/bin/logevent/event"
+
+#/proc/thecus_event 
+#PWR Button: OFF
+#Copy Button: OFF
+#eSATA Button: OFF
+#USER1 Button: OFF
+#USER2 Button: OFF
+#USER3 Button: OFF
+
+while true
+do
+  tmp_event=`cat /proc/thecus_event | awk '(/ON||OFF/) {print $0}'`
+  btn_on=`echo ${tmp_event} | grep ON | cut -d" " -f1`
+  btn_off=`echo ${tmp_event} | grep OFF | cut -d" " -f1`
+
+  if [ "${tmp_event}" != "" ];then
+     case "${tmp_event}" in 
+      "AC Fail")
+          echo "power Fail ..."
+          echo 0 0 ACPWR 0 > /var/tmp/oled/pipecmd
+          check_bat_mode=`cat $bat_mode`
+          ${event} 997 510 warning email
+
+          if [ "$check_bat_mode" != "1" ];then
+              /img/bin/mon_bat.sh
+          fi
+        ;;
+      "AC Ready")
+          echo "power Recover ..."
+          ${event} 997 438 "info" "email"
+          echo 0 0 ACPWR 1 > /var/tmp/oled/pipecmd
+        ;;
+     esac
+  fi
+
+  if [ "$btn_on" != "" ]; then
+    case "$btn_on" in
+      "IR_PWR" ) sh -c "/img/bin/btn_ir_power AUTO > /dev/null 2>&1 &"
+        ;;
+      "IR_PWR_ON" ) sh -c "/img/bin/btn_ir_power ON> /dev/null 2>&1 &"
+        ;;
+      "PWR" ) sh -c "/img/bin/btn_power > /dev/null 2>&1 &"
+        ;;
+      "Copy" ) sh -c "/img/bin/btn_copy > /dev/null 2>&1 &"
+        ;;
+      "eSATA" ) sh -c "/img/bin/btn_esata > /dev/null 2>&1 &"
+        ;;
+      "USER1" ) sh -c "/img/bin/btn_user1 > /dev/null 2>&1 &"
+        ;;
+      "USER2" ) sh -c "/img/bin/btn_user2 > /dev/null 2>&1 &"
+        ;;
+      "USER3" ) sh -c "/img/bin/btn_user3 > /dev/null 2>&1 &"
+        ;;
+      "PSU_FAIL" ) sh -c "/img/bin/logevent/event 997 601 error email > /dev/null 2>&1 &"
+        ;;
+      "PSU1_FAIL" ) sh -c "/img/bin/logevent/event 997 602 error email 1 > /dev/null 2>&1 &"
+        ;;
+      "PSU2_FAIL" ) sh -c "/img/bin/logevent/event 997 602 error email 2 > /dev/null 2>&1 &"
+        ;;
+      "Mute" ) sh -c "/img/bin/btn_mute > /dev/null 2>&1 &"
+        ;;
+      "RST2DF" ) sh -c "/img/bin/resetDefault.sh > /dev/null 2>&1 &"
+        ;;
+
+    esac
+  fi
+
+  if [ "$btn_off" != "" ]; then
+    case "$btn_off" in
+      "PSU_FAIL" ) sh -c "/img/bin/logevent/event 997 400 info email > /dev/null 2>&1 &"
+        ;;
+      "PSU1_FAIL" ) sh -c "/img/bin/logevent/event 997 401 info email 1 > /dev/null 2>&1 &"
+        ;;
+      "PSU2_FAIL" ) sh -c "/img/bin/logevent/event 997 401 info email 2 > /dev/null 2>&1 &"
+        ;;
+    esac
+  fi
+
+  sleep ${sleep_secs}
+done

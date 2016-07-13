@@ -1,0 +1,765 @@
+#!/bin/sh
+#
+# 
+# oracle
+#
+# Description:	Manages an Oracle Database as a High-Availability
+#		resource
+#
+#
+# Author:	Dejan Muhamedagic
+# Support:	linux-ha@lists.linux-ha.org
+# License:	GNU General Public License (GPL)
+# Copyright:	(C) 2006 International Business Machines, Inc.
+#
+#		This code inspired by the DB2 resource script
+#		written by Alan Robertson
+#
+# An example usage in /etc/ha.d/haresources: 
+#       node1  10.0.0.170 oracle::RK1::/oracle/10.2::orark1
+#
+# See usage() function below for more details...
+#
+# OCF instance parameters:
+#	OCF_RESKEY_sid
+#	OCF_RESKEY_home (optional; else read it from /etc/oratab)
+#	OCF_RESKEY_user (optional; figure it out by checking file ownership)
+#	OCF_RESKEY_ipcrm (optional; defaults to "instance")
+#	OCF_RESKEY_clear_backupmode (optional; default to "false")
+#	OCF_RESKEY_shutdown_method (optional; default to "checkpoint/abort")
+#
+# Initialization:
+
+: ${OCF_FUNCTIONS_DIR=${OCF_ROOT}/resource.d/heartbeat}
+. ${OCF_FUNCTIONS_DIR}/.ocf-shellfuncs
+
+#######################################################################
+
+usage() {
+  methods=`oracle_methods`
+  methods=`echo $methods | tr ' ' '|'`
+  cat <<-!
+	usage: $0 {$methods}
+
+	$0 manages an Oracle Database instance as an HA resource.
+
+	The 'start' operation starts the database.
+	The 'stop' operation stops the database.
+	The 'status' operation reports whether the database is running
+	The 'monitor' operation reports whether the database seems to be working
+	The 'dumpinstipc' operation prints IPC resources used by the instance
+	The 'cleanup' operation tries to clean up after Oracle was brutally stopped
+	The 'validate-all' operation reports whether the parameters are valid
+	The 'methods' operation reports on the methods $0 supports
+
+	!
+}
+
+meta_data() {
+	cat <<END
+<?xml version="1.0"?>
+<!DOCTYPE resource-agent SYSTEM "ra-api-1.dtd">
+<resource-agent name="oracle">
+<version>1.0</version>
+
+<longdesc lang="en">
+Resource script for oracle. Manages an Oracle Database instance
+as an HA resource.
+</longdesc>
+<shortdesc lang="en">Manages an Oracle Database instance</shortdesc>
+
+<parameters>
+
+<parameter name="sid" unique="1" required="1">
+<longdesc lang="en">
+The Oracle SID (aka ORACLE_SID).
+</longdesc>
+<shortdesc lang="en">sid</shortdesc>
+<content type="string" default="" />
+</parameter>
+
+<parameter name="home" unique="0">
+<longdesc lang="en">
+The Oracle home directory (aka ORACLE_HOME).
+If not specified, then the SID along with its home should be listed in
+/etc/oratab.
+</longdesc>
+<shortdesc lang="en">home</shortdesc>
+<content type="string" default="" />
+</parameter>
+
+<parameter name="user" unique="0">
+<longdesc lang="en">
+The Oracle owner (aka ORACLE_OWNER).
+If not specified, then it is set to the owner of
+file \$ORACLE_HOME/dbs/*\${ORACLE_SID}.ora.
+If this does not work for you, just set it explicitely.
+</longdesc>
+<shortdesc lang="en">user</shortdesc>
+<content type="string" default="" />
+</parameter>
+
+<parameter name="ipcrm" unique="0">
+<longdesc lang="en">
+Sometimes IPC objects (shared memory segments and semaphores)
+belonging to an Oracle instance might be left behind which
+prevents the instance from starting. It is not easy to figure out
+which shared segments belong to which instance, in particular when
+more instances are running as same user.
+
+What we use here is the "oradebug" feature and its "ipc" trace
+utility. It is not optimal to parse the debugging information, but
+I am not aware of any other way to find out about the IPC
+information. In case the format or wording of the trace report
+changes, parsing might fail. There are some precautions, however,
+to prevent stepping on other peoples toes. There is also a
+dumpinstipc option which will make us print the IPC objects which
+belong to the instance. Use it to see if we parse the trace file
+correctly.
+
+Three settings are possible:
+
+- none: don't mess with IPC and hope for the best (beware: you'll
+  probably be out of luck, sooner or later)
+- instance: try to figure out the IPC stuff which belongs to the
+  instance and remove only those (default; should be safe)
+- orauser: remove all IPC belonging to the user which runs the
+  instance (don't use this if you run more than one instance as same
+  user or if other apps running as this user use IPC)
+
+The default setting "instance" should be safe to use, but in that
+case we cannot guarantee that the instance will start. In case IPC
+objects were already left around, because, for instance, someone
+mercilessly killing Oracle processes, there is no way any more to
+find out which IPC objects should be removed. In that case, human
+intervention is necessary, and probably _all_ instances running as
+same user will have to be stopped. The third setting, "orauser",
+guarantees IPC objects removal, but it does that based only on IPC
+objects ownership, so you should use that only if every instance
+runs as separate user.
+
+Please report any problems. Suggestions/fixes welcome.
+</longdesc>
+<shortdesc lang="en">ipcrm</shortdesc>
+<content type="string" default="instance" />
+</parameter>
+
+<parameter name="clear_backupmode" unique="0" required="0">
+<longdesc lang="en">
+The clear of the backup mode of ORACLE.
+</longdesc>
+<shortdesc lang="en">clear_backupmode</shortdesc>
+<content type="boolean" default="false" />
+</parameter>
+
+<parameter name="shutdown_method" unique="0" required="0">
+<longdesc lang="en">
+How to stop Oracle is a matter of taste it seems. The default
+method ("checkpoint/abort") is:
+
+	alter system checkpoint;
+	shutdown abort;
+
+This should be the fastest safe way bring the instance down. If
+you find "shutdown abort" distasteful, set this attribute to
+"immediate" in which case we will
+
+	shutdown immediate;
+
+If you still think that there's even better way to shutdown an
+Oracle instance we are willing to listen.
+</longdesc>
+<shortdesc lang="en">shutdown_method</shortdesc>
+<content type="string" default="checkpoint/abort" />
+</parameter>
+
+</parameters>
+
+<actions>
+<action name="start" timeout="120" />
+<action name="stop" timeout="120" />
+<action name="status" timeout="5" />
+<action name="monitor" depth="0" timeout="30" interval="120" />
+<action name="validate-all" timeout="5" />
+<action name="methods" timeout="5" />
+<action name="meta-data" timeout="5" />
+</actions>
+</resource-agent>
+END
+}
+
+
+#
+# methods: What methods/operations do we support?
+#
+oracle_methods() {
+  cat <<-!
+	start
+	stop
+	status
+	monitor
+	dumpinstipc
+	showdbstat
+	cleanup
+	validate-all
+	methods
+	meta-data
+	usage
+	!
+}
+
+
+#	Gather up information about our oracle instance
+
+ora_info() {
+	ORACLE_SID=$1
+	ORACLE_HOME=$2
+	ORACLE_OWNER=$3
+
+	# get ORACLE_HOME from /etc/oratab if not set
+	[ x = "x$ORACLE_HOME" ] &&
+		ORACLE_HOME=`awk -F: "/^$ORACLE_SID:/"'{print $2}' /etc/oratab`
+
+	# there a better way to find out ORACLE_OWNER?
+	[ x = "x$ORACLE_OWNER" ] &&
+		ORACLE_OWNER=`ls -ld $ORACLE_HOME/. 2>/dev/null | awk 'NR==1{print $3}'`
+
+	sqlplus=$ORACLE_HOME/bin/sqlplus
+	lsnrctl=$ORACLE_HOME/bin/lsnrctl
+	tnsping=$ORACLE_HOME/bin/tnsping
+}
+
+testoraenv() {
+	#	Let's make sure a few important things are set...
+	if [ x = "x$ORACLE_HOME" ]; then
+		ocf_log info "ORACLE_HOME not set"
+		return $OCF_ERR_CONFIGURED
+	fi
+	if [ x = "x$ORACLE_OWNER" ]; then
+		ocf_log info "ORACLE_OWNER not set"
+		return $OCF_ERR_CONFIGURED
+	fi
+	#	and some important things are there
+	if [ ! -x "$sqlplus" ]; then
+		ocf_log info "$sqlplus does not exist"
+		return $OCF_ERR_INSTALLED
+	fi
+	if [ ! -x "$lsnrctl" ]; then
+		ocf_log err "$lsnrctl does not exist"
+		return $OCF_ERR_INSTALLED
+	fi
+	if [ ! -x "$tnsping" ]; then
+		ocf_log err "$tnsping does not exist"
+		return $OCF_ERR_INSTALLED
+	fi
+	return 0
+}
+
+setoraenv() {
+	LD_LIBRARY_PATH=$ORACLE_HOME/lib
+	LIBPATH=$ORACLE_HOME/lib
+	TNS_ADMIN=$ORACLE_HOME/network/admin
+	PATH=$ORACLE_HOME/bin:$ORACLE_HOME/dbs:$PATH
+	export ORACLE_SID ORACLE_HOME ORACLE_OWNER TNS_ADMIN
+	export LD_LIBRARY_PATH LIBPATH
+}
+dumporaenv() {
+cat<<EOF
+PATH=$ORACLE_HOME/bin:$ORACLE_HOME/dbs:$PATH
+ORACLE_SID=$ORACLE_SID
+ORACLE_HOME=$ORACLE_HOME
+ORACLE_OWNER=$ORACLE_OWNER
+LD_LIBRARY_PATH=$ORACLE_HOME/lib
+LIBPATH=$ORACLE_HOME/lib
+TNS_ADMIN=$ORACLE_HOME/network/admin
+export ORACLE_SID ORACLE_HOME ORACLE_OWNER TNS_ADMIN
+export LD_LIBRARY_PATH LIBPATH
+EOF
+}
+
+#
+#	Run commands as the Oracle owner...
+#
+execsql() {
+	if [ "$US" = "$ORACLE_OWNER" ]; then
+		$sqlplus -S /nolog
+	else
+		su - $ORACLE_OWNER -c ". $envtmpf; $sqlplus -S /nolog"
+	fi
+}
+
+#
+#	Run commands in the oracle admin sqlplus...
+#
+dbasql() {
+	local func
+	(
+	echo "connect / as sysdba"
+	echo "set feedback off"
+	echo "set heading off"
+	echo "set pagesize 0"
+	for func; do $func; done
+	) |
+	execsql | grep -v '^Connected' |
+		grep -v '^ENV MSG:'
+}
+# use dbasql_one if the query should result in a single line output
+# at times people stuff commands in oracle .profile
+# which may produce extra output
+dbasql_one() {
+	dbasql $* | tail -1
+}
+
+#
+# various interesting sql
+#
+dbstat() {
+	echo 'select status from v$instance;'
+}
+dbmount() {
+	echo 'alter database mount;'
+}
+dbopen() {
+	echo 'alter database open;'
+}
+dbstop_immediate() {
+	echo 'shutdown immediate'
+}
+dbstop_checkpoint_abort() {
+	echo 'alter system checkpoint;'
+	echo 'shutdown abort'
+}
+dbstop() {
+	case "${shutdown_method}" in
+	"immediate")
+		dbstop_immediate
+	;;
+	"checkpoint/abort")
+		dbstop_checkpoint_abort
+	;;
+	esac
+}
+dbstart() {
+	echo 'startup'
+}
+dbstart_mount() {
+	echo 'startup mount'
+}
+dbendbackup() {
+	echo 'alter database end backup;'
+}
+db_backup_mode() {
+	echo "select 'COUNT'||count(*) from v\$backup where status='ACTIVE';"
+}
+is_clear_backupmode_set(){
+	[ x"${clear_backupmode}" = x"true" ]
+}
+is_instance_in_backup_mode() {
+	local count
+	count="`dbasql_one db_backup_mode | sed 's/COUNT//'`"
+	[ x"$count" != x"0" ]
+}
+clear_backup_mode() {
+	local output
+	output="`dbasql dbendbackup`"
+	ocf_log info "Oracle instance $ORACLE_SID alter database end backup: $output"
+}
+getdumpdest() {
+	#echo 'select value from v$parameter where name = \'user_dump_dest\';'
+	echo "select value from v\$parameter where name = 'user_dump_dest';"
+}
+getipc() {
+	echo "oradebug setmypid"
+	echo "oradebug ipc"
+}
+#
+# print the output of dbstat (for debugging)
+#
+showdbstat() {
+	echo "Full output:"
+	dbstat | execsql
+	echo "Stripped output:"
+	echo "<`dbasql dbstat`>"
+}
+
+#
+# IPC stuff: not overly complex, but quite involved :-/
+#
+
+# Part 1: Oracle
+dumpinstipc() {
+	local dumpdest=`dbasql_one getdumpdest`
+	if [ "x$dumpdest" = x -o ! -d "$dumpdest" ]; then
+		ocf_log warn "$dumpdest is not a directory"
+		return 1
+	fi
+	local fcount=`ls -rt $dumpdest | wc -l`
+	output=`dbasql getipc`
+	local lastf=`ls -rt $dumpdest | grep -v '^\.*$' | tail -1`
+	local fcount2=`ls -rt $dumpdest | wc -l`
+	if [ $((fcount+1)) -eq $fcount2 ]; then
+		echo $dumpdest/$lastf
+	else
+		ocf_log warn "'dbasql getipc' failed: $output"
+		return 1
+	fi
+}
+parseipc() {
+	local inf=$1
+	test -f "$1" || return 1
+	awk '
+		$3 == "Shmid" {n=1;next}
+		n {
+			if( $3~/^[0-9]+$/ ) print $3;
+			n=0
+		}
+	' $inf |
+	sort -u | sed 's/^/m:/'
+	awk '
+		/Semaphore List/ {insems=1;next}
+		insems {
+			for( i=1; i<=NF; i++ )
+				if( $i~/^[0-9]+$/ ) print $i;
+		}
+		/system semaphore information/ {exit}
+	' $inf |
+	sort -u | sed 's/^/s:/'
+}
+
+# Part 2: OS (ipcs,ipcrm)
+filteroraipc() {  # this portable?
+	grep -w $ORACLE_OWNER | awk '{print $2}'
+}
+ipcdesc() {
+	local what=$1
+	case $what in
+	m) echo "shared memory segment";;
+	s) echo "semaphore";;
+	q) echo "message queue";;
+	esac
+}
+rmipc() {
+	local what=$1 id=$2
+	ipcs -$what | filteroraipc | grep -w $id >/dev/null 2>&1 ||
+		return
+	ocf_log info "Removing `ipcdesc $what` $id."
+	ipcrm -$what $id
+}
+ipcrm_orauser() {
+	local what id
+	for what in m s q; do
+		for id in `ipcs -$what | filteroraipc`; do
+			rmipc $what $id
+		done
+	done
+}
+ipcrm_instance() {
+	local ipcobj
+	for ipcobj; do
+		rmipc `echo $ipcobj | sed 's/:/ /'`
+	done
+}
+
+#
+# oracle_status: is the Oracle instance running?
+#
+# quick check to see if the instance is up
+is_oracle_up() {
+	ps -ef | grep -wiqs "[^ ]*[_]pmon_${ORACLE_SID}"
+}
+# instance in OPEN state?
+instance_live() {
+	local status=`dbasql_one dbstat`
+	if [ "$status" = OPEN ]; then
+		return 0
+	else
+		ocf_log info "$ORACLE_SID instance state is not OPEN (dbstat output: $status)"
+		return 1
+	fi
+}
+
+ora_cleanup() {
+	#rm -fr /tmp/.oracle #???
+	rm -f `ls $ORACLE_HOME/dbs/lk* | grep -i $ORACLE_SID`
+	#return
+
+	case $IPCRM in
+	none)
+		;;
+	instance)
+		ipcrm_instance $*
+		;;
+	orauser)
+		ipcrm_orauser $*
+		;;
+	*)
+    	ocf_log warn "bad usage: ipcrm set to $IPCRM"
+		;;
+	esac
+}
+
+#
+# oracle_start: Start the Oracle instance
+#
+# NOTE: We handle instance in the MOUNTED and STARTED states
+# efficiently
+# We *do not* handle instance in the restricted or read-only
+# mode, i.e. it appears as running, but its availability is
+# "not for general use"
+#
+
+oracle_start() {
+	local status output
+	if is_oracle_up; then
+		status="`dbasql_one dbstat`"
+		case "$status" in
+		"OPEN")
+			: nothing to be done, we can leave right now
+			ocf_log info "Oracle instance $ORACLE_SID already running"
+			return $OCF_SUCCESS
+		;;
+		"STARTED")
+			output=`dbasql dbmount`
+		;;
+		"MOUNTED")
+			: we proceed if mounted
+		;;
+		*) # status unknown
+			output=`dbasql dbstop dbstart_mount`
+		;;
+		esac
+	else
+		output="`dbasql dbstart_mount`"
+		# try to cleanup in case of
+		# ORA-01081: cannot start already-running ORACLE - shut it down first
+		if echo "$output" | grep ORA-01081 >/dev/null 2>&1; then
+			ocf_log info "ORA-01081 error found, trying to cleanup oracle (dbstart_mount output: $output)"
+			ora_cleanup
+			output=`dbasql dbstart_mount`
+		fi
+	fi
+
+	# oracle instance should be mounted.
+	status="`dbasql_one dbstat`"
+	case "$status" in
+	"MOUNTED")
+		;;
+	*)
+		: error!!
+		ocf_log err "oracle $ORACLE_SID can not be mounted (status: $status)"
+		return $OCF_ERR_GENERIC
+		;;
+	esac
+
+	# It is examined whether mode is "online backup mode",
+	# and if it is true, makes clear the mode.
+	# Afterwards, DB is opened.
+	if is_clear_backupmode_set && is_instance_in_backup_mode; then
+		clear_backup_mode
+	fi
+	output=`dbasql dbopen`
+
+	if ! is_oracle_up; then
+		ocf_log err "oracle process not running: $output"
+		return $OCF_ERR_GENERIC
+	elif ! instance_live; then
+		ocf_log err "oracle instance $ORACLE_SID not started: $output"
+		return $OCF_ERR_GENERIC
+	else
+		: cool, we are up and running
+		ocf_log info "Oracle instance $ORACLE_SID started: $output"
+		return $OCF_SUCCESS
+	fi
+}
+
+#
+# oracle_stop: Stop the Oracle instance
+#
+oracle_stop() {
+	local status output ipc=""
+	if is_oracle_up; then
+		[ "$IPCRM" = "instance" ] && ipc=$(parseipc `dumpinstipc`)
+		output=`dbasql dbstop`
+	else
+		ocf_log info "Oracle instance $ORACLE_SID already stopped"
+		return $OCF_SUCCESS
+	fi
+	ora_kill  # kill any processes left
+	if is_oracle_up; then
+		ocf_log err "Oracle instance $ORACLE_SID not stopped: $output"
+		return $OCF_ERR_GENERIC
+	else
+		ocf_log info "Oracle instance $ORACLE_SID stopped: $output"
+		sleep 1  # give em a chance to cleanup
+		ocf_log info "Cleaning up for $ORACLE_SID"
+		ora_cleanup "$ipc"
+		return $OCF_SUCCESS
+	fi
+}
+# kill the database processes (if any left)
+# give them 30 secs to exit cleanly (6 times 5)
+killprocs() {
+	local sig=$1
+	shift 1
+	# Record stderr
+	kill -s $sig $* >/dev/null
+}
+ora_kill() {
+	oraprocs=`eval $procs | awk '{print $1}'`
+	if [ -z "$oraprocs" ]; then
+		ocf_log debug "All oracle processes are already stopped."
+		return
+	fi
+	killprocs TERM $oraprocs
+	for i in 1 2 3 4 5; do
+		if [ -z "`eval $procs | awk '{print $1}'`" ]; then
+			ocf_log debug "All oracle processes are killed."
+			return
+		fi
+		sleep 5
+	done
+	killprocs KILL `eval $procs | awk '{print $1}'`
+}
+
+#
+# oracle_monitor: Can the Oracle instance do anything useful?
+#
+oracle_monitor() {
+	if ! is_oracle_up; then
+		ocf_log info "oracle process not running"
+		return $OCF_NOT_RUNNING
+	fi
+	if ! instance_live; then
+		ocf_log info "oracle instance $ORACLE_SID is down"
+		return $OCF_NOT_RUNNING
+	fi
+	#ocf_log info "Oracle instance $ORACLE_SID is alive"
+	return $OCF_SUCCESS
+}
+
+#
+#	'main' starts here...
+#
+
+if [ $# -ne 1 ]
+then
+  usage
+  exit $OCF_ERR_ARGS
+fi
+
+# These operations don't require OCF instance parameters to be set
+case "$1" in
+  meta-data)	meta_data
+		exit $OCF_SUCCESS;;
+
+  usage) 	usage
+		exit $OCF_SUCCESS;;
+
+  methods)	oracle_methods
+		exit $?;;
+
+  *);;
+esac
+
+clear_backupmode=${OCF_RESKEY_clear_backupmode:-"false"}
+shutdown_method=${OCF_RESKEY_shutdown_method:-"checkpoint/abort"}
+
+case "${shutdown_method}" in
+"immediate") ;;
+"checkpoint/abort") ;;
+*) ocf_log err "unsupported shutdown_method, please read meta-data"
+esac
+
+if [ x = "x$OCF_RESKEY_sid" ]
+then
+  ocf_log err "Please set OCF_RESKEY_sid to the Oracle SID !"
+  exit $OCF_ERR_ARGS
+fi
+
+ora_info "$OCF_RESKEY_sid" "$OCF_RESKEY_home" "$OCF_RESKEY_user"
+
+LSB_STATUS_STOPPED=3
+testoraenv
+rc=$?
+if [ $rc -ne 0 ]; then
+	ocf_log info "Oracle environment for SID $ORACLE_SID does not exist"
+	case "$1" in
+		stop) exit $OCF_SUCCESS;;
+		monitor) exit $OCF_NOT_RUNNING;;
+		status) exit $LSB_STATUS_STOPPED;;
+		*)
+			ocf_log err "Oracle environment for SID $ORACLE_SID broken"
+			exit $rc
+		;;
+	esac
+fi
+
+setoraenv # important: set the environment for the SID
+envtmpf=`mktemp`
+dumporaenv > $envtmpf
+chmod 644 $envtmpf
+trap "rm -f $envtmpf" EXIT
+procs="ps -e -o pid,args | grep -i \"[o]ra.*$ORACLE_SID\""
+
+US=`id -u -n`
+if [ $US != root -a $US != $ORACLE_OWNER ]
+then
+  ocf_log err "$0 must be run as root or $ORACLE_OWNER"
+  exit $OCF_ERR_PERM
+fi
+
+if [ x = "x$OCF_RESKEY_ipcrm" ]
+then
+	IPCRM="instance"
+else
+	IPCRM="$OCF_RESKEY_ipcrm"
+fi
+
+# What kind of method was invoked?
+case "$1" in
+
+  start)	oracle_start
+		exit $?;;
+
+  stop)		oracle_stop
+		exit $?;;
+
+  status)	if is_oracle_up
+		then
+		  echo Oracle instance $ORACLE_SID is running
+		  exit $OCF_SUCCESS
+		else
+		  echo Oracle instance $ORACLE_SID is stopped
+		  exit $OCF_NOT_RUNNING
+		fi
+		;;
+
+  dumpinstipc)
+	  is_oracle_up && parseipc `dumpinstipc`
+		exit $?;;
+
+  showdbstat)
+	  showdbstat
+		exit $?;;
+
+  cleanup)
+	  	if [ "$IPCRM" = "instance" ]; then
+			ora_cleanup $(parseipc `dumpinstipc`)
+		else
+			ora_cleanup
+		fi
+		exit $?;;
+
+  monitor)	oracle_monitor
+		exit $?;;
+
+  validate-all)	# OCF_RESKEY_sid was already checked by testoraenv(),
+		# just exit successfully here.
+		exit $OCF_SUCCESS;;
+
+  *)		oracle_methods
+		exit $OCF_ERR_UNIMPLEMENTED;;
+esac
+
+#
+# vim:tabstop=4:shiftwidth=4:textwidth=0:wrapmargin=0

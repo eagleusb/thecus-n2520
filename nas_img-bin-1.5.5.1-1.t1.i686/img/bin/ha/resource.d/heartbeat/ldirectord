@@ -1,0 +1,269 @@
+#!/bin/sh
+#
+#   ldirectord OCF RA. Wrapper around /opt/ha/sbin/ldirectord to
+#   be OCF RA compliant and therefore to get the possibility
+#   to monitor ldirectord by HAv2.
+#   Tested on SuSE Linux Enterprise Server 10.
+#
+#   Should conform to the specification found at
+#    http://www.linux-ha.org/OCFResourceAgent
+#   and
+#   http://www.opencf.org/cgi-bin/viewcvs.cgi/specs/ra/resource-agent-api.txt?rev=HEAD
+#
+#   ToDo: Add parameter to start several instances of ldirectord
+#   with different config files.
+#
+# Copyright (c) 2007 Andreas Mock (andreas.mock@web.de)
+#                    All Rights Reserved.
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of version 2 of the GNU General Public License as
+# published by the Free Software Foundation.
+#
+# This program is distributed in the hope that it would be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+#
+# Further, this software is distributed without any warranty that it is
+# free of the rightful claim of any third person regarding infringement
+# or the like.  Any license provided herein, whether implied or
+# otherwise, applies only to this software file.  Patent licenses, if
+# any, provided herein do not apply to combinations of this program with
+# other software, or any other product whatsoever.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write the Free Software Foundation,
+# Inc., 59 Temple Place - Suite 330, Boston MA 02111-1307, USA.
+#
+#######################################################################
+#
+#	OCF Parameters
+#	OCF_RESKEY_configfile
+#	OCF_RESKEY_ldirectord
+#
+#######################################################################
+# Initialization:
+
+HA_VARRUNDIR=${HA_VARRUN}
+
+. ${OCF_ROOT}/resource.d/heartbeat/.ocf-shellfuncs
+
+LDIRCONF=${OCF_RESKEY_configfile:-/opt/ha/etc/ha.d/ldirectord.cf}
+LDIRECTORD=${OCF_RESKEY_ldirectord:-/opt/ha/sbin/ldirectord}
+
+meta_data() {
+        cat <<END
+<?xml version="1.0"?>
+<!DOCTYPE resource-agent SYSTEM "ra-api-1.dtd">
+<resource-agent name="ldirectord" version="0.9">
+<version>1.0</version>
+
+<longdesc lang="en">
+It's a simple OCF RA wrapper for ldirectord and uses the ldirectord interface
+to create the OCF compliant interface. You win monitoring of ldirectord.
+Be warned: Asking ldirectord status is an expensive action.
+</longdesc>
+<shortdesc lang="en">Wrapper OCF Resource Agent for ldirectord</shortdesc>
+
+<parameters>
+
+<parameter name="configfile" unique="1">
+<longdesc lang="en">
+The full pathname of the ldirectord configuration file.
+</longdesc>
+<shortdesc lang="en">configuration file path</shortdesc>
+<content type="string" default="/opt/ha/etc/ha.d/ldirectord.cf" />
+</parameter>
+
+<parameter name="ldirectord">
+<longdesc lang="en">
+The full pathname of the ldirectord.
+</longdesc>
+<shortdesc lang="en">ldirectord binary path</shortdesc>
+<content type="string" default="/opt/ha/sbin/ldirectord" />
+</parameter>
+
+</parameters>
+
+<actions>
+<action name="start"   timeout="15" />
+<action name="stop"    timeout="15" />
+<action name="monitor" depth="0"  timeout="10" interval="20" />
+<action name="meta-data"  timeout="10" />
+<action name="validate-all"  timeout="10" />
+</actions>
+</resource-agent>
+END
+}
+
+#######################################################################
+
+ldir_init() {
+    # check the supplied parameters exist enough that we can do all the other
+    # operations
+    if [ ! -f $LDIRCONF ]; then
+        ocf_log warn "$LDIRCONF not found, ldirectord not installed"
+        exit $OCF_ERR_INSTALLED
+    fi
+
+    if [ ! -x $LDIRECTORD ]; then
+        ocf_log warn "$LDIRECTORD not found, ldirectord not installed"
+        exit $OCF_ERR_INSTALLED
+    fi
+}
+
+ldirectord_usage() {
+        cat <<END
+usage: $0 {start|stop|monitor|validate-all|meta-data}
+
+Expects to have a fully populated OCF RA-compliant environment set.
+END
+}
+
+ldirectord_exit() {
+    exit $1
+}
+
+ldirectord_start() {
+    ldirectord_status
+    RET=$?
+
+    # if ldirectord is running or there's an error, pass on this return code
+    if [ $RET -ne $OCF_NOT_RUNNING ]; then
+        return $RET
+    fi
+
+    ocf_log info "Starting ldirectord"
+    echo $LDIRECTORD $LDIRCONF start
+    $LDIRECTORD $LDIRCONF start
+    RET=$?
+    if [ $RET -ne 0 ]; then
+        return $OCF_ERR_GENERIC
+    fi
+
+    # call status again to make sure we're running properly
+    ldirectord_status
+}
+
+ldirectord_stop() {
+    # a status check is simple enough to see if ldirectord is running or not.
+    # It will also error out if there's configuration parsing errors so we
+    # can try kill ldirectord even if the config is broken.
+    ldirectord_status
+    RET=$?
+
+    # ldirectord may be running, hard to tell when status returns an error
+    if [ $RET -eq $OCF_ERR_GENERIC ]; then
+        # get the PID of the right ldirectord process
+        PID=`pgrep -f "$LDIRECTORD $LDIRCONF start" 2>&1`
+        RET=$?
+        
+        if [ $RET -eq 0 ]; then
+            ocf_log warn "Killing ldirectord($PID) with SIGTERM"
+            kill $PID
+        fi
+
+        pgrep -f "$LDIRECTORD $LDIRCONF start" >/dev/null 2>&1
+        RET=$?
+        # if ldirectord is not running any more, we've (kind of) successfully
+        # stopped it
+        if [ $RET -eq 1 ]; then
+            return $OCF_SUCCESS
+        else
+            # ldirectord is still running? Kill it badly
+            ocf_log warn "Killing ldirectord($PID) with SIGKILL"
+            kill -9 $PID
+
+            pgrep -f "$LDIRECTORD $LDIRCONF start" >/dev/null 2>&1
+            RET=$?
+            # if it's not dead after here, we can't really do anything more
+            if [ $RET -eq 1 ]; then
+                return $OCF_SUCCESS
+            fi
+        fi
+
+        # if none of our kills work, return an error. This should force the
+        # resource unmanaged
+        # on this node, requiring manual intervention.
+        return $OCF_ERR_GENERIC
+    else
+        ocf_log info "Stopping ldirectord"
+        # if ldirectord status is not an error, issue a stop. Multiple stops
+        # will return 0
+        $LDIRECTORD $LDIRCONF stop
+        RET=$?
+        case $RET in
+            0) return $RET;;
+            *) return 1;;
+        esac
+    fi
+}
+
+# simple check to see if ldirectord is running, returns the proper OCF codes.
+ldirectord_status() {
+    OUTPUT=`$LDIRECTORD $LDIRCONF status 2>&1`
+    case $? in
+        0) return $OCF_SUCCESS;;
+        1) expr match "$OUTPUT" '.*ldirectord stale pid file.*' >/dev/null
+           if [ $? -eq 0 ]; then
+               return $OCF_NOT_RUNNING
+           else
+              return $OCF_ERR_GENERIC
+           fi;;
+        2) ocf_log err "$LDIRCONF has configuration errors"
+           echo $OUTPUT
+           return $OCF_ERR_GENERIC;;
+        3) return $OCF_NOT_RUNNING;;
+        *) echo $OUTPUT
+           return $OCF_ERR_GENERIC;;
+    esac
+}
+
+ldirectord_monitor() {
+    # check if the process is running first
+    ldirectord_status
+    RET=$?
+
+    if [ $RET -ne $OCF_SUCCESS ]; then
+        return $RET
+    fi
+
+    # do more advanced checks here for high OCF_CHECK_LEVELs. Don't know what
+    # more we can do at this time,
+    # a status call already hits LVS in the kernel.
+}
+
+ldirectord_validate() {
+    #ldir_init is already called, there's nothing more we can validate unless
+    #we add more attributes
+    return 0
+}
+
+case $1 in
+	meta-data|usage|help) : ;;
+	*) ldir_init $@ ;;
+esac
+
+case $__OCF_ACTION in
+meta-data)      meta_data
+                exit $OCF_SUCCESS
+                ;;
+start)  ldirectord_start
+                ldirectord_exit $?
+                ;;
+stop)   ldirectord_stop
+                ldirectord_exit $?
+                ;;
+monitor)    ldirectord_monitor
+                ldirectord_exit $?
+                ;;
+validate-all)   ldirectord_validate
+                ldirectord_exit $?
+                ;;
+usage|help)     ldirectord_usage
+                exit $OCF_SUCCESS
+                ;;
+*)              ldirectord_usage
+                exit $OCF_ERR_UNIMPLEMENTED
+                ;;
+esac

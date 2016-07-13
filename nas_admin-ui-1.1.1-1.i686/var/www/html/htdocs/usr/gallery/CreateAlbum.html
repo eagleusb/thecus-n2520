@@ -1,0 +1,154 @@
+<?
+require_once("HtmlHeader.html");
+require_once("GlobalVars.html");
+require_once("functions.html");
+
+?>
+<style type="text/css">
+<!--
+.style1 {font-size: 14px;
+	font-weight: bold;
+	color: #ffffff;
+}
+.style4 {font-size: 10px}
+body,td,th {
+	font-family: Arial, Helvetica, sans-serif;
+	color: #ffffff;
+}
+body {
+	margin-left: 0px;
+	margin-top: 0px;
+	margin-right: 0px;
+	margin-bottom: 0px;
+	color: #ffffff;
+}
+-->
+</style>
+<body bgcolor="#686868" text="#ffffff" leftmargin="0" topmargin="0" marginwidth="0" marginheight="0">
+<script language="javascript" src="/pub/isAccount.js"></script>
+<form method=post name=newAlbum>
+<input type=hidden name="old_album_name" value="<?=Fix_post($_POST['target_album'])?>">
+<input type=hidden name="admin" value="">
+<?$cover = AlbumRoot . $_SESSION['username'] . "/" . Fix_post($_POST['target_album']);?>
+<table width="719px" border="0" cellspacing="0" cellpadding="0" align="center" class="outerpage">
+  <? require_once("HtmlBanner.html"); ?>
+  <tr>
+    <td align="center" valign="top">
+        <table width="95%"  border="0" cellpadding="0" cellspacing="0">
+          <tr>
+            <td width="70%" align="left"><span class="style1"><a href="album.html?id=<?=fix_encode($_SESSION['username'])?>" target="_self"><?=$words['my_gallery']?></a> &gt; <?=$words['create_album']?> </span></td>
+            <td width="30%" align="right">
+              <table width="10%"  border="0" cellpadding="0" cellspacing="0">
+                <? AlbumMenu() ?>
+              </table>
+            </td>
+          </tr>
+        </table>
+        <br>
+        <table width="60%"  border="1" cellpadding="5" cellspacing="0" bordercolor="#000000">
+        <tr> 
+          <td width="50%" align="right" valign="top" class="style1"><?=eregi_replace("\\\\'","'",$words['subject_rest'])?></td>
+          <td align="left"><input type=textbox name=album_name maxlength="20" onblur="if(enableClick())newAlbum.create.disabled=false; else newAlbum.create.disabled=true" onkeyup="checklength(this,20)"></td>
+        </tr>
+        <tr> 
+          <td align="right" valign="top" class="style1"><?=eregi_replace("\\\\'","'",$words['desp_rest'])?></td>
+          <td align="left"> <textarea name="Desp"></textarea>
+          </td>
+        </tr>
+        <tr align="center"> 
+          <td colspan="2">&nbsp;</td>
+        </tr>
+        <tr align="center"> 
+          <td align="right"><input type=button name=create disabled value="<?=$words['create_album'];?>" onclick="CreateAlbumClick()";></td>
+          <td align="left"><input type=button value="<?=$words['cancel'];?>" onclick=manage('');></td>
+        </tr>
+        </table>
+        <table width="60%"  border="0" cellspacing="0" cellpadding="0">
+           <td>&nbsp;</td>
+          </tr>
+        </table>
+    </td>
+  </tr>
+  <? require_once("HtmlBottom.html"); ?>
+</table>
+</body>
+</html>
+
+
+</form>
+
+<script language="javascript">
+    function isDirName(s){
+	var s = typeof(s.value)=='undefined' ? s : s.value;
+	for(var account=0;account<s.length;account++){
+	    var tmp_index = s.charCodeAt(account);
+	    if(tmp_index == 92 || tmp_index == 47 || tmp_index ==58 || tmp_index ==42 || tmp_index ==63|| tmp_index ==60|| tmp_index ==62|| tmp_index ==34|| tmp_index ==124){
+		return false;
+	    }
+	}
+	return true;
+    }
+
+
+function check(){
+	if(!isDirName(newAlbum.album_name)){
+		alert("<?=$words["AlbumNameError"];?>");
+		return false;
+	}
+return true;
+}
+function manage(ACT){
+	document.newAlbum.admin.value=ACT;
+	document.newAlbum.submit();
+}
+function LengthCheck(argv){
+	if(argv.value.length > 100){
+		alert("<?=$words["max_desp_size"];?>");
+		return false;
+    	}
+return true;
+}
+function CreateAlbumClick(){
+	if(!check())
+		return false;
+	if(!LengthCheck(newAlbum.Desp))
+		return false;
+	checklength(document.newAlbum.album_name,20)
+	manage('confirm_create');
+	return true;
+}
+function enableClick(){
+  	 for(var i=0;i<document.newAlbum.album_name.value.length;i++){
+		if(document.newAlbum.album_name.value.charCodeAt(i)!=32)
+			return true;
+	}
+		return false;
+}
+
+function checklength(key,len){
+	var sharename=key.value;
+	var sharename_length = 0;
+	var count = 0;
+    for(var i=0;i<sharename.length;i++){
+        if(sharename.charCodeAt(i)  > 255){
+           sharename_length += 2;
+		count++;
+		if(sharename_length>len)
+		key.value=sharename.substr(0,key.value.length-1);
+ 	}
+        else
+	{
+            sharename_length ++;
+		count++;
+		if(sharename_length>len)
+		key.value=sharename.substr(0,key.value.length-1);
+	}
+    }
+    if(sharename_length >= len){
+        key.maxLength = count;
+	return false;
+    }else
+	key.maxLength = len;
+	return true;
+}
+</script>

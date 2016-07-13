@@ -1,0 +1,104 @@
+<?php
+require_once('localconfig.php');
+
+$webconfig = array();
+if(NAS_DB_KEY=="1"){
+  include_once("/var/www/html/webinfo/webconfig");
+}else{
+  include_once("/var/www/html/webinfo/webconfig");
+}
+
+include_once(INCLUDE_ROOT."function.php");
+$manifest=getManifest();
+
+function set_url($module_name,$key){
+	require_once(INCLUDE_ROOT.'sqlitedb.class.php');
+	global $webconfig;
+
+	$module_db_path= MODULE_ROOT."cfg/module.db";
+	if (!file_exists($module_db_path)) {
+		$webconfig[$key]['successurl_2'] = '/modules/'.$module_name.'/www/index.php';
+		$webconfig[$key]['login_user'] = 'username';
+                $webconfig[$key]['login_pwd'] = 'pwd';
+	} else {
+		$db_conf = new sqlitedb($module_db_path, 'mod');
+		$sql = "select object as url from mod where predicate='HomePage' and module='".$module_name."'";
+		$url_info = $db_conf->runSQLAry($sql);
+
+		if (count($url_info)==0){
+			$webconfig[$key]['successurl_2'] = '/modules/'.$module_name.'/www/index.php';
+	                $webconfig[$key]['login_user'] = 'username';
+        	        $webconfig[$key]['login_pwd'] = 'pwd';
+			unset($db_conf);
+			return 0;
+		}
+
+		$webconfig[$key]['successurl_2'] = '/modules/'.$module_name.'/'.$url_info[0]['url'];
+		unset($db_conf); 
+		
+		$db_conf = new sqlitedb($module_db_path, 'module');
+		$sql = "select enable from module where name='".$module_name."'";
+		$minfo = $db_conf->runSQLAry($sql);
+		if($minfo){
+			$webconfig[$key]['enable'] = $minfo[0]['enable'];  
+			if($minfo[0]['enable']=="Yes"){ 
+				$webconfig[$key]['login_user'] = 'username';
+				$webconfig[$key]['login_pwd'] = 'pwd';
+			}
+		}
+		unset($db_conf);
+	}
+}
+
+$webconfig['default_interface']="lan1";
+$webconfig['select_bgcolor']="lightgrey";
+$webconfig['used_bgcolor']="#FFFACD";
+$webconfig['data'] = 'Data';
+$webconfig['snapshot'] = 'Snapshot';
+$webconfig['usb'] = 'USB';
+$webconfig['iscsi'] = 'iSCSI';
+$webconfig['unused'] = 'Unused';
+$webconfig['user_limit'] = '300';
+$webconfig['group_limit'] = '300';
+$webconfig['share_limit'] = '300';
+$webconfig['acl_limit'] = '300';
+$webconfig['user_id_limit_begin'] = '1000';
+$webconfig['user_id_limit_end'] = '19999';
+$webconfig['group_id_limit_begin'] = '100';
+$webconfig['group_id_limit_end'] = '19999';
+$webconfig['product_no']=$manifest[FWTYPE];
+$webconfig['html_title']=$manifest[FWTYPE];
+$webconfig['quota_folder_limit']=10;
+$webconfig['hostname']=shell_exec("hostname");
+
+
+$webconfig['webdisk']['id'] = 'webdisk';
+$webconfig['webdisk']['gwords'] = 'web_disk';
+$webconfig['webdisk']['url'] = 'usr/eXtplorer/index.php';
+$webconfig['webdisk']['successurl'] = 'usr/eXtplorer/index.php?extplorer'; 
+$webconfig['webdisk']['login_user'] = 'p_user';
+$webconfig['webdisk']['login_pwd'] = 'p_pass'; 
+set_url("WebDisk","webdisk");  
+
+$webconfig['admin']['id'] = 'admin';
+$webconfig['admin']['gwords'] = 'admin';
+$webconfig['admin']['url'] = 'adm/login.php';
+$webconfig['admin']['successurl'] = 'adm/index.php';
+$webconfig['admin']['login_user'] = 'username';
+$webconfig['admin']['login_pwd'] = 'pwd';
+
+$webconfig['photoserver']['id'] = 'photoserver';
+$webconfig['photoserver']['gwords'] = 'photo_server';
+$webconfig['photoserver']['url'] = 'adm/login.php?login_type=photo';
+$webconfig['photoserver']['successurl'] = 'usr/gallery/index.html?contant=/gallery/iframe_gallery.html';
+set_url("Piczza","photoserver");
+$webconfig['photoserver']['login_user'] = 'username';
+$webconfig['photoserver']['login_pwd'] = 'pwd';
+
+$webconfig['module']['id'] = 'module';
+$webconfig['module']['gwords'] = 'module';
+$webconfig['module']['url'] = 'adm/login.php';
+$webconfig['module']['successurl'] = '';
+$webconfig['module']['login_user'] = 'username';
+$webconfig['module']['login_pwd'] = 'pwd';
+?>

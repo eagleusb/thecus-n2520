@@ -1,0 +1,21 @@
+#!/bin/sh
+
+function lib_remove_file(){
+	file_name="$1"
+	LIB_DENY_NAME[0]='/'
+	LIB_REVMOE_OK='OK'
+	LIB_DENY_COUNT=${#LIB_DENY_NAME[@]}
+	if [ -e "${file_name}" ] || [ -L "${file_name}" ];then
+		for((i=0;i<${LIB_DENY_COUNT};i++))
+		do
+			if [ "${file_name}" == "${LIB_DENY_NAME[$i]}" ];then
+				LIB_REVMOE_OK="FAIL"
+				break
+			fi
+		done
+		if [ "${LIB_REVMOE_OK}" == "OK" ];then
+			rm -rf "${file_name}"
+		fi
+	fi
+}
+

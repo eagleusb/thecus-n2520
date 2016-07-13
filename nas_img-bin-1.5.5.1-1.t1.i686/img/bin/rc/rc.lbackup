@@ -1,0 +1,214 @@
+#!/bin/sh
+gAction=$1
+gTid=$2
+gExternal_target_path=$3
+gExternal_source_path=$4
+
+. /img/bin/function/libraid
+. /img/bin/function/lib_dataguard
+[ ! -z "$gTid" ] && eval `db_to_env "$gTid"` && [ "$CFG_act_type" != "local" ] && exit
+
+#######################################################
+#
+# check target volume
+#
+#######################################################
+check_volume(){
+    local fSource_folder="$1"
+    local fFree_folder="$2"
+    local fSource_folder_volume=0
+    local fTarget_folder_volume=0
+    local fFree_folder_volume=0
+
+    if [ "$CFG_back_type" == "iscsi" -a "$OPT_sparse" == "1" ]; then
+        fOpt="-Scs"
+    else
+        fOpt="-cs"
+    fi
+
+    strExec="/usr/bin/du \"$fOpt\" $fSource_folder | tail -1 | awk '{print \$1}'"
+    fSource_folder_volume=`eval $strExec`
+
+    eval "fFree_folder=$fFree_folder"
+    fTarget_folder_volume=`df "$fFree_folder" | tail -1 | awk '{print $4}'`
+    if [ ! -z "$OPT_target" -o "$OPT_create_sfolder" == "1" ] && [ "$gAction" != "restore" ]; then
+        fFree_folder_volume=`/usr/bin/du "$fOpt" "$fFree_folder" | tail -1 | awk '{print $1}'`
+        fTarget_folder_volume=$(($fTarget_folder_volume+$fFree_folder_volume))
+    fi
+
+    if [ $fSource_folder_volume -gt $fTarget_folder_volume ]; then
+        LOG_TMP="/raid/data/tmp/rsync_backup.${CFG_task_name}"
+        check_log_folder "${CFG_task_name}" "${OPT_log_folder}" "${gAction}"
+        eventlog "$CFG_task_name" "36" "$gAction" "" "`basename \"$fFree_folder\"`" "$CFG_act_type"
+        Ldataguard_change_status "$CFG_task_name" "$LOG_TMP" "$log_path" "$gAction"
+        exit
+    fi
+}
+
+search_target_tag(){
+    local fTarget_folder
+
+    fTarget_folder=`Ldataguard_search_target_tag "$OPT_target" "$OPT_target_tag"`
+    echo "$fTarget_folder"
+}
+
+boot(){
+    local fDb_schema
+
+    fDb_schema=`$Ldataguard_sqlite $Ldataguard_backupdb ".schema"`
+    table_exist=`echo "$fDb_schema" | grep " TABLE task("`
+    if [ "$table_exist" == "" ]; then
+        $Ldataguard_sqlite $Ldataguard_backupdb "CREATE TABLE task(tid INTEGER PRIMARY KEY,task_name,back_type,act_type,last_time,status);"
+    fi
+
+    table_exist=`echo "$fDb_schema" | grep " TABLE opts("`
+    if [ "$table_exist" == "" ]; then
+        $Ldataguard_sqlite $Ldataguard_backupdb "CREATE TABLE opts(tid,key,value);"
+    fi
+}
+
+create_task(){
+    if [ "$CFG_back_type" == "realtime" -o "$CFG_back_type" == "schedule" -o "$CFG_back_type" == "iscsi" ]; then
+        /img/bin/dataguard/${CFG_back_type}.sh "create" "$gTid" "$gExternal_target_path" "$gExternal_source_path"
+    fi
+}
+
+start_task(){
+    local fSource_path_list
+    local fTarget_path_list
+    local fLoss_folder
+    local fSource_folder
+    local fTarget_folder
+
+    if [ "$CFG_back_type" == "copy" ] || [ "$CFG_back_type" == "iscsi" ]; then
+        oIFS=$IFS
+        IFS="/"
+        aryOPT_folder=($OPT_folder)
+        IFS=$oIFS
+
+        check_log_folder "${CFG_task_name}" "${OPT_log_folder}" "${gAction}"
+        LOG_TMP="/raid/data/tmp/rsync_backup.${CFG_task_name}"
+        for folder in "${aryOPT_folder[@]}"
+        do
+            path=`echo "${OPT_path}/${folder}" | sed "s/'/\'\\\\\\''/g"`
+            path_list="${path_list}'${path}' "
+        done
+
+        if [ "$OPT_entire_external_copy" != "1" ]; then
+            fSource_path_list=`Ldataguard_backup_source "$CFG_task_name" "$path_list" "$gExternal_source_path"`
+            fLoss_folder=`echo "$fSource_path_list" | awk -F"//" '{print $1}'`
+            fSource_folder=`echo "$fSource_path_list" | awk -F"//" '{print $2}'`
+        else
+            count=`echo "$gExternal_source_path" | awk -F"//" '{print NF}'`
+            for ((i=0;i<=$count;i++))
+            do
+                strExec="echo \"$gExternal_source_path\" | awk -F\"//\" '{print \$$i}'"
+                external_path=`eval $strExec`
+                if [ ! -d "${external_path}" ]; then
+                    fLoss_folder="${fLoss_folder}"`echo "${external_path}" | awk -F"/" '{print $5}'`", "
+                else
+                    fSource_folder="${fSource_folder}'${external_path}/' "
+                fi
+            done
+        fi
+
+        if [ -z "$fSource_folder" ]; then
+            eventlog "$CFG_task_name" "16" "$gAction" "$Ldataguard_fLog_tmp" "$fLoss_folder" "$CFG_act_type"
+            Ldataguard_change_status "$CFG_task_name" "$LOG_TMP" "$log_path"
+            exit
+        fi
+
+        fTarget_path_list=`Ldataguard_backup_target "$CFG_task_name" "$OPT_target" "$OPT_target_tag" "$OPT_device_type" "$gExternal_target_path"`
+        fTarget_folder=`echo "$fTarget_path_list" | awk -F"//" '{print $2}'`
+        if [ -z "$fTarget_folder" ]; then
+            eventlog "$CFG_task_name" "37" "$gAction" "$Ldataguard_fLog_tmp" "$fLoss_folder" "$CFG_act_type"
+            Ldataguard_change_status "$CFG_task_name" "$LOG_TMP" "$log_path"
+            exit
+        fi
+
+        check_volume "$fSource_folder" "$fTarget_folder"
+    fi
+    /img/bin/dataguard/${CFG_back_type}.sh "start" "$gTid" "$gExternal_target_path" "$gExternal_source_path"
+}
+
+restore_task(){
+    local fISCSI_path
+    local fSource_path_list
+    local fTarget_path_list
+
+    if [ "$CFG_back_type" == "schedule" ]; then
+        /img/bin/dataguard/schedule.sh "restore" "$gTid"
+    elif [ "$CFG_back_type" == "realtime" ]; then
+        /img/bin/dataguard/realtime.sh "restore" "$gTid"
+    elif [ "$CFG_back_type" == "iscsi" ]; then
+        fISCSI_path=`Ldataguard_restore_volume "$gTid" "$gExternal_source_path" "$OPT_path" "$OPT_folder" "$OPT_target" "$OPT_device_type"`
+        fSource_path_list=`echo "$fISCSI_path" | awk -F"//" '{print $1}'`
+        fTarget_path_list=`echo "$fISCSI_path" | awk -F"//" '{print $2}'`
+        check_volume "$fSource_path_list" "$fTarget_path_list"
+        /img/bin/dataguard/iscsi.sh "restore" "$gTid" "$gExternal_target_path" "$gExternal_source_path"
+    fi
+}
+
+import_iscsi(){
+    if [ "$CFG_back_type" == "import_iscsi" ]; then
+        /img/bin/dataguard/iscsi.sh "import" "$gTid" "$gExternal_target_path" "$gExternal_source_path"
+    fi
+}
+
+stop_task(){
+    [ "$CFG_back_type" == "import_iscsi" ] && CFG_back_type="iscsi"
+    /img/bin/dataguard/${CFG_back_type}.sh "stop" "$gTid"
+}
+
+remove_task(){
+    if [ "$CFG_back_type" == "schedule" ]; then
+        /img/bin/dataguard/schedule.sh "remove" "$gTid"
+    fi
+}
+
+allstart_task(){
+    /img/bin/dataguard/realtime.sh "allstart"
+}
+
+allstop_task(){
+    /img/bin/dataguard/copy.sh "allstop"
+    /img/bin/dataguard/import.sh "allstop"
+    /img/bin/dataguard/realtime.sh "allstop"
+    /img/bin/dataguard/schedule.sh "allstop"
+    /img/bin/dataguard/iscsi.sh "allstop"
+}
+
+case "$gAction"
+in
+    search_target_tag)
+        search_target_tag
+        ;;
+    boot|allstart)
+        boot
+        allstart_task
+        ;;
+    create|modify)
+        create_task
+        ;;
+    start)
+        start_task
+        ;;
+    restore)
+        restore_task
+        ;;
+    import_iscsi)
+        import_iscsi
+        ;;
+    stop)
+        stop_task
+        ;;
+    remove)
+        remove_task
+        ;;
+    allstop)
+        allstop_task
+        ;;
+    *)
+        echo "Usage: $0 { create | modify | start | import_iscsi | stop | allstart | allstop | restore | remove }"
+        ;;
+esac

@@ -1,0 +1,21 @@
+#!/bin/sh
+
+disk=`echo $SMARTD_DEVICE|cut -c6-8`
+scsi_ID=`grep -B 3 "Disk:$disk" /proc/scsi/scsi|grep Host`
+if [ "$?" = "1" ]; then
+	echo "Disk /dev/${disk} not found"
+	exit
+fi
+
+host=`echo ${scsi_ID}|cut -c11-12`
+host=$((${host}))
+channel=`echo ${scsi_ID}|cut -c22-23`
+channel=$((${channel}))
+target=`echo ${scsi_ID}|cut -c29-30`
+target=$((${target}))
+lun=`echo ${scsi_ID}|cut -c37-38`
+lun=$((${lun}))
+
+echo "scsi remove-single-device ${host} ${channel} ${target} ${lun}" > /proc/scsi/scsi
+
+#killall -HUP smartd &

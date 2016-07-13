@@ -1,0 +1,72 @@
+#!/bin/sh
+pid=$1
+task_name=$2
+status=$3
+raid_name="raid"
+vpn_log="/tmp/vpn.log"
+
+scan_result(){
+	CODE=$1
+	VAL=$2
+	echo "${CODE}" > /tmp/n.log
+	language=`/usr/bin/sqlite /etc/cfg/conf.db "select v from conf where k='admin_lang'"`
+	if [ -f "/img/language/language.db" ];then
+	MSG=`/usr/bin/sqlite /img/language/language.db "select msg from ${language} where function='nsync' and value='${CODE}'"`
+	else
+		lang_file="/img/language/${language}/nsync_result"
+		MSG=`echo ${getMsg} | awk -F'=' '/'${CODE}'/{print substr($2,3,length($2)-4)}'`
+	fi
+	if [ "${VAL}" != "" ];
+	then
+		MSG=`printf "${MSG}" "${VAL}"`
+	fi
+	if [ "${MSG}" == "" ];
+	then
+		if [ -f "/img/language/language.db" ];then
+			MSG=`/usr/bin/sqlite /img/language/language.db "select msg from ${language} where function='nsync' and value='999'"`
+		else
+			MSG=`cat ${lang_file} | awk -F'=' '/999/{print substr($2,3,length($2)-4)}'`
+		fi
+	fi
+	success=`echo "${MSG}" | awk -F':' '{print $1}'`
+	MSG=`echo "${MSG}" | awk -F':' '{print $2}'`
+}
+
+echo "pid=${pid}  task=${task_name}  status=${status}  success=${success}" >> /tmp/nsync.log
+echo "pid=${pid}  task=${task_name}  status=${status}"
+scan_result ${status}
+status="${MSG}"
+echo "Return MSG : ${MSG}"
+
+if [ ${success} -ne 1 ];
+then
+	/img/bin/logevent/event 997 318 error "" "${task_name}" "${status}" > /dev/null 2>&1
+else
+	/img/bin/logevent/event 997 425 info "" "${task_name}" "${status}" > /dev/null 2>&1
+fi
+
+/img/bin/nsync_qos.sh del $pid
+
+remote_ip=`cat ${vpn_log} | grep "${task_name}" | awk '{print $2}'`
+cat ${vpn_log} | grep -v "${task_name}" > /tmp/vpn_tmp.log
+mv /tmp/vpn_tmp.log ${vpn_log}
+running_task=`cat ${vpn_log} | grep "${remote_ip}"`
+
+if [ "${running_task}" == "" ];
+then
+  kill `cat "/var/run/vpn.$task_name.pid"`
+fi
+
+rm -f "/$raid_name/sys/ftp.pid/$task_name"
+rm -f "/$raid_name/sys/ftp.pid/$task_name.child"
+
+#delete status file
+rm -f "/$raid_name/sys/${task_name}.status"
+task_name=`echo "${task_name}"|sed -n "s/'/''/p"`
+if [ "${task_name}" = "" ];then
+	task_name=$2
+fi
+
+#update db status
+finish_time_stamp=`date +"%Y/%m/%d %H:%M"`
+/usr/bin/sqlite /etc/cfg/conf.db  "update nsync set status='${status}',end_time='${finish_time_stamp}' where task_name='${task_name}'"

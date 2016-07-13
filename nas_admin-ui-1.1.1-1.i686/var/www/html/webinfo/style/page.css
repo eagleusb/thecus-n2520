@@ -1,0 +1,15 @@
+/*BODY, TABLE { color: black; background: white; font-size: 8pt; font-family: Tahoma, Arial, Helvetica; margin-top: 0px; margin-left: 0px; margin-right: 0px;  } */
+INPUT, SELECT { font-size: 8pt; }
+HR { margin-top: 10px; }
+A { color: black; text-decoration: none; padding-left: 3px; padding-right: 3px; }
+A:HOVER { background-color: #316ac5; color: white; padding-top: 3px; padding-bottom: 3px; }
+TH { text-align: left; white-space: nowrap;background-color: #eeead8; border-bottom: 3px solid #d6d2c2; border-left: 1px solid white; border-right: 1px solid #d6d2c2; padding-left: 10px; padding-right: 3px; padding-top: 3px; font-weight: normal; }
+TH:HOVER { background-color: #faf8f3; border-bottom: 3px solid #fcc247; }
+TH A:HOVER { background-color: #faf8f3; color: black; }
+TH.language { background-color: #eeead8; border-bottom: 3px solid #d6d2c2; border-left: 1px solid #d6d2c2; border-right: 1px solid #d6d2c2; padding-right: 10px; color: white; }
+TH.toolbar { background-color: #eeead8; border-bottom: 3px solid #d6d2c2; border-left: 1px solid #d6d2c2; border-right: 1px solid #d6d2c2; padding-right: 10px; color: white; }
+/*TD { white-space: nowrap; padding-right: 10px; padding-left: 5px; padding-top: 0px; padding-bottom: 0px; vertical-align: middle; }*/
+TD.order-by { background-color: #f7f7f7; }
+TD.checkbox { width: 20px; text-align: right; padding-left: 0px; padding-right: 0px; }
+TH.checkbox { width: 20px; text-align: right; padding-left: 0px; padding-right: 0px; background-color: #eeead8; }
+.banner { background-color: #eeead8; font-size: 8pt; font-family: Tahoma; }

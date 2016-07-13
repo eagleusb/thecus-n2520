@@ -1,0 +1,13 @@
+#!/bin/sh
+ad_enable=`/usr/bin/sqlite /etc/cfg/conf.db "select v from conf where k='winad_enable'"`
+if [ $ad_enable -eq 1 ]; then
+	ad_server=`/usr/bin/sqlite /etc/cfg/conf.db "select v from conf where k='winad_ip'"`
+	ad_admin=`/usr/bin/sqlite /etc/cfg/conf.db "select v from conf where k='winad_admid'"`
+	ad_adminpwd=`/usr/bin/sqlite /etc/cfg/conf.db "select v from conf where k='winad_admpwd'"|sed -r s/\\\\\(\'\|\\\\\)/\\1/g`
+
+	if [ "$ad_server" != "" ]; then
+		/usr/sbin/winbindd 
+		/usr/bin/net ads leave
+		/usr/bin/net join -S ${ad_server} -U "${ad_admin}%${ad_adminpwd}"
+	fi
+fi

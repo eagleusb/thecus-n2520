@@ -1,0 +1,102 @@
+<?
+	require_once("HtmlHeader.html");
+	require_once("functions.html");
+	require_once(WEBCONFIG);
+	$_GET['album']=Fix_post($_GET['album']);
+?>
+<style type="text/css">
+<!--
+body,td,th {
+	font-family: Arial, Helvetica, sans-serif;
+}
+body {
+	margin-left: 0px;
+	margin-top: 0px;
+	margin-right: 0px;
+	margin-bottom: 0px;
+}
+.style5 {font-size: 12px}
+-->
+</style></head>
+<base target="_top">
+<body bgcolor="#686868" text="#000000" leftmargin="0" topmargin="0" marginwidth="0" marginheight="0">
+<form method=post action="pass.html" name="AlbumPass_form">
+<input type="hidden" name="id" id="id" value="<?=$_GET['id']?>">
+<input type="hidden" name="album" id="album" value="<?=$_GET['album']?>">
+<table width="719px" border="0" cellspacing="0" cellpadding="0" align="center" class="outerpage">
+  <? require_once("HtmlBanner.html"); ?>
+  <tr>
+    <td align="center" valign="top">
+        <table width="95%"  border="0" cellpadding="0" cellspacing="0">
+        <tr>
+          <td width="70%" height="26" align="left"><span class="style1"><?=$words['login_album']?></span></td>
+          <td width="30%" align="right">
+            <table width="10%"  border="0" cellpadding="0" cellspacing="0">
+              <tr align="center" valign="middle">
+                <? AlbumMenu(); ?>
+              </tr>
+            </table>
+          </td>
+        </tr>
+        </table>
+	<br />
+	<table width="80%" height="280"  border="0" cellpadding="0" cellspacing="0">
+        <tr>
+          <td height="30" align="center" valign="middle"><p>&nbsp;</p>
+            <p>&nbsp;</p></td>
+        </tr>
+        <tr>
+          <td align="center" valign="middle">
+            <table width="320" height="160"  border="0" cellpadding="0" cellspacing="0">
+              <tr>
+                <td align="center" valign="middle" background="../images/login_wimdows.gif">
+                  <table width="95%"  border="0" cellspacing="0" cellpadding="0">
+                    <tr>
+                      <td colspan="2" align="right">&nbsp;</td>
+                    </tr>
+                    <tr>
+                      <td colspan="2" align="right">&nbsp;</td>
+                    </tr>
+                    <tr>
+                      <td align="right"><span class="style5"><?=$gwords['password']?> : </span></td>
+                      <td><input type="password" name="album_pwd" id="album_pwd" maxlength="20">
+                      </td>
+                    </tr>
+                    <tr>
+                      <td colspan="2">&nbsp;</td>
+                    </tr>
+                  </table>
+                  <table width="90%"  border="0" cellspacing="0" cellpadding="0">
+                    <tr>
+                      <td align="right"><input type="button" name="Submit" value="<?=$gwords['login']?>" onclick="check();"/></td>
+                      <td width=20 align="left"></td>
+                      <td align="left"><input type="button" name="Cancel" value="<?=$words['cancel']?>" onclick="location.href='album.html?id=<?=$_GET['id']?>'"/></td>
+                    </tr>
+                  </table>
+                </td>
+              </tr>
+            </table>
+          </td>
+       </tr>
+       </table>
+    </td>
+  </tr>
+  <? require_once("HtmlBottom.html"); ?>
+</table>
+</body>
+</html>
+<script language="javascript" src="./js/isSingleByteChar.js"></script>
+<script language="javascript">
+<!--
+//Leon 2005/03/17
+function check(){
+	var pwd = document.getElementsByName('album_pwd')[0].value;
+	if(!isSingleByteChar(pwd)){
+		alert("<?=$words["pwd_double_bytes"]?>");
+		return false;
+	}
+	document.AlbumPass_form.submit();
+	return true;
+}
+//-->
+</script>

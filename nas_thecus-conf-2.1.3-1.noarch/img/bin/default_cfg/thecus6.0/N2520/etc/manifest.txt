@@ -1,0 +1,2 @@
+type	N2520
+producer	THECUS

@@ -1,0 +1,187 @@
+#!/bin/bash
+rsyncbd="/etc/cfg/conf.db"
+backupdb="/etc/cfg/backup.db"
+sqlite="/usr/bin/sqlite"
+rsync="/usr/bin/rsync"
+backup_sh="/img/bin/dataguard/remote_backup.sh"
+s3_backup_sh="/img/bin/dataguard/s3_backup.sh"
+crond_conf="/etc/cfg/crond.conf"
+tmp_crond_conf="/tmp/backup_crond.conf"
+
+checkdb(){
+    tableexist=`$sqlite ${backupdb} "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='task'"`
+    if [ "${tableexist}" == "0" ];then
+        $sqlite ${backupdb} "CREATE TABLE task (tid INTEGER PRIMARY KEY, task_name, back_type, act_type, last_time, status)"
+    fi
+
+    tableexist=`$sqlite ${backupdb} "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='opts'"`
+    if [ "${tableexist}" == "0" ];then
+        $sqlite ${backupdb} "CREATE TABLE opts (tid, key, value)"
+    fi
+
+    $sqlite ${backupdb} "select tid, value from opts where key='speed_limit'" | while read line;
+    do
+        TID=`echo $line | awk -F"|" '{print $1}'`
+        VALUE=`echo $line | awk -F"|" '{print $2}'`
+        NEW_VALUE=$((${VALUE} * 1024))
+
+        $sqlite ${backupdb} "UPDATE opts SET key = 'speed_limit_KB', value = '$NEW_VALUE' WHERE tid = $TID and key='speed_limit'"
+    done
+}
+
+import_db(){
+    task_list=`${sqlite} ${rsyncbd} "select * from rsyncbackup"`
+    if [ "${task_list}" == "" ];then
+        echo "No records"
+        return
+    fi
+    
+    tid=`${sqlite} ${backupdb} "select max(tid) from task"`
+    if [ "${tid}" == "" ];then
+        tid=1
+    else
+        tid=$((${tid}+1))
+    fi
+    
+    echo -e "$task_list" | \
+    while read task_info
+    do 
+        task_name=`echo -e "$task_info" | awk -F '|' '{print $1}'`
+        model=`echo -e "$task_info" | awk -F '|' '{print $3}'`
+        folder_info=`echo -e "$task_info" | awk -F '|' '{print $4}'`
+        ip=`echo -e "$task_info" | awk -F '|' '{print $5}'`
+        port=`echo -e "$task_info" | awk -F '|' '{print $6}'`
+        dest_folder=`echo -e "$task_info" | awk -F '|' '{print $7}'`
+        subfolder=`echo -e "$task_info" | awk -F '|' '{print $8}'`
+        username=`echo -e "$task_info" | awk -F '|' '{print $9}'`
+        passwd=`echo -e "$task_info" | awk -F '|' '{print $10}'`
+        log_folder=`echo -e "$task_info" | awk -F '|' '{print $11}'`
+        backup_enable=`echo -e "$task_info" | awk -F '|' '{print $12}'`
+        backup_time=`echo -e "$task_info" | awk -F '|' '{print $13}'| sed 's/ /,/g'`
+        end_time=`echo -e "$task_info" | awk -F '|' '{print $14}'`
+        status=`echo -e "$task_info" | awk -F '|' '{print $15}'`
+        encrypt_on=`echo -e "$task_info" | awk -F '|' '{print $16}'`
+        compression=`echo -e "$task_info" | awk -F '|' '{print $17}'`
+        sparse=`echo -e "$task_info" | awk -F '|' '{print $18}'`
+        
+        folder=`echo ${folder_info} | sed 's/::/\//g'`
+    
+        if [ "${model}" == "0" ];then
+            sync_type="sync"
+        else
+            sync_type="incremental"
+        fi
+    
+        ${sqlite} ${backupdb} "insert into task (tid, task_name, back_type, act_type, last_time, status) values (${tid}, '${task_name}', 'schedule', 'remote', '${end_time}', '${status}')"
+        ${sqlite} ${backupdb} "insert into opts (tid, key, value) values (${tid}, 'ip', '${ip}')"
+        ${sqlite} ${backupdb} "insert into opts (tid, key, value) values (${tid}, 'port', '${port}')"
+        ${sqlite} ${backupdb} "insert into opts (tid, key, value) values (${tid}, 'encryption', '${encrypt_on}')"
+        ${sqlite} ${backupdb} "insert into opts (tid, key, value) values (${tid}, 'username', '${username}')"
+        ${sqlite} ${backupdb} "insert into opts (tid, key, value) values (${tid}, 'passwd', '${passwd}')"
+        ${sqlite} ${backupdb} "insert into opts (tid, key, value) values (${tid}, 'dest_folder', '${dest_folder}')"
+        ${sqlite} ${backupdb} "insert into opts (tid, key, value) values (${tid}, 'subfolder', '${subfolder}')"
+        ${sqlite} ${backupdb} "insert into opts (tid, key, value) values (${tid}, 'src_folder', '${folder}')"
+        ${sqlite} ${backupdb} "insert into opts (tid, key, value) values (${tid}, 'src_path', '')"
+        ${sqlite} ${backupdb} "insert into opts (tid, key, value) values (${tid}, 'sync_type', '${sync_type}')"
+        ${sqlite} ${backupdb} "insert into opts (tid, key, value) values (${tid}, 'log_folder', '${log_folder}')"
+        ${sqlite} ${backupdb} "insert into opts (tid, key, value) values (${tid}, 'backup_time', '${backup_time}')"
+        ${sqlite} ${backupdb} "insert into opts (tid, key, value) values (${tid}, 'compress', '${compression}')"
+        ${sqlite} ${backupdb} "insert into opts (tid, key, value) values (${tid}, 'sparse', '${sparse}')"
+        ${sqlite} ${backupdb} "insert into opts (tid, key, value) values (${tid}, 'enable_schedule', '${backup_enable}')"
+        ${sqlite} ${backupdb} "insert into opts (tid, key, value) values (${tid}, 'remote_back_type', 'custom')"
+        tid=$((${tid}+1))
+    done
+  
+    ${sqlite} ${rsyncbd} "delete from rsyncbackup"
+    
+    /bin/cat $crond_conf | grep -v "/img/bin/backup.sh " > $tmp_crond_conf
+    /bin/mv $tmp_crond_conf $crond_conf
+    /usr/bin/killall crond
+    sleep 1
+    /usr/sbin/crond
+    /usr/bin/crontab $crond_conf -u root
+}
+
+assembel_cron(){
+    /bin/cat $crond_conf | grep -v "${backup_sh} Backup" | grep -v "${s3_backup_sh} Backup" > $tmp_crond_conf 
+    /bin/mv $tmp_crond_conf $crond_conf
+    /usr/bin/killall crond
+    sleep 1
+    /usr/sbin/crond
+    /usr/bin/crontab $crond_conf -u root
+       
+    task_list=`${sqlite} ${backupdb} "select tid from task where act_type='remote' and back_type='schedule'"`
+    if [ "$task_list" != "" ];then
+        echo -e "$task_list" | \
+        while read tid
+        do
+            ${backup_sh} "add_cron" "${tid}"
+        done
+    fi
+    
+    task_list=`${sqlite} ${backupdb} "select tid from task where act_type='s3' and back_type='schedule'"`
+    if [ "$task_list" != "" ];then
+        echo -e "$task_list" | \
+        while read tid
+        do
+           ${s3_backup_sh} "add_cron" "${tid}"
+        done
+    fi
+}
+
+stop(){
+    task_list=`${sqlite} ${backupdb} "select tid from task where act_type='remote'"` 
+    if [ "$task_list" != "" ];then
+        echo -e "$task_list" | \
+        while read tid
+        do
+            ${backup_sh} "stop" "${tid}"
+        done
+    fi
+}
+
+start(){
+    # recod the rsync pid for realtime backup in the lsyncd binary
+    if [ -f "/tmp/lsyncd_pid.txt" ];then
+        rm /tmp/lsyncd_pid.txt
+    fi
+
+    if [ -f "/tmp/lsyncd_pid.bak" ];then
+        rm /tmp/lsyncd_pid.bak
+    fi
+
+    task_list=`${sqlite} ${backupdb} "select tid from task where act_type='remote' and back_type='realtime'"`
+    if [ "$task_list" != "" ];then
+        echo -e "$task_list" | \
+        while read tid
+        do
+            status=`${sqlite} ${backupdb} "select value from opts where tid=${tid} and key='sys_status'"`
+            if [ "${status}" == "1" ];then
+                ${backup_sh} "Backup" "${tid}"       
+            fi
+        done
+    fi
+}
+
+boot(){
+    checkdb
+    import_db
+    assembel_cron
+    start
+}
+
+case "$1"
+in
+    boot)
+        boot
+        ;;
+    start)
+        start
+        ;;
+    stop)
+        stop
+        ;;
+    *)			
+        echo "Usage: $0 { boot | stop | start}"
+        ;;  
+esac

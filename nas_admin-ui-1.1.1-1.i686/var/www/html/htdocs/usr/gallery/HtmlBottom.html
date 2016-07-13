@@ -1,0 +1,37 @@
+<?
+require_once("/var/www/html/inc/function.php");
+global $sysconf,$webconfig;
+get_sysconf();
+$version=trim(shell_exec("/bin/cat /etc/version"));
+$model=trim(shell_exec('/bin/cat /proc/thecus_io | awk -F: \'/CPUFLAG/{printf("%s", $2)}\''));
+if($model=="1"){
+	$model_name=$webconfig['product_no'].$webconfig['pro'];
+}else{
+	$model_name=$webconfig['product_no'];
+}
+?>
+<tr>
+  <td height=54" valign="bottom">
+    <div align="right">
+      <img src="/usr/gallery/img/slo.png" width="491" height="54">
+    </div>
+  </td>
+</tr>
+<tr>
+  <td height="30" valign="bottom">
+    <table width="245" border="0" cellspacing="0" cellpadding="0" class="www">
+      <tr>
+        <td>&nbsp;</td>
+        <td>
+          <? if($webconfig['web_site_url']!=""){ ?>
+          <a href="<?=$webconfig['web_site_url']?>" target="_blank">
+            <img src="/usr/gallery/img/www.png" width="165" height="30" border=0>
+          </a>
+          <? }else{ ?>
+            <img src="/usr/gallery/img/www.png" width="165" height="30" border=0>
+          <? } ?>
+        </td>
+      </tr>
+    </table>
+  </td>
+</tr>

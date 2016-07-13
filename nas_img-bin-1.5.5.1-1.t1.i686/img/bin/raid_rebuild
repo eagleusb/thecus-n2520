@@ -1,0 +1,107 @@
+#!/bin/sh
+sleep_sec=10
+progress=''                             ## global, progress
+timex=''                                ## global, mean time grep from /proc/mdstat
+mdnum=$1
+reshape=$2
+if [ "$mdnum" = "" ];then
+	mdnum="0"
+fi
+. /img/bin/cproc                        ## include cproc
+
+set_proc() {
+        progress=$1
+        timex=$2
+}
+
+event_triger() {
+  sh -c "/img/bin/logevent/event $* >/dev/null 2>&1 &"
+}
+
+renice -10 -p `pidof httpd`
+renice 10 -p `pidof ksoftirqd/0`
+set_proc `/bin/cat /proc/mdstat|sed -n '/^md'$mdnum' /,/^md[0-9]/p'|grep -v bitmap |awk 'NR==3{p=$4;t=$6;sub("finish=","",t);if($1=="resync=DELAYED") p="...";print p,t}'`
+
+if [ -f "/raidsys/$mdnum/HugeVolume" ];then
+    mdadm -D /dev/md$mdnum > /raidsys/$mdnum/mdstatus
+fi
+
+while [ ! "${progress}" = "" ]
+do
+  if [ $mdnum -ge 30 ] && [ $mdnum -lt 60 ];then
+    even=`expr $mdnum / 2 \* 2`
+    if [ ! $mdnum -eq $even ];then
+      progress_odd_10=`echo ${progress} | awk -F% '{print $1*10}'`
+      progress_even_10=`/bin/cat /proc/mdstat|sed -n '/^md'$even' /,/^md[0-9]/p'|grep -v bitmap |awk 'NR==3{p=$4;if($1=="resync=DELAYED") p="...";print p}' | awk -F% '{print $1*10}'`
+      progress_odd=`echo ${progress} | awk -F% '{print $1}'`
+      progress_even=`/bin/cat /proc/mdstat|sed -n '/^md'$even' /,/^md[0-9]/p'|grep -v bitmap |awk 'NR==3{p=$4;if($1=="resync=DELAYED") p="...";print p}' | awk -F% '{print $1}'`
+    else
+      odd=`expr $mdnum + 1`
+      progress_odd_10=`/bin/cat /proc/mdstat|sed -n '/^md'$odd' /,/^md[0-9]/p'|grep -v bitmap |awk 'NR==3{p=$4;if($1=="resync=DELAYED") p="...";print p}' | awk -F% '{print $1*10}'`
+      progress_even_10=`echo ${progress} | awk -F% '{print $1*10}'`
+      progress_odd=`/bin/cat /proc/mdstat|sed -n '/^md'$odd' /,/^md[0-9]/p'|grep -v bitmap |awk 'NR==3{p=$4;if($1=="resync=DELAYED") p="...";print p}' | awk -F% '{print $1}'`
+      progress_even=`echo ${progress} | awk -F% '{print $1}'`
+    fi
+    if [ $progress_even_10 -eq 0 ];then
+      progress=$progress_odd%
+    elif [ $progress_odd_10 -eq 0 ];then
+      progress=$progress_even%
+    elif [ $progress_odd_10 -gt $progress_even_10 ];then
+      progress=$progress_even%
+    elif [ $progress_odd_10 -lt $progress_even_10 ];then
+      progress=$progress_odd%
+    fi
+  fi
+
+  cat /proc/meminfo | grep "^MemTotal\|^Cached" | sed -e 's/[a-zA-Z: ]*//g' | tr '\n' ' ' | awk '{total=$1; cache=$2; if (cache/total > 0.5) system("echo 3 > /proc/sys/vm/drop_caches");}'
+
+  if [ "$reshape" = "reshape" ];then
+    update_status "Migrating RAID ${progress} "
+  else
+    update_status "Recovering: ${progress}"
+  fi
+  render_time ${timex}
+  sleep ${sleep_sec}
+  set_proc `/bin/cat /proc/mdstat|sed -n '/^md'$mdnum' /,/^md[0-9]/p'|grep -v bitmap |awk 'NR==3{p=$4;t=$6;sub("finish=","",t);if($1=="resync=DELAYED") p="...";print p,t}'`
+done
+renice 0 -p `pidof httpd`
+renice 0 -p `pidof ksoftirqd/0`
+
+if [ $mdnum -ge 30 ] && [ $mdnum -lt 60 ];then
+  if [ ! $mdnum -eq $even ];then
+    raid_status_odd=`mdadm -D /dev/md$mdnum | awk -F' ' '/State :/{printf($4)}'`
+    raid_status_even=`mdadm -D /dev/md$even | awk -F' ' '/State :/{printf($4)}'`
+  else
+    raid_status_odd=`mdadm -D /dev/md$odd | awk -F' ' '/State :/{printf($4)}'`
+    raid_status_even=`mdadm -D /dev/md$mdnum | awk -F' ' '/State :/{printf($4)}'`
+  fi
+  if [ ! "${raid_status_odd}" = "${raid_status_even}" ];then
+    return
+  fi
+  raid_status="${raid_status_odd}"
+else
+  raid_status=`mdadm -D /dev/md$mdnum | awk -F' ' '/State :/{printf($4)}'`
+fi
+    
+if [ "$raid_status" = "" ];then
+	raid_status="Healthy"
+fi
+if [ "$raid_status" = "FAILED" ];then
+	raid_status="Damaged"
+fi
+raid_status=`echo ${raid_status:0:1} | tr '[:lower:]' '[:upper:]'`${raid_status:1}
+if [ "$raid_status" = "Healthy" ];then
+	if [ $mdnum -ge 30 ] && [ $mdnum -lt 60 ];then
+    if [ "${raid_status_odd}" = "${raid_status_even}" ];then
+    	nestmd=`expr $mdnum - 30`
+      nestmd=`expr $nestmd / 2`
+      raid_name="raid"$nestmd
+    	raid_id=`cat /var/tmp/$raid_name/raid_id`
+    	event_triger 116 "$raid_id"
+      event_triger 207 "$raid_id"
+    fi
+  fi
+fi
+update_status $raid_status
+echo "LCM_RAID $raid_status" > /proc/thecus_io
+

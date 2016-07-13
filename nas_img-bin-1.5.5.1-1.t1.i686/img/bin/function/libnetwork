@@ -1,0 +1,687 @@
+#!/bin/sh
+#==================================================
+#        FILE:  Network Library
+# DESCRIPTION:  provide Network Library to other function
+#       NOTES:  none
+#      AUTHOR:  enian
+#     VERSION:  1.0.0
+#     CREATED:  2011/11/30
+#    REVISION:  2011/11/30
+#==================================================
+#==================================================
+#  Variable Defined
+#==================================================
+Lnet_SQLITE="/usr/bin/sqlite"
+Lnet_CONFDB="/etc/cfg/conf.db"
+Lnet_ALL_NET_INTERFACE="/tmp/all_interface"
+Lnet_OnBoardCount=`/img/bin/check_service.sh "onbaordnetcount"`
+Lnet_LOGEVENT="/img/bin/logevent/event"
+Lnet_IPV6PATH="/proc/sys/net/ipv6/conf/%s"
+Lnet_IPV6CHECK="/usr/bin/ipv6check -c"
+Lnet_IPV6_LINK_CMD="/usr/bin/ipv6check -d "
+Lnet_HA_REC_FLAG="/tmp/www/ha_flag"
+Lnet_IFCONFIG="/sbin/ifconfig"
+
+#==================================================
+#  Function Defined
+#==================================================
+#################################################
+#         NAME:  real_get_ip
+#  DESCRIPTION:  get interface real ip
+#      PARAM 1:  interface name
+#       RETURN:  ip value
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+#################################################
+real_get_ip(){
+    ip=`${Lnet_IFCONFIG} $1 |awk '/inet addr/{print $2}' | awk -F':' '{print $2}'`
+    echo $ip
+}
+
+#################################################
+#         NAME:  real_get_mask
+#  DESCRIPTION:  get interface real mask
+#      PARAM 1:  interface name
+#       RETURN:  mask value
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+#################################################
+real_get_mask(){
+    mask=`${Lnet_IFCONFIG} $1 |awk '/ Mask:/{print $4}' | awk -F':' '{print $2}'`
+    echo $mask
+}
+
+#################################################
+#         NAME:  real_get_mac
+#  DESCRIPTION:  get interface real mac
+#      PARAM 1:  interface name
+#       RETURN:  mac value
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+#################################################
+real_get_mac(){
+    mac=`${Lnet_IFCONFIG} $1 | awk '/ HWaddr /{print $5}'`
+    echo $mac
+}
+
+#################################################
+#         NAME:  check_bond
+#  DESCRIPTION:  check interface is bond
+#      PARAM 1:  interface name
+#       RETURN:  bond name
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+#################################################
+check_bond(){
+    local fmac=`real_get_mac $1`
+    local fid
+
+    fid=`${Lnet_SQLITE} ${Lnet_CONFDB} "select id from link_interface where mac='${fmac}'"`
+
+    if [ "$fid" ];then
+        fid="bond${fid}"
+    fi
+
+    echo "${fid}"
+}
+
+#################################################
+#         NAME:  real_get_ipv6
+#  DESCRIPTION:  get interface real ipv6
+#      PARAM 1:  interface name
+#       RETURN:  ipv6 value
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+#################################################
+real_get_ipv6(){
+    ip=`${Lnet_IFCONFIG} $1|grep "Scope:Global"|head -n 1|awk '{print $3}'|sed -r 's/\/[0-9]+//'`
+    if [ "$ip" == "" ];then
+        ip=`${Lnet_IFCONFIG} $1|grep "Scope:Site"|head -n 1|awk '{print $3}'|sed -r 's/\/[0-9]+//'`
+    fi
+    echo $ip
+}
+
+#################################################
+#         NAME:  real_get_ipv6
+#  DESCRIPTION:  get interface real ipv6
+#      PARAM 1:  interface name
+#       RETURN:  ipv6 value
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+#################################################
+execute_get_ipv6(){
+    local fid
+    
+    fid=`check_bond $1`
+    if [ "$fid" == "" ];then
+        g_ip=`real_get_ipv6 $1`
+    else
+        g_ip=`real_get_ipv6 ${fid}`
+    fi
+
+    echo $g_ip
+}
+
+#################################################
+#         NAME:  execute_get_ip
+#  DESCRIPTION:  get interface real ip
+#      PARAM 1:  interface name
+#       RETURN:  ipv4 value
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+#################################################
+execute_get_ip(){
+    local fid
+    if [ "`echo $1 | grep ':'`" == "" ];then
+        fid=`check_bond $1`
+    fi
+    if [ "$fid" == "" ];then
+        g_ip=`real_get_ip $1` 
+    else
+        g_ip=`real_get_ip ${fid}` 
+    fi
+
+    echo $g_ip
+}
+
+#################################################
+#         NAME:  execute_get_mask
+#  DESCRIPTION:  get interface real mask
+#      PARAM 1:  interface name
+#       RETURN:  mask value
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+#################################################
+execute_get_mask(){
+    local fid
+
+    fid=`check_bond $1`
+    if [ "$fid" == "" ];then
+        g_mask=`real_get_mask $1` 
+    else
+        g_mask=`real_get_mask ${fid}` 
+    fi
+
+    echo $g_mask
+}
+
+#################################################
+#         NAME:  execute_get_mac
+#  DESCRIPTION:  get interface real mac
+#      PARAM 1:  interface name
+#       RETURN:  mac value
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+#################################################
+execute_get_mac(){
+    local fid
+
+    fid=`check_bond $1`
+    if [ "$fid" == "" ];then
+        g_mac=`real_get_mac $1` 
+    else
+        g_mac=`real_get_mac ${fid}` 
+    fi
+    
+
+    echo $g_mac
+}
+
+#################################################
+#         NAME:  Lnet_get_net_info
+#  DESCRIPTION:  get some one field value
+#      PARAM 1:  fInfo: interface all data
+#      PARAM 2:  fInterface:  interface db name
+#      PARAM 3:  fFieldName:  field name
+#       RETURN:  field value
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+#################################################
+Lnet_get_net_info(){
+    local fInfo=$1
+    local fInterface=$2
+    local fFieldName=$3
+    local fVal=`echo -e "${fInfo}" | awk -F'|' '/'${fInterface}'_'${fFieldName}'\|/{print $2}'`
+
+    echo "${fVal}"
+}
+
+#################################################
+#         NAME:  Lnet_up_ipv4_dhcp
+#  DESCRIPTION:  start ipv4 dhcp client
+#      PARAM 1:  Lnet_fInte: interface name
+#       RETURN:  none
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+#################################################
+Lnet_up_ipv4_dhcp(){
+    local Lnet_fInte=$1
+    local Lnet_fPid
+
+    Lnet_fPid=`ps wwww|awk '/udhcpc /&&/ '$Lnet_fInte'$/{print $1}'`
+    
+    if [ "$Lnet_fPid" != "" ];then
+        kill -9 ${Lnet_fPid}
+    fi
+
+    /sbin/udhcpc -s /img/bin/udhcpc_script.sh -b -h `hostname` -i ${Lnet_fInte} > /dev/null 2>&1
+}
+
+#################################################
+#         NAME:  Lnet_up_ipv4_static
+#  DESCRIPTION:  start ipv4 static ip
+#      PARAM 1:  Lnet_fInte: interface name
+#      PARAM 2:  Lnet_fIp: ip
+#      PARAM 3:  Lnet_fMask: mask
+#       RETURN:  none
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+#################################################
+Lnet_up_ipv4_static(){
+    local Lnet_fInte=$1
+    local Lnet_fIp=$2
+    local Lnet_fMask=$3
+
+    ${Lnet_IFCONFIG} ${Lnet_fInte} up
+    if [ "${Lnet_fIp}" != "" ];then
+        ${Lnet_IFCONFIG} ${Lnet_fInte} ${Lnet_fIp} netmask ${Lnet_fMask} broadcast +
+    else
+        ${Lnet_IFCONFIG} ${Lnet_fInte} ${Lnet_fIp}
+    fi
+}
+
+#################################################
+#         NAME:  Lnet_up_ipv6_static
+#  DESCRIPTION:  start ipv6 static ip
+#      PARAM 1:  Lnet_fInte: interface name
+#      PARAM 2:  Lnet_fAddr: prefix
+#      PARAM 3:  Lnet_fPrefixLen: prefix len
+#      PARAM 4:  Lnet_fGateway: gateway
+#       RETURN:  none
+#       AUTHOR:  dane
+#      CREATED:  30,11,2011
+#################################################
+Lnet_up_ipv6_static(){
+    local Lnet_fInte=$1
+    local Lnet_fAddr=$2
+    local Lnet_fPrefixLen=$3
+    local Lnet_fGateway=$4
+
+    ip -6 addr flush dev ${Lnet_fInte} scope global
+    ip -6 addr add ${Lnet_fAddr}/${Lnet_fPrefixLen} dev ${Lnet_fInte}
+    if [ "${Lnet_fGateway}" != "" ];then
+      ip -6 route add ${Lnet_fAddr}/${Lnet_fPrefixLen} via ${Lnet_fGateway} metric 1 dev ${Lnet_fInte}
+    fi
+}
+
+#################################################
+#         NAME:  Lnet_trans_interface_to_nic
+#  DESCRIPTION:  transfer interface name to db name
+#      PARAM 1:  Lnet_fInte: interface name
+#       RETURN:  db name
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+#################################################
+Lnet_trans_interface_to_nic(){
+    local Lnet_fInte=$1
+    local Lnet_fNic
+
+    if [ "${Lnet_fInte}" == "eth0" ];then
+        Lnet_fNic="nic1"
+    elif [ "${Lnet_fInte}" == "eth1" ];then
+        Lnet_fNic="nic2"
+    else
+        Lnet_fNic="${Lnet_fInte}"
+    fi
+
+    echo "${Lnet_fNic}"
+}
+
+#################################################
+#         NAME:  Lnet_trans_interface_to_nic
+#  DESCRIPTION:  transfer db name to interface name
+#      PARAM 1:  Lnet_fInte: interface name
+#       RETURN:  interface name
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+#################################################
+Lnet_trans_nic_to_interface(){
+    local Lnet_fInte
+    local Lnet_fNic=$1
+
+    if [ "${Lnet_fNic}" == "nic1" ];then
+        Lnet_fInte="eth0"
+    elif [ "${Lnet_fNic}" == "nic2" ];then
+        Lnet_fInte="eth1"
+    else
+        Lnet_fInte="${Lnet_fNic}"
+    fi
+
+    echo "${Lnet_fInte}"
+}
+
+#################################################
+#         NAME:  Lnet_get_nic_name
+#  DESCRIPTION:  get interface nic name
+#      PARAM 1:  Lnet_findex: interface index
+#       RETURN:  interface nic name
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+#################################################
+Lnet_get_nic_name(){
+    local Lnet_findex=$1
+    local Lnet_fNicName
+    if [ "${Lnet_findex}" != "" ];then
+
+       if [ ${Lnet_findex} -eq  1 ];then
+           Lnet_fNicName="WAN/LAN1"
+        elif [ ${Lnet_findex} -le ${Lnet_OnBoardCount} ];then
+           Lnet_fNicName="LAN${Lnet_findex}"
+        else
+           Lnet_fNicName="Additional LAN${Lnet_findex}"
+        fi
+
+       echo "${Lnet_fNicName}"
+    else
+       echo "Error NicName"
+    fi
+}
+
+#################################################
+#         NAME:  Lnet_up_net
+#  DESCRIPTION:  up one interface and set
+#      PARAM 1:  Lnet_fInte: interface name
+#      PARAM 2:  none
+#       RETURN:  none
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+#################################################
+Lnet_up_net(){
+    local Lnet_fInte=$1
+    local Lnet_fBoot=$2
+    local Lnet_fNic=`Lnet_trans_interface_to_nic "${Lnet_fInte}"`
+    local Lnet_fInterInfo=`${Lnet_SQLITE} ${Lnet_CONFDB} "select * from conf where k like '${Lnet_fNic}%'"`
+    local Lnet_fDHCPIpv4=`Lnet_get_net_info "${Lnet_fInterInfo}" "${Lnet_fNic}" "ipv4_dhcp_client"`
+    local Lnet_fIp
+    local Lnet_fMask
+    local Lnet_fJumbo=`Lnet_get_net_info "${Lnet_fInterInfo}" "${Lnet_fNic}" "jumbo"`
+    local Lnet_fIpv6En=`Lnet_get_net_info "${Lnet_fInterInfo}" "${Lnet_fNic}" "ipv6_enable"`
+    local Lnet_fDHCPIpv6
+    local Lnet_fIpv6Addr
+    local Lnet_fIpv6Prefix
+    local Lnet_fIpv6File
+    local Lnet_fIPv6Auto
+    local Lnet_fIPv6OK
+    local Lnet_fTmpIPv6
+    local Lnet_fIPv6EnList
+    local Lnet_fTmpIPv6Nic
+    local Lnet_fTmpIPv6En
+    local Lnet_fTmpIPv6Info
+    local Lnet_fRet
+    local Lnet_fExitFlag
+    local Lnet_fErrorIPv6Nic
+    local Lnet_fNetIndex
+    local Lnet_fTmpIPv6Inte
+    local Lnet_fIPv6Type
+    local Lnet_fIPv4En=`Lnet_get_net_info "${Lnet_fInterInfo}" "${Lnet_fNic}" "ipv4_enable"`
+    local Lnet_fIPv6LinkAddr
+    local Lnet_fHasOK=""
+
+    ${Lnet_IFCONFIG} ${Lnet_fInte} up
+
+    #-----------------------------------
+    #  Enable ipv4
+    #-----------------------------------
+    if [ "${Lnet_fIPv4En}" == "1" ];then
+        if [ "${Lnet_fDHCPIpv4}" == "1" ];then
+            Lnet_up_ipv4_dhcp "$Lnet_fInte"
+        else
+            Lnet_fIp=`Lnet_get_net_info "${Lnet_fInterInfo}" "${Lnet_fNic}" "ip"`
+            Lnet_fMask=`Lnet_get_net_info "${Lnet_fInterInfo}" "${Lnet_fNic}" "netmask"`
+            Lnet_up_ipv4_static "$Lnet_fInte" "${Lnet_fIp}" "${Lnet_fMask}"
+        fi
+    else
+        Lnet_up_ipv4_static "$Lnet_fInte" "0.0.0.0" ""
+    fi
+
+    #-----------------------------------
+    #  Enable ipv6
+    #-----------------------------------
+    Lnet_fIpv6File=`printf "${Lnet_IPV6PATH}/disable_ipv6" ${Lnet_fInte}`
+    Lnet_fIPv6Auto=`printf "${Lnet_IPV6PATH}/autoconf" ${Lnet_fInte}`
+    Lnet_fIPv6AcceptRa=`printf "${Lnet_IPV6PATH}/accept_ra" ${Lnet_fInte}`
+    echo 1 > "${Lnet_fIpv6File}"
+    echo 1 > "${Lnet_fIPv6Auto}"
+
+    if [ "${Lnet_fIpv6En}" == "1" ];then
+        echo 0 > "${Lnet_fIpv6File}"
+        Lnet_fDHCPIpv6=`Lnet_get_net_info "${Lnet_fInterInfo}" "${Lnet_fNic}" "ipv6_connection_type"`
+        Lnet_fIpv6Addr=`Lnet_get_net_info "${Lnet_fInterInfo}" "${Lnet_fNic}" "ipv6_addr"`
+        Lnet_fIpv6Prefix=`Lnet_get_net_info "${Lnet_fInterInfo}" "${Lnet_fNic}" "ipv6_prefixlen"`
+        Lnet_fIpv6Gateway=`Lnet_get_net_info "${Lnet_fInterInfo}" "${Lnet_fNic}" "ipv6_gateway"`
+        Lnet_fIpv6DefAddr=`Lnet_get_net_info "${Lnet_fInterInfo}" "${Lnet_fNic}" "ipv6_default_addr"`
+        Lnet_fIPv6LinkAddr=`${Lnet_IPV6_LINK_CMD} "${Lnet_fInte}"`
+        ip -6 addr add ${Lnet_fIPv6LinkAddr}/64 dev ${Lnet_fInte}
+        if [ "${Lnet_fDHCPIpv6}" != "1" ];then
+            echo 0 > "${Lnet_fIPv6Auto}"
+            echo 0 > "${Lnet_fIPv6AcceptRa}"
+            Lnet_up_ipv6_static "$Lnet_fInte" "${Lnet_fIpv6Addr}" "${Lnet_fIpv6Prefix}" "${Lnet_fIpv6Gateway}"
+        else
+            Lnet_fIPv6OK=`${Lnet_IFCONFIG} ${Lnet_fInte} | awk '/inet6 addr:/&&/Scope:Global/{print $0}'`
+
+            if [ "${Lnet_fIPv6OK}" == "" ];then
+                Lnet_fIPv6EnList=`${Lnet_SQLITE} ${Lnet_CONFDB} "select k from conf where k like '%_ipv6_enable' and v='1' and k<>'${Lnet_fNic}_ipv6_enable'" | awk '{print substr($1,0,length($1)-12)}'`
+                Lnet_fExitFlag="0"
+                for Lnet_fTmpIPv6Nic in ${Lnet_fIPv6EnList}
+                do
+                    Lnet_fTmpIPv6Info=`${Lnet_SQLITE} ${Lnet_CONFDB} "select * from conf where k like '${Lnet_fTmpIPv6Nic}%'"`
+                    Lnet_fIPv6Type=`Lnet_get_net_info "${Lnet_fTmpIPv6Info}" "${Lnet_fTmpIPv6Nic}" "ipv6_connection_type"`
+                    Lnet_fExitFlag="0"
+                    if [ "${Lnet_fTmpIPv6En}" != "1" ];then
+                        Lnet_fTmpIPv6=`Lnet_get_net_info "${Lnet_fTmpIPv6Info}" "${Lnet_fTmpIPv6Nic}" "ipv6_addr"`
+                        ${Lnet_IPV6CHECK} "${Lnet_fTmpIPv6}" "${Lnet_fIpv6DefAddr}"
+                        Lnet_fRet=$?
+
+                        if [ "${Lnet_fRet}" == "0" ];then
+                            Lnet_fExitFlag="1"
+                            Lnet_fErrorIPv6Nic="${Lnet_fTmpIPv6Nic}"
+                            break
+                        fi
+                   fi
+                done
+
+                if [ "${Lnet_fExitFlag}" == "0" ];then
+                    Lnet_up_ipv6_static "$Lnet_fInte" "${Lnet_fIpv6DefAddr}" "${Lnet_fIpv6Prefix}" "${Lnet_fIpv6Gateway}"
+                else
+                    Lnet_fNetIndex=`awk -F'|' '/^'${Lnet_fInte}'\|/{print $2}' ${Lnet_ALL_NET_INTERFACE}`
+                    Lnet_fNicName=`Lnet_get_nic_name "${Lnet_fNetIndex}"`
+                    ${LOGEVENT} 997 531 warning email "${Lnet_fNicName}"                    ## setting dhcp fail and ip constant
+                fi
+            fi
+        fi
+    fi
+
+    ${Lnet_IFCONFIG} $Lnet_fInte mtu $Lnet_fJumbo
+}
+
+#################################################
+#         NAME:  Lnet_check_link_interface
+#  DESCRIPTION:  check linking all interface exist
+#      PARAM 1:  Lnet_fLinkId: linking aggregation id
+#       RETURN:  0/1(ok/fail)
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+#################################################
+Lnet_check_link_interface(){
+    local Lnet_fLinkId=$1
+    local Lnet_fMacList
+    local Lnet_fMac
+    local Lnet_fCount
+    local Lnet_fExist
+    local Lnet_fError="0"
+
+    Lnet_fMacList=`${Lnet_SQLITE} ${Lnet_CONFDB} "select mac from link_interface where id='${Lnet_fLinkId}'"`
+    Lnet_fCount=`${Lnet_SQLITE} ${Lnet_CONFDB} "select count(mac) from link_interface where id='${Lnet_fLinkId}'"`
+
+    if [ "${Lnet_fCount}" != "0" ];then
+        for Lnet_fMac in ${Lnet_fMacList}
+        do
+            if [ "${Lnet_fMac}" != "" ];then
+                #Lnet_fExist=`${Lnet_IFCONFIG} -a | awk '/ HWaddr /&&/'${Lnet_fMac}'/{if(index($1,":")==0) print $1}'`
+                Lnet_fExist=`awk '/\|'${Lnet_fMac}'$/{print $1}' ${Lnet_ALL_NET_INTERFACE}`
+                if [ "${Lnet_fExist}" == "" ];then
+                    Lnet_fError="1"
+                    break
+                fi
+            fi
+        done
+    else
+        Lnet_fError="1"
+    fi
+
+    echo "${Lnet_fError}"
+}
+
+#################################################
+#         NAME:  Lnet_insert_cmd_str
+#  DESCRIPTION:  get sqlite cmd string
+#      PARAM 1:  Lnet_IsUpdate: 0/1
+#      PARAM 2:  Lnet_fFieldName: Field name
+#      PARAM 3:  Lnet_fFieldValue: Field value
+#       RETURN:  sql cmd string
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+#################################################
+Lnet_insert_cmd_str(){
+    local Lnet_IsUpdate="$1"
+    local Lnet_fFieldName="$2"
+    local Lnet_fFieldValue="$3"
+    local Lnet_fStr=""
+
+    local Lnet_fCount=`${Lnet_SQLITE} ${Lnet_CONFDB} "select count(v) from conf where k='${Lnet_fFieldName}'"`
+
+    if [ "${Lnet_fCount}" == "0" ];then 
+        Lnet_fStr="insert into conf values('${Lnet_fFieldName}','${Lnet_fFieldValue}');"
+    else
+       if [ "${Lnet_IsUpdate}" == "1" ];then
+           Lnet_fStr="update conf set v='${Lnet_fFieldValue}' where k='${Lnet_fFieldName}';"
+       fi
+    fi
+    echo "$Lnet_fStr"
+}
+
+#################################################
+#         NAME:  Lnet_get_ipv4
+#  DESCRIPTION:  get no use ipv4
+#      PARAM 1:  Lnet_fNic: filter interface db name
+#       RETURN:  free ipv4 ip
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+#################################################
+Lnet_get_ipv4(){
+    local Lnet_fNic=$1
+    local Lnet_fIPInfo
+    local Lnet_fIP
+    local Lnet_fNowIP
+    local Lnet_TMP_IP="/tmp/tengb_ip"
+    local Lnet_fExitFlag
+    local Lnet_fExistIP
+
+    Lnet_fIPInfo=`${Lnet_SQLITE} ${Lnet_CONFDB} "select * from conf where k like '%_ip' or  k like '%_ipv4_default_ip'" | awk -F '|' '(/_ip/||/_ipv4_default_ip/)&&(!/'${Lnet_fNic}'/){print $2}'`
+    for((i=4;i<=254;i++))
+    do
+        Lnet_fNowIP="192.168.$i."
+        echo "0" > $Lnet_TMP_IP
+        echo -e "$Lnet_fIPInfo" | \
+        while read Lnet_fIP
+        do
+            Lnet_fExistIP=`echo $Lnet_fIP | awk -F'.' '{printf("%s.%s.%s.",$1,$2,$3)}'`
+            if [ "${Lnet_fExistIP}" == "$Lnet_fNowIP" ];then
+                echo "1" > $Lnet_TMP_IP
+                break
+            fi
+        done
+
+        Lnet_fExitFlag=`cat $Lnet_TMP_IP`
+        if [ "$Lnet_fExitFlag" == "0" ];then
+            break
+        fi
+    done
+    rm -f $Lnet_TMP_IP
+    echo "${Lnet_fNowIP}"
+}
+
+#################################################
+#         NAME:  Lnet_get_default_ipv6
+#  DESCRIPTION:  get no use ipv6
+#      PARAM 1:  Lnet_fNic: filter interface db name
+#       RETURN:  free ipv6 ip
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+#################################################
+Lnet_get_default_ipv6(){
+    local Lnet_fNic=$1
+    local Lnet_fIPv6Info
+    local Lnet_fNewIPv6
+    local Lnet_fExitFlag
+    local Lnet_fRet
+    local Lnet_fIP
+    local Lnet_IPV6CHECK="/usr/bin/ipv6check -c"
+    
+    Lnet_fIPv6Info=`${Lnet_SQLITE} ${Lnet_CONFDB} "select v from conf where k like '%_ipv6_addr' or k like '%_ipv6_default_addr'" | awk -F '|' '!/'${Lnet_fNic}'/{print $0}'`
+    for ((i=4;i<=60;i++))
+    do
+        Lnet_fNewIPv6=`printf "%x::1" $((65216+$i))`
+        Lnet_fExitFlag="0"
+        for Lnet_fIP in $Lnet_fIPv6Info
+        do
+            ${Lnet_IPV6CHECK} "${Lnet_fIP}" "${Lnet_fNewIPv6}"
+            Lnet_fRet=$?
+
+            if [ "${Lnet_fRet}" == "0" ];then
+                Lnet_fExitFlag="1"
+                break
+            fi
+        done
+        if [ "$Lnet_fExitFlag" == "0" ];then
+            break
+        fi
+    done
+
+    echo "${Lnet_fNewIPv6}"
+}
+
+
+#################################################
+#         NAME:  Lnet_check_ha_enable
+#  DESCRIPTION:  check ha enable
+#      PARAM 1:  none
+#       RETURN:  0/1(no/yes)
+#       AUTHOR:  enian
+#      CREATED:  08,12,2011
+#################################################
+Lnet_check_ha_enable(){
+    local Lnet_fHa=`/img/bin/check_service.sh "ha"`
+    local Lnet_fHaEn=`${Lnet_SQLITE} ${Lnet_CONFDB} "select v from conf where k='ha_enable'"`
+    local Lnet_fVal="0"
+    if [ "${Lnet_fHa}" == "1" ] && ([ -f ${Lnet_HA_REC_FLAG} ] || [ "${Lnet_fHaEn}" == "1" ]);then
+        Lnet_fVal="1"
+    fi
+
+    echo "${Lnet_fVal}"
+}
+
+#################################################
+#         NAME:  Lnet_check_ha_interface
+#  DESCRIPTION:  check interface is heartbeat
+#      PARAM 1:  Lnet_fInterface: interface name
+#       RETURN:  0/1(no/yes)
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+#################################################
+Lnet_check_ha_interface(){
+    local Lnet_fInterface=$1
+    local Lnet_fHaInterface=`${Lnet_SQLITE} ${Lnet_CONFDB} "select v from conf where k='ha_heartbeat'"`
+    local Lnet_fHasHa=`Lnet_check_ha_enable`
+    local Lnet_fVal="0"
+
+    if [ "${Lnet_fHasHa}" == "1" ] && [ "${Lnet_fHaInterface}" == "${Lnet_fInterface}" ];then
+        Lnet_fVal="1"
+    fi
+    echo "${Lnet_fVal}"
+}
+
+#################################################
+#         NAME:  Lnet_check_vip_interface
+#  DESCRIPTION:  check interface is virtual ip interface
+#      PARAM 1:  Lnet_fInterface: interface name
+#       RETURN:  0/1(no/yes)
+#       AUTHOR:  enian
+#      CREATED:  03,27,2012
+#################################################
+Lnet_check_vip_interface(){
+    local Lnet_fInterface=$1
+    local Lnet_fHaVipList=`${Lnet_SQLITE} ${Lnet_CONFDB} "select v from conf where k='ha_virtual_ip'"`
+    local Lnet_fVal="0"
+    local Lnet_fHasHa=`Lnet_check_ha_enable`
+    local Lnet_fIsVipEth=""
+
+    Lnet_fIsVipEth=`echo "${Lnet_fHaVipList}" | awk '/^'${Lnet_fInterface}',/||/\|'${Lnet_fInterface}',/{print $0}'`
+    if [ "${Lnet_fHasHa}" == "1" ] && [ "${Lnet_fIsVipEth}" != "" ];then
+        Lnet_fVal="1"
+    fi
+
+    echo "${Lnet_fVal}"
+}
+
+#################################################
+#         NAME:  Lnet_get_all_interface
+#  DESCRIPTION:  get all interface info
+#      PARAM 1:  none
+#       RETURN:  get all interface info
+#       AUTHOR:  enian
+#      CREATED:  30,11,2011
+#################################################
+Lnet_get_all_interface(){
+    cat ${Lnet_ALL_NET_INTERFACE}
+}

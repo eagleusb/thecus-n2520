@@ -1,0 +1,108 @@
+#!/bin/sh
+#################################################
+##	Procedure
+#################################################
+
+## call to check if /raid is mounted
+sys_mounted() {
+	df | grep '^/dev/md0.*/raid$'
+}
+
+##
+## Use /etc/samba/smb.conf for example:
+## if /raid is NOT mounted {
+##	if /etc/samba/smb.conf is a link and /etc/samba/smb.conf.default exists {
+##		remove /etc/samba/smb.conf
+##		copy /etc/samba/smb.conf.default as /etc/samba/smb.conf 
+##	} else if /etc/samba/smb.conf doesn't exists and /etc/samba/smb.conf.default exists {
+##		copy /etc/samba/smb.conf.default as /etc/samba/smb.conf
+##	}
+## } else if /raid is REALLY mounted {
+##	if /raid/sys/smb.conf does NOT exists {
+##		if /etc/samba/smb.conf is symbolic link and /etc/samba/smb.conf.default exists {
+##			copy /etc/samba/smb.conf.default as /raid/sys/smb.conf
+##			remove /etc/samba/smb.conf
+##			make /etc/samba/smb.conf a symbolic link -> /raid/sys/smb.conf
+##		} else if /etc/samba/smb.conf is a regular file and /etc/samba/smb.conf.default does NOT exists {
+##			copy /etc/samba/smb.conf as /etc/samba/smb.conf.default
+##			copy /etc/samba/smb.conf as /raid/sys/smb.conf
+##			remove /etc/samba/smb.conf
+##			make /etc/samba/smb.conf a symbolic link -> /raid/sys/smb.conf
+##		}
+##	}
+## }
+##
+roaming_conf() {
+	if [ ! "$1" = "" ]
+	then
+		conf=$1
+		sys=/raid/sys
+		sysconf=/raid/sys/`basename ${conf}`
+
+		if [ "$(sys_mounted)" = "" ] ## not mounted
+		then
+			det=${conf}.default
+			if [ -L ${conf} ] && [ -e ${det} ]
+			then
+				rm -rf ${conf}
+				cp -pR ${det} ${conf}
+			else
+				if [ ! -e ${conf} ] && [ -e ${det} ]
+				then
+					cp -pR ${det} ${conf}
+				fi
+			fi
+		else					## mounted
+			mkdir /raid/sys > /dev/null 2>&1
+			det=${conf}.default
+			if [ ! -e ${sysconf} ]
+			then
+				if [ -L ${conf} ] && [ -e ${det} ]
+				then
+					cp -pR ${det} ${sysconf}
+					rm -rf ${conf}
+					ln -sf ${sysconf} ${conf}
+				else
+					if [ -f ${conf} ] && [ ! -e ${det} ]
+					then
+						cp -pR ${conf} ${det}
+						cp -pR ${conf} ${sysconf}
+						rm -rf ${conf}
+						ln -sf ${sysconf} ${conf}
+					fi
+				fi
+			else
+				if [ -f ${conf} ]
+				then
+					cp -pR ${conf} ${det}
+					rm -rf ${conf}
+					ln -sf ${sysconf} ${conf}
+				fi
+			fi
+		fi
+	fi
+}
+
+## read /etc/cfg/roaming lists and do roaming_conf batch
+batch_roaming_conf() {
+	cfg_file=/img/bin/roaming
+	fs=$(cat ${cfg_file})
+	for f in ${fs}
+	do
+		if [ ! "${f}" = "" ]
+		then
+			roaming_conf "${f}"
+		fi
+	done
+
+}
+
+#################################################
+##	Main
+#################################################
+
+batch_roaming_conf
+
+#################################################
+##	The end
+#################################################

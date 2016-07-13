@@ -1,0 +1,656 @@
+#!/bin/sh
+#
+# chkconfig: - 39 35
+# description: Starts and stops the iSCSI initiator
+#
+# pidfile: /var/run/iscsid.pid
+# config:  /etc/iscsid.conf
+
+ISCSID="/sbin/iscsid"
+ISCSIADM="/sbin/iscsiadm"
+PIDFILE="/var/run/iscsid.pid"
+ISCSIDB="/etc/cfg/stackable.db"
+SQLITE="/usr/bin/sqlite"
+IFCONFIG="/sbin/ifconfig"
+ISCSI_RMOUNT="/raid/data/stackable"
+ISCSI_DBFOLDER="/var/db/iscsi"
+ISCSI_SMB="/tmp/iscsi_smb.conf"
+ISCSI_ATALK="/tmp/iscsi_AppleVolumes.default"
+ISCSI_NFS="/tmp/iscsi_exports"
+CONFDB="/etc/cfg/conf.db"
+ISCSI_SYSDOLDER="/etc/iscsi"
+ISCSI_INAME="/etc/iscsi/initiatorname.iscsi"
+ISCSID_CONF="/etc/iscsid.conf"
+FTPROOT="/raid/data/ftproot"
+MOUNTFS="ext4"
+MOUNTPARM="user_xattr,acl,rw,noatime"
+MOUNTPARM_RO="user_xattr,acl,ro,noatime"
+ATALK_MAC_CHARSET=`/usr/bin/sqlite /etc/cfg/conf.db "select v from conf where k='httpd_charset'"`
+while_secs=60
+ha_enable=`$SQLITE $CONFDB "select v from conf where k='ha_enable'"`
+event="/img/bin/logevent/event"
+warn_usage="90"
+crond_conf="/etc/cfg/crond.conf"
+
+if [ "${ATALK_MAC_CHARSET}" = "" ];then
+  ATALK_MAC_CHARSET="MAC_ROMAN"
+fi
+
+if [ -z $ISCSID ] || [ -z $ISCSIADM ]
+then
+    echo "open-iscsi not installed."
+    exit 1
+fi
+
+. /img/bin/rc/functions
+
+#################################################
+##       Check Raid Mount First
+#################################################
+check_raid(){
+  sys_path=`/bin/ls -l /raid/sys | awk -F' ' '{printf $11}'`
+  data_path=`/bin/ls -l /raid/data | awk -F' ' '{printf $11}'`
+  if [ "$sys_path" == "" ] || [ "$data_path" == "" ];
+  then
+    echo "Your Master RAID link is not exist"
+    exit
+  fi
+}
+
+check_stackable_db(){
+  table_exist=`$SQLITE $ISCSIDB ".tables"`
+  if [ ! -f "$ISCSIDB" ] || [ "$table_exist" == "" ];
+  then
+    echo "create new stackable database"
+    /bin/rm $ISCSIDB
+    /bin/touch $ISCSIDB
+    #$SQLITE $ISCSIDB "create table nfs(share,hostname,privilege,rootaccess)"
+    $SQLITE $ISCSIDB "create table stackable(enabled,ip,port,iqn,user,pass,share,pshare,comment,browseable,guest_only,quota_limit,quota_used,recursive)"
+  else
+    echo "stackable database is exist"
+  fi
+}
+
+iscsidconf() {
+echo -e "node.active_cnx = 1 \n\
+node.startup = manual \n\
+#node.session.auth.username = dima \n\
+#node.session.auth.password = aloha \n\
+node.session.timeo.replacement_timeout = 60 \n\
+node.session.err_timeo.abort_timeout = 10 \n\
+node.session.err_timeo.reset_timeout = 30 \n\
+node.session.iscsi.InitialR2T = No \n\
+node.session.iscsi.ImmediateData = Yes \n\
+node.session.iscsi.FirstBurstLength = 262144 \n\
+node.session.iscsi.MaxBurstLength = 16776192 \n\
+node.session.iscsi.DefaultTime2Wait = 60 \n\
+node.session.iscsi.DefaultTime2Retain = 60 \n\
+node.session.iscsi.MaxConnections = 1 \n\
+node.cnx[0].iscsi.HeaderDigest = None \n\
+node.cnx[0].iscsi.DataDigest = None \n\
+node.cnx[0].iscsi.MaxRecvDataSegmentLength = 262144 \n\
+#discovery.sendtargets.auth.authmethod = CHAP \n\
+#discovery.sendtargets.auth.username = dima \n\
+#discovery.sendtargets.auth.password = aloha \n"
+
+}
+
+smb_folder() {
+  share_name=$1
+  comment=$2
+  browseable=$3
+  guest_only=$4
+	
+  if [ "$browseable" != "yes" ];then
+    browseable="no"
+  fi
+	
+  if [ "$guest_only" != "yes" ];then
+    guest_only="no"
+  fi
+  
+  maphidden="no"
+	
+  echo -e [$share_name]"\n"\
+comment = $comment"\n"\
+browseable = $browseable"\n"\
+guest only = $guest_only"\n"\
+path = $ISCSI_RMOUNT/$share_name/data"\n"\
+map acl inherit = yes"\n"\
+inherit acls = yes"\n"\
+read only = no"\n"\
+create mask = 0777"\n"\
+force create mode = 0000"\n"\
+inherit permissions = Yes"\n"\
+map archive = yes"\n"\
+map hidden = $maphidden"\n"
+
+}
+
+assemble_iscsi() {
+  if [ -d $ISCSI_RMOUNT ] && [ -f $ISCSIDB ];then
+    if [ -f $ISCSI_SMB ];then
+      rm -rf $ISCSI_SMB
+      touch $ISCSI_SMB
+    fi
+    
+    if [ -f $ISCSI_ATALK ];then
+      rm -rf $ISCSI_ATALK
+      touch $ISCSI_ATALK
+    fi
+	 	
+    master_raid=`ls -al /raid| awk '{print $11}'`
+    count_rmount=`echo "${master_raid}/stackable/"|wc -c`
+    #strExec=`printf "df|grep \"%s/\"|awk '{print substr(\\$6,%d)}'" "$ISCSI_RMOUNT" $count_rmount`
+    strExec=`printf "df|grep -E \"/raid[0-9]/data/stackable/|/raid6[0-9]/data/stackable/\"|awk '{print substr(\\$6,%d)}'" $count_rmount`
+    mount_list=`eval "$strExec"`
+    if [ "${mount_list}" != "" ] && [ -f "/var/tmp/www/quota/need_sync" ];then
+        stack_sync_list=`cat /var/tmp/www/quota/need_sync | awk -F "|" '/stack/{printf("%s\n",$2)}' | sort`
+        if [ "${stack_sync_list}" != "" ];then
+            for stack in $stack_sync_list
+            do
+                mount_list=`echo -e "$mount_list" | sed "s/^${stack}\$//g"`
+            done
+        fi
+    fi
+    for share in $mount_list
+    do
+      iscsi_data=`$SQLITE $ISCSIDB "select browseable,guest_only from stackable where share='$share' limit 0,1"`
+      if [ "$iscsi_data" != "" ];then
+        iscsi_browseable=`echo "$iscsi_data"|awk -F\| '{print $1}'`
+        iscsi_guest_only=`echo "$iscsi_data"|awk -F\| '{print $2}'`
+        iscsi_comment=`$SQLITE $ISCSIDB "select comment from stackable where share='$share' limit 0,1"`
+        smb_folder "$share" "$iscsi_comment" "$iscsi_browseable" "$iscsi_guest_only" >> $ISCSI_SMB
+        ###########################################
+        #	Assemble afp conf
+        ###########################################
+        if [ "$iscsi_guest_only" == "yes" ];then
+          echo -e "\"${ISCSI_RMOUNT}/${share}/data\" \"$share\" options:upriv dperm:0777 fperm:0777 umask:02000,usedots,noadouble maccharset:$ATALK_MAC_CHARSET volcharset:UTF8" >> $ISCSI_ATALK
+        else
+          echo -e "\"${ISCSI_RMOUNT}/${share}/data\" \"$share\" options:upriv dperm:0774 fperm:0776 umask:02001,usedots,noadouble maccharset:$ATALK_MAC_CHARSET volcharset:UTF8 deny:nobody" >> $ISCSI_ATALK
+        fi
+        ###########################################
+        #	Link stack folder to ftproot
+        ###########################################
+        if [ ! -L "${FTPROOT}/${share}" ];then
+          ln -s "${ISCSI_RMOUNT}/${share}/data" "${FTPROOT}/${share}"
+        fi
+        smb_recycle_enable=`$SQLITE $CONFDB "select v from conf where k='advance_smb_recycle'"`
+        if [ $smb_recycle_enable == '1' ];then
+              if [ ! -d /raid/data/stackable/${share}/_NAS_Recycle_${share} ];then
+                    mkdir -p /raid/data/stackable/${share}/_NAS_Recycle_${share}
+                    chown nobody:users /raid/data/stackable/${share}/_NAS_Recycle_${share}
+                    chmod 777 /raid/data/stackable/${share}/_NAS_Recycle_${share}
+              fi
+              raid_id1=`ls -l /var/tmp/rss | awk '{print $11}'|awk -F '/' '{print $4}'`
+              raid_id=`cat /var/tmp/$raid_id1/raid_id`
+              SMB_MAXSIZE=`$SQLITE $CONFDB "select v from conf where k='smb_maxsize'"`
+              if [ "$SMB_MAXSIZE" != "" ];then
+                   if [ "$SMB_MAXSIZE" -gt 0 ];then
+                         SMB_MAXSIZETOTAL=$((SMB_MAXSIZE*1073741824))
+                         printf "vfs objects = recycle\nrecycle:keeptree = Yes\nrecycle:versions = Yes\nrecycle: repository = /raid/data/stackable/${share}/_NAS_Recycle_${share}\nrecycle: maxsize=$SMB_MAXSIZETOTAL" \
+                         >> ${ISCSI_SMB}
+                    else
+                         printf "vfs objects = recycle\nrecycle:keeptree = Yes\nrecycle:versions = Yes\nrecycle: repository = /raid/data/stackable/${share}/_NAS_Recycle_${share}" \
+                         >> ${ISCSI_SMB}
+                   fi
+                 else
+                   printf "vfs objects = recycle\nrecycle:keeptree = Yes\nrecycle:versions = Yes\nrecycle: repository = /raid/data/_NAS_Recycle_$raid_id" \
+                   >> ${ISCSI_SMB}
+              fi
+              recycle_display=`$SQLITE $CONFDB "select v from conf where k='recycle_display'"`
+              if [ "$recycle_display" == '1' ];then
+                   recycle_displaydetail='yes'
+              else
+                   recycle_displaydetail='no'
+              fi
+              printf "\n[_NAS_Recycle_${share}]\nadmin users = admin\ncomment =\nbrowseable = $recycle_displaydetail\nguest only = no\npath = /raid/data/stackable/${share}/_NAS_Recycle_${share}\nmap acl inherit = yes\ninherit acls = yes\nread only = no\ncreate mask = 0777\nforce create mode = 0000\ninherit permissions = Yes\nmap archive = no\nstore dos attributes = yes\nstrict allocate = yes\nmap hidden = no\n"\
+              >> ${ISCSI_SMB}
+          fi
+        fi
+    done
+  else
+    echo "[Error]Mount Folder [$ISCSI_RMOUNT] or Database [$ISCSIDB] Lost!!"
+  fi
+}
+
+check_ip(){
+  iscsi_portal=$1
+  iscsi_iqn=$2
+  len=$(expr length $iscsi_portal)
+  last_len=$(expr $len - 5)
+  iscsi_ip=`echo $iscsi_portal | head -c $last_len`
+  port=`echo $iscsi_portal | tail -c 6`
+  if [ `/img/bin/function/validate.sh "IPV4" ${iscsi_ip}` != "0" ];then
+        ch_ip6=`/usr/bin/ipv6check -p $iscsi_ip`
+        if [ "${ch_ip6}" == "ipv6 format Error" ];then
+            ip_type=3 #domain name
+            iscsi_ip_co=`echo "${iscsi_iqn}" | awk -F' ' '{print $2}'`
+            iscsi_ip=`echo "${iscsi_ip_co}" | sed 's/\]//g' | sed 's/\[//g'`
+            ch_ip6=`/usr/bin/ipv6check -p $iscsi_ip`
+            if [ "${ch_ip6}" != "ipv6 format Error" ];then
+               iscsi_ip_co2=`echo "${iscsi_ip_co}" | sed 's/\]/\\\]/g'`
+               grep_iscsi_portal="\\${iscsi_ip_co2}${port}"
+            else
+               grep_iscsi_portal="${iscsi_ip}${port}"    
+            fi 
+            iscsi_portal="${iscsi_ip_co}${port}"     
+        else
+            ip_type=2 #ipv6                        
+            iscsi_portal="[$iscsi_ip]$port"
+            grep_iscsi_portal="\[$iscsi_ip\]$port"
+        fi
+  else
+      ip_type=1 #ipv4
+      grep_iscsi_portal="$iscsi_ip$port"
+  fi
+  iscsi_iqn=`echo "${iscsi_iqn}" | awk -F' ' '{print $1}'`
+}
+
+connect_iscsi() {
+  if [ "${ha_enable}" == "1" ] && [ "`cat /tmp/ha_role`" == "standby" ];then
+    echo "The HA role is standby, stop the initiator service"
+    exit
+  fi
+
+  retry_stackable_folder=$1
+  if [ "${retry_stackable_folder}" != "" ];then
+    where_str="and share = '${retry_stackable_folder}' "
+  fi
+  
+  if [ -f $ISCSIDB ];then
+    if [ ! -d $ISCSI_RMOUNT ];then
+      mkdir -p $ISCSI_RMOUNT
+    fi
+    
+    datalist=`$SQLITE $ISCSIDB "select ip,port,iqn from stackable where enabled='1' ${where_str} group by ip,port,iqn"`
+    echo -e "${datalist}" | \
+    while read datakey
+    do
+      if [ "$datakey" == "" ];then
+        break
+      fi
+      
+      datakey=`echo "$datakey" | awk -F\| '{printf("ip=\"%s\" and port=\"%s\" and iqn=\"%s\"\n",$1,$2,$3)}'`
+      ##Discovery iSCSI target
+      iscsi_portal=`$SQLITE $ISCSIDB "select ip,port from stackable where $datakey limit 0,1"|awk -F\| '{printf("%s:%s",$1,$2)}'`      
+      iscsi_iqn=`$SQLITE $ISCSIDB "select iqn from stackable where $datakey limit 0,1"`
+      iscsi_user=`$SQLITE $ISCSIDB "select user from stackable where $datakey limit 0,1"`
+      iscsi_pass=`$SQLITE $ISCSIDB "select pass from stackable where $datakey limit 0,1"`
+      iscsi_share=`$SQLITE $ISCSIDB "select share from stackable where $datakey limit 0,1"`
+      if [ "$iscsi_portal" != "" ];then
+        check_ip "${iscsi_portal}" "${iscsi_iqn}"
+        $ISCSIADM -m discovery -tst --portal $iscsi_portal
+      	##login iSCSI iqn      	
+      	TARGETS=`$ISCSIADM -m node |grep $grep_iscsi_portal |grep $iscsi_iqn | sed 's@\[\(.*\)\] .*@\1@g'`
+#	RETVAL=1
+#	for rec in $TARGETS
+#	do
+          ##Setting vlaue
+          RETVAL=1
+          if [ "$TARGETS" != "" ];then
+            if [ "$iscsi_iqn" != "" ] && [ "$iscsi_portal" != "" ];then
+              if [ "$iscsi_user" != "" ];then
+                $ISCSIADM -m node -T $iscsi_iqn -p $iscsi_portal -o update -n node.session.auth.authmethod -v CHAP
+                $ISCSIADM -m node -T $iscsi_iqn -p $iscsi_portal -o update -n node.session.auth.username -v $iscsi_user
+                $ISCSIADM -m node -T $iscsi_iqn -p $iscsi_portal -o update -n node.session.auth.password -v $iscsi_pass
+              else
+                $ISCSIADM -m node -T $iscsi_iqn -p $iscsi_portal -o update -n node.session.auth.authmethod -v None
+                $ISCSIADM -m node -T $iscsi_iqn -p $iscsi_portal -o update -n node.session.auth.username -v ""
+                $ISCSIADM -m node -T $iscsi_iqn -p $iscsi_portal -o update -n node.session.auth.password -v ""
+              fi
+              
+              $ISCSIADM -m node -T $iscsi_iqn -p $iscsi_portal -o update -n node.conn[0].iscsi.HeaderDigest -v "None"
+              $ISCSIADM -m node -T $iscsi_iqn -p $iscsi_portal -o update -n node.conn[0].iscsi.DataDigest -v "None"
+              $ISCSIADM -m node -T $iscsi_iqn -p $iscsi_portal -l
+              RETVAL="$?"
+            fi
+          fi
+#	done
+      	
+        ##Mount iSCSI iqn
+        if [ "$RETVAL" = "0" ];then
+      	  sleep 3
+      	  iscsi_traykey=`$ISCSIADM -m session |grep  $grep_iscsi_portal |grep $iscsi_iqn | head -1|awk '{print $2}'|sed 's/\[//'|sed 's/\]//'`
+      	   
+      	  ##get disk name
+      	  TARGETS=`ls -laR /sys/class/iscsi_session/session${iscsi_traykey}/device/|awk -F/ '/block\/sd.*:$/&&!/block\/sd.*\//{print substr(\$10,0,length(\$10)-1)}'`
+      	  for iscsi_diskname in $TARGETS
+          do
+            if [ "$iscsi_diskname" != "" ];then
+              diskname_exist=`cat /proc/partitions | grep "${iscsi_diskname}1"`
+              
+              if [ "${diskname_exist}" != "" ];then
+                iscsi_diskname="${iscsi_diskname}1"
+      	      else
+                iscsi_diskname="${iscsi_diskname}"
+              fi
+            fi
+            
+            echo "name = ${iscsi_diskname}"
+            ##increase iscsi read speed
+            echo 2048 > /sys/block/${iscsi_diskname}/queue/read_ahead_kb
+            if [ "$iscsi_diskname" != "" ] && [ "$iscsi_share" != "" ];then
+              if [ ! -d $ISCSI_RMOUNT/$iscsi_share ];then
+                mkdir -p $ISCSI_RMOUNT/$iscsi_share
+              fi
+        	
+              device_readonly=`/usr/bin/sg_modes /dev/$iscsi_diskname| grep WP=1`
+              
+              if [ "${device_readonly}" != "" ];then
+                mount -t $MOUNTFS -o $MOUNTPARM_RO /dev/$iscsi_diskname $ISCSI_RMOUNT/$iscsi_share
+              else
+                mount -t $MOUNTFS -o $MOUNTPARM /dev/$iscsi_diskname $ISCSI_RMOUNT/$iscsi_share
+              fi
+              
+              quota_enable=`${SQLITE} ${CONFDB} "select v from conf where k='quota'"`
+              if [ "$quota_enable" == "1" ];then
+                /img/bin/rc/rc.user_quota mount_quota stack
+              fi
+              
+              smb_path="$ISCSI_RMOUNT/$iscsi_share/data"
+              
+              if [ ! -d "$smb_path" ];then
+                /bin/mkdir "$smb_path"
+                /bin/chown nobody:users "$smb_path"
+                guest_only=`$SQLITE $ISCSIDB "select guest_only from stackable where share='$iscsi_share'"`
+        	
+        	if [ "$guest_only" == "yes" ];then
+                  /bin/chmod 777 "$smb_path"
+                else
+                  /bin/chmod 700 "$smb_path"
+                fi
+              fi
+            fi
+          done
+      	fi
+      fi
+    done
+  fi
+}
+
+initiatoriqn() {
+	#initiator iqn.2007-08.{reverse domain}:storage-server.{MAC address}
+	# Ex: Target iqn.2007-08.com.thecus:stackable-server.0014FD109C22
+	
+	domainname=`$SQLITE $CONFDB "select v from conf where k='nic1_domainname'"|awk -F. '{print $1 " " $2 " " $3}'`
+
+	revdomain=`reverse_domain $domainname`
+	
+	year="2007"
+	month="08"
+	if [ "${ha_enable}" == "1" ];then
+	  macaddr=`$SQLITE $CONFDB "select v from conf where k='ha_virtual_name'" |tr [:upper:] [:lower:]`
+	else
+	  macaddr=`/img/bin/function/get_interface_info.sh get_mac eth0 | awk -F: '{printf("%s%s%s%s%s%s",$1,$2,$3,$4,$5,$6)}'`
+	fi
+	echo "iqn.$year-$month.$revdomain:stackable-server.$macaddr"|tr [:upper:] [:lower:]
+}
+
+start_iscsid()
+{
+  RETVAL=0
+  if [ ! -d $ISCSI_DBFOLDER ];then
+    mkdir -p $ISCSI_DBFOLDER
+  fi
+  if [ ! -d $ISCSI_SYSDOLDER ];then
+    mkdir -p $ISCSI_SYSDOLDER
+  fi
+  KVER=`uname -r`
+
+  chk=`lsmod|awk '{if($1=="scsi_transport_iscsi") print $1}'|wc -l`
+  if [ $chk -eq 0 ];then
+    insmod /lib/modules/$KVER/kernel/drivers/scsi/scsi_transport_iscsi.ko
+  fi	
+
+  chk=`lsmod|awk '{if($1=="libiscsi") print $1}'|wc -l`
+  if [ $chk -eq 0 ];then
+    insmod /lib/modules/$KVER/kernel/drivers/scsi/libiscsi.ko
+  fi	
+
+  chk=`lsmod|awk '{if($1=="libiscsi_tcp") print $1}'|wc -l`
+  if [ $chk -eq 0 ];then
+    insmod /lib/modules/$KVER/kernel/drivers/scsi/libiscsi_tcp.ko
+  fi	
+
+  chk=`lsmod|awk '{if($1=="iscsi_tcp") print $1}'|wc -l`
+  if [ $chk -eq 0 ];then
+    insmod /lib/modules/$KVER/kernel/drivers/scsi/iscsi_tcp.ko
+  fi	
+		
+  ##create initiator iqn
+  iscsi_initiatoriqn=`initiatoriqn`
+  change=1
+  if [ -f $ISCSI_INAME ];then
+    oiqn=`cat $ISCSI_INAME|awk -F\= '{print $2}'`
+    if [ "$oiqn" = "$iscsi_initiatoriqn" ];then
+      change=0
+    fi
+  fi
+  if [ "$change" = "1" ];then
+    echo "InitiatorName=$iscsi_initiatoriqn" > $ISCSI_INAME
+  fi
+		
+  if [ ! -f $ISCSID_CONF ];then
+    iscsidconf > $ISCSID_CONF
+  fi
+
+  PID=`pidofproc $ISCSID`
+  if [ -z "$PID" ];then
+    daemon $ISCSID
+  fi
+    
+  return $RETVAL
+}
+
+stop_iscsid()
+{
+  RETVAL=0
+  sync
+  ##umount all stackable device
+  devlist=`df|awk '/\/raid[0-9]\/data\/stackable\//||/\/raid6[0-9]\/data\/stackable\//{print $1}'`
+    
+  sync
+  sync
+  sync
+  
+  for mountitem in $devlist
+  do
+    umount $mountitem
+  done 
+ 
+  datalist=`$SQLITE $ISCSIDB "select ip,port,iqn from stackable where enabled='1' ${where_str} group by ip,port,iqn"`
+  if [ "${datalist}" != "" ];then
+    echo "${datalist}" | \
+    while read datakey
+    do
+      datakey=`echo "$datakey" | awk -F\| '{printf("ip=\"%s\" and port=\"%s\" and iqn=\"%s\"\n",$1,$2,$3)}'`
+      iscsi_portal=`$SQLITE $ISCSIDB "select ip,port from stackable where $datakey limit 0,1"|awk -F\| '{printf("%s:%s",$1,$2)}'`
+      iscsi_iqn=`$SQLITE $ISCSIDB "select iqn from stackable where $datakey limit 0,1"`
+      check_ip "${iscsi_portal}" "${iscsi_iqn}"
+      
+      $ISCSIADM -m node -T $iscsi_iqn -p $iscsi_portal -u
+      $ISCSIADM -m node -o delete -T $iscsi_iqn -p $iscsi_portal
+    done
+  fi
+  
+  RETVAL=$?
+}
+
+start()
+{
+    RETVAL=0
+    echo -n "Starting iSCSI initiator service: "
+    
+    check_stackable_db
+    start_iscsid
+    
+    ##Connect the iscsi target & try to mount
+    connect_iscsi
+    cron_check
+
+    if [ $RETVAL == "0" ];then
+        echo "OK"
+    else
+        echo "Fail"
+    fi
+
+    return $RETVAL
+}
+
+stop()
+{
+    RETVAL=0
+    echo -n "Stopping iSCSI initiator service: "
+    PID=`pidofproc $ISCSID`
+    if [ "$PID" != "" ];then
+        stop_iscsid
+    fi
+    
+    cron_check
+    
+    if [ $RETVAL == "0" ];then
+        echo "OK"
+    else
+        echo "Fail"
+    fi
+
+    return $RETVAL
+}
+
+
+restart()
+{
+    stop
+    start
+}
+
+status()
+{
+    PID=`pidofproc $ISCSID`
+    if [ ! $PID ]
+    then
+        echo "iSCSI initiator is stopped."
+        exit 1
+    else
+        echo "iSCSI initiator is running."
+    fi
+}
+
+retry()
+{
+  retry_folder=$1
+  if [ "${retry_folder}" == "" ];then
+    exit
+  fi
+
+  while true
+  do
+    RETVAL=0
+    connect_iscsi "${retry_folder}"
+  
+    if [ "${RETVAL}" != "0" ];then
+      sleep ${while_secs}
+    else
+      /img/bin/rc/rc.samba reload
+      exit
+    fi
+  done
+}
+
+check_capacity(){
+  sqlstr="select ip, iqn, share from stackable where enabled='1'"
+
+  ${SQLITE} ${ISCSIDB} "${sqlstr}" | while read target
+  do
+    ip=`echo ${target} | awk -F'|' '{printf $1}'`
+    iqn=`echo ${target} | awk -F'|' '{printf $2}'`
+    share=`echo ${target} | awk -F'|' '{printf $3}'`
+    used=`df | grep "/data/stackable/${share}$" | awk '{print $5}' | sed 's/%//g'`
+    
+    if [ "${used}" != "" ] && [ ${used} -gt 90 ];then
+      echo "Stackable's IQN[$ip|$iqn] used Over $warn_usage%!!!"
+      ${event} 997 535 warning email "${share}" "${ip}" "${iqn}" "${warn_usage}"
+    fi
+  done  
+}
+
+cron_check(){
+  stackable_enable=`${SQLITE} ${ISCSIDB} "select ip, iqn, share from stackable where enabled='1'"`
+  check_cron=`cat ${crond_conf} | grep "/img/bin/rc/rc.initiator check_capacity"`
+  
+  if [ "${stackable_enable}" != "" ] && [ "${check_cron}" == "" ];then
+    echo "0 0,12 * * * /img/bin/rc/rc.initiator check_capacity > /dev/null 2>&1" >> ${crond_conf}
+    /usr/bin/killall crond
+    sleep 1
+    /usr/sbin/crond
+    /usr/bin/crontab ${crond_conf} -u root
+  fi
+  
+  if [ "${stackable_enable}" == "" ] && [ "${check_cron}" != "" ];then
+    cat ${crond_conf} | grep -v "/img/bin/rc/rc.initiator check_capacity" > /tmp/crond.conf1
+    cp /tmp/crond.conf1 ${crond_conf}
+    /usr/bin/killall crond
+    sleep 1
+    /usr/sbin/crond
+    /usr/bin/crontab ${crond_conf} -u root
+    rm /tmp/crond.conf1
+  fi
+}
+
+
+if [ "$1" != "stop" ];then
+	runstackable=`/img/bin/check_service.sh stackable`
+	if [ "$runstackable" = "" ];then 
+		runstackable="0"
+	fi
+	if [ ! $runstackable -gt 0 ];then
+		echo "Not support stackable function"
+		exit
+	fi
+fi
+
+case "$1" in
+  start)
+        check_raid
+        start
+        ;;
+  stop)
+        stop
+        ;;
+  restart)
+        check_raid
+        restart
+        ;;
+  status)
+        status
+        ;;
+  connect)
+        check_raid
+        connect_iscsi
+        ;;
+  retry)
+        check_raid
+        retry $2
+        ;;
+  assemble)
+        assemble_iscsi
+        ;;
+  initiator_iqn)
+        initiatoriqn
+        ;;
+  check_capacity)
+        check_capacity
+        ;;
+  cron_check)
+        cron_check
+        ;;
+  start_iscsid)
+	start_iscsid
+	;;
+  *)
+        echo $"Usage: $0 {start|stop|restart|connect|assemble|status}"
+        exit 1
+esac
+
+exit 0

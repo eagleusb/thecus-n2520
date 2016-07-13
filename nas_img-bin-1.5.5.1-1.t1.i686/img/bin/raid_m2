@@ -1,0 +1,917 @@
+#!/bin/sh 
+
+
+##################################################################
+#
+#  First, define some variables globally needed
+#
+##################################################################
+
+mdadm="/sbin/mdadm"
+mdstat="/proc/mdstat"
+disk1_of_md=""
+disk2_of_md=""
+disk3_of_md=""
+disk4_of_md=""
+disk5_of_md=""
+swapname="md10"
+swapdisk="/dev/md10"
+
+thecus_io=/proc/thecus_io
+PIC_MSG=/img/bin/pic.sh
+BLINK=2
+ON=1
+OFF=0
+evatime="/var/tmp/evatime"
+max_tray=`cat /proc/thecus_io | grep "MAX_TRAY:" | cut -d" " -f2`
+esata_tray=`/img/bin/check_service.sh esata`
+esata_count=`/img/bin/check_service.sh esata_count`
+total_tray=`/img/bin/check_service.sh total_tray`
+RAID_MAX=`/img/bin/check_service.sh speed_limit_max`
+RAID_MIN=`/img/bin/check_service.sh speed_limit_min`
+
+USB_TRAY=${esata_tray}
+while [ ${esata_count} -gt 0 ]
+do
+  USB_TRAY=`expr ${USB_TRAY} + 1`
+  esata_count=`expr ${esata_count} - 1`
+done
+
+sqlite=/usr/bin/sqlite
+confdb=/etc/cfg/conf.db
+sed=/bin/sed
+hot_addact="/img/bin/hot_add"
+save_log="/usr/bin/savelog /etc/cfg/logfile "
+mkdir="/bin/mkdir"
+stack_db="/etc/cfg/stackable.db"
+iscsiadm="/sbin/iscsiadm"
+event_exec="/img/bin/logevent/event"
+
+HA_ENABLE=`/usr/bin/sqlite /etc/cfg/conf.db "select v from conf where k='ha_enable'"`
+
+##################################################################
+#
+#  Second, declare sub routines needed
+#
+##################################################################
+
+getmdnum() {
+  inmdname=$1
+  echo "$inmdname" | awk '{h=substr($1,0,2);n=substr($1,3);if (h=="md") printf("%d\n",n);}'
+}
+
+get_disk_tray(){
+  tray_log="/var/tmp/$raid_name/disk_tray"
+  level_log="/var/tmp/$raid_name/raid_level"
+  rm $tray_log
+  rm $level_log
+  
+  nest_md=`mdadm -D /dev/$md_name | awk -F'active sync' '/active sync/{print $2}'|awk -F\/md '{if ($2 != "") printf("md%s\n",substr($2,0,4))}'`
+  if [ "${nest_md}" != "" ];
+  then
+    for v in $nest_md
+    do
+      raid_level=`/sbin/mdadm -D /dev/$v | awk -F' ' '/Raid Level/{printf($4)}'`
+      disk=`mdadm -D /dev/$v | awk -F'active sync' '/active sync/{print $2}'|awk -F\/ '{printf("Disk:%s\n",substr($3,0,3))}'`
+      for v in $disk
+      do
+        disk_num=`cat /proc/scsi/scsi |awk /$v/'{if($3=='\"$v\"')print $2}'|awk -F: '{printf("\"%s\"\n",$2)}'`
+        #disk_count=`echo "$disk" | wc -l`
+        echo -e "$disk_num" >> $tray_log
+        led_sata_ok ${disk_num}
+      done
+      if [ "$raid_level" = "linear" ];
+      then
+        raid_level="J"
+      else
+        raid_level=`echo "$raid_level" | awk '{print(substr($0,5,length($0)-4))}'`
+      fi
+      echo -e "$raid_level"0 > $level_log
+    done
+  else
+    disk=`mdadm -D /dev/$md_name | awk -F'active sync' '/active sync/{print $2}'|awk -F\/ '{printf("Disk:%s\n",substr($3,0,4))}' | awk -F2 '{print $1}'`
+    for v in $disk
+    do
+      disk_num=`cat /proc/scsi/scsi |awk /$v/'{if($3=='\"$v\"')print $2}'|awk -F: '{printf("\"%s\"\n",$2)}'`
+      #disk_count=`echo "$disk" | wc -l`
+      echo -e "$disk_num" >> $tray_log
+      led_sata_ok ${disk_num}
+    done
+    spare_disk=`mdadm -D /dev/$md_name | awk -F'spare' '/spare/{print $2}' | awk -F\/ '{printf("Disk:%s\n",substr($3,0,4))}' | awk -F2 '{print $1}'`
+    for v in ${spare_disk}
+    do
+         if [ "${v}" != "" ];
+         then
+                 spare_disk_num=`cat /proc/scsi/scsi |awk /$v/'{if($3=='\"$v\"')print $2}'|awk -F: '{printf("\"%s\"\n",$2)}'`
+                 echo -e "$spare_disk_num" >> $tray_log
+                 led_sata_ok ${disk_num}
+         fi
+    done
+    raid_level=`/sbin/mdadm -D /dev/$md_name | awk -F' ' '/Raid Level/{printf($4)}'`
+    if [ "$raid_level" = "linear" ];
+    then
+      raid_level="J"
+    else
+      raid_level=`echo "$raid_level" | awk '{print(substr($0,5,length($0)-4))}'`
+    fi
+    echo -e "$raid_level" > $level_log
+  fi
+}
+
+get_raid_id(){
+  id_log="/var/tmp/$raid_name/raid_id"
+  sleeped="0"
+  raid_id=""
+  if [ -f "$id_log" ];then
+    raid_id=`cat $id_log`
+  elif [ -f "/raidsys/$mdnum/smb.db" ];then
+    raid_id=`/usr/bin/sqlite /raidsys/$mdnum/smb.db "select v from conf where k='raid_name'"`
+  fi
+  while  [ ! -f "/raidsys/$mdnum/smb.db" ] || [ "$raid_id" = "" ]
+  do
+    if [ -f "$id_log" ];then
+      raid_id=`cat $id_log`
+      return
+    fi
+    if [ $sleeped -ge 10 ];then
+      raid_id=""
+      return
+    fi
+    sleeped=$(($sleeped+5))
+    sleep 5
+    if [ -f "/raidsys/$mdnum/smb.db" ];then
+      raid_id=`/usr/bin/sqlite /raidsys/$mdnum/smb.db "select v from conf where k='raid_name'"`
+    fi
+  done
+
+  rss_folder="/var/tmp/$raid_name"
+  if [ ! -e $rss_folder ];then
+      mkdir -p ${rss_folder}
+  fi
+
+  echo -e "$raid_id" > $id_log
+
+}
+
+## simulate enum mapping
+slot_mapping() {
+  strExec="cat /proc/scsi/scsi |awk '/Thecus:/&&/Tray:$1 /{FS=\" \";print \$3}'|awk -F\"sd\" '{print \$2}'"
+  eval $strExec
+}
+
+## simulate enum
+d_map() {
+  diskname="`echo \"$1\"|cut -c -3`"
+  strExec="cat /proc/scsi/scsi |awk '/Thecus:/&&/Disk:${diskname}/{FS=\" \";print \$2}'|awk -F\":\" '{print \$2}'"
+  eval $strExec
+}
+
+## interface to light led up
+led_light() {
+  if [ "$1" != "" ] && [ "$2" != "" ]
+  then
+    echo "S_LED $1 $2" > ${thecus_io}
+  fi
+}
+
+## inetrface to drive thecus_io
+drive_thecus_io() {
+  echo "$1" > ${thecus_io} 
+}
+
+## fail alert
+led_sata_fail() {
+  cmd="S_LED `d_map ${1}` ${BLINK}"
+  drive_thecus_io "${cmd}"
+  echo "TRAY$1 Error" > /tmp/TRAY$1
+}
+
+led_sata_ok() {
+  cmd="S_LED `d_map ${1}` ${OFF}"
+  drive_thecus_io "${cmd}"
+  if [ -f /tmp/TRAY$1 ];then
+    echo "" > /tmp/TRAY$1
+  fi
+}
+
+## whole raid fail alert
+led_raid_fail() {
+  cmd="Fail ${BLINK}"
+  drive_thecus_io "${cmd}"
+}
+
+led_raid_healthy() {
+  cmd="Fail ${OFF}"
+  drive_thecus_io "${cmd}"
+}
+
+## get notif sqlite settings
+get_notif_setting() {
+  ## mail, beep
+  if [ "$1" != "" ]
+  then
+    field=notif_"${1}"
+    sqlcmd="select v from conf where k='${field}'"
+    ${sqlite} ${confdb} "${sqlcmd}"
+  fi
+}
+
+
+get_hot_spare() {
+  USB_TRAY=`/img/bin/check_service.sh esata`
+  strExec="cat /proc/scsi/scsi|awk  '/Thecus:/{FS=\" \";printf(\"%s:%s\n\",\$2,\$3)}'|awk -F: '{printf(\"%s\n\",\$4)}'"
+  normal=`eval ${strExec}`
+  
+  sqlcmd="select spare from hot_spare"
+  Serial_List=`${sqlite} ${confdb} "${sqlcmd}"`
+  for i in $normal
+  do
+    for s in $Serial_List
+    do
+      check="`/usr/sbin/smartctl -i /dev/$i | grep 'Serial [Nn]umber' | awk '{print $3}'`"
+      if [ "$s" = "$check" ];
+      then
+        sqlcmd="delete from hot_spare where spare='$check'"
+        ${sqlite} ${confdb} "${sqlcmd}"
+        echo "$i"
+        return
+      fi
+    done
+  done
+}
+
+
+## trun buzzer on
+buzzer_on() {
+  setting=`get_notif_setting beep`
+  if [ ${setting} -eq 1 ]
+  then
+    cmd="Buzzer 1"
+    drive_thecus_io "${cmd}"
+  fi
+}
+
+## trun buzzer off
+buzzer_off() {
+  cmd="Buzzer 0"
+  drive_thecus_io "${cmd}"
+}
+
+## call to update status for UI display
+update_status() {
+
+  rss_folder="/var/tmp/$raid_name"
+  raid_stat="$rss_folder/rss"
+  if [ ! -e $rss_folder ];then
+    mkdir -p ${rss_folder}
+  fi
+  echo "$1" > ${raid_stat}
+  if [ "`readlink /raid`"  = "/$raid_name/data" ];then
+    drive_thecus_io "LCM_RAID $1"
+  fi
+}
+
+event_triger() {
+  sh -c "/img/bin/logevent/event $* >/dev/null 2>&1 &" 
+}
+
+raid_na() {
+  return
+  #wait rest action finished
+  sleep 5
+  if [ $mdnum -ge 30 ] && [ $mdnum -lt 60 ];then
+    nestmd=`expr $mdnum - 30`
+    nestmd=`expr $nestmd / 2`
+    raid_name="raid"$nestmd
+    get_raid_id
+    if [ ! -e "/var/tmp/$raid_name" ];then
+      return
+    fi
+  else
+    if [ ! -e "/var/tmp/$raid_name" ];then
+      return
+    fi
+    get_raid_id
+    get_disk_tray
+    nestmd_a=`expr $nestmd + $nestmd + 30`
+    nestmd_b=`expr $nestmd + $nestmd + 31`
+    if [ -e "/dev/md$nestmd_b" ] || [ -e "/dev/md$nestmd_b" ];then
+      return
+    fi
+  fi
+
+  mig_flag=""
+  if [ -e /var/tmp/migrate/$raid_name/mig_flag ];then
+    mig_flag=`cat /var/tmp/migrate/$raid_name/mig_flag`
+    if [ "${mig_flag}" = "MIGRATE_R0" ];then
+      return
+    fi
+  fi
+  
+  master_raid=`ls /raid | grep data`
+  if [ "$master_raid" = "" ] && [ $mdnum -lt 60 ];
+  then
+    /img/bin/set_masterraid.sh
+  fi
+
+  update_status "N/A"
+  led_raid_healthy
+  buzzer_off
+  if [ `cat /proc/mdstat | grep "^md" | wc -l` -eq 0 ]; then
+    event_triger 213 "$raid_id"
+  fi
+}
+
+raid_recovery() {
+  if [ `/bin/ps | grep "[r]aid_build $mdnum " | wc -l` -ne 0 ]; then
+  	return
+  fi
+  
+  if [ `/bin/ps | grep "[p]ost_create $mdnum " | wc -l` -ne 0 ]; then
+  	return
+  fi
+
+  if [ $mdnum -ge 30 ] && [ $mdnum -lt 60 ];then
+    nestmd=`expr $mdnum - 30`
+    nestmd=`expr $nestmd / 2`
+    raid_name="raid"$nestmd
+    get_raid_id
+  else
+    get_raid_id
+    get_disk_tray
+  fi
+  
+  led_raid_healthy
+  buzzer_off
+  
+  mig_flag=""
+  if [ -e /var/tmp/migrate/$raid_name/mig_flag ];then
+    mig_flag=`cat /var/tmp/migrate/$raid_name/mig_flag`
+  else
+    # tmp mig_flag not exist, check sys/migrate for last migrate online continue...
+    migsys_flag=""
+    if [ -e /$raid_name/sys/migrate/migsys_flag ];then
+      migsys_flag=`cat /$raid_name/sys/migrate/migsys_flag`
+      if [ "${migsys_flag}" = "RECOVERY_R5" ];then
+        /img/bin/migrate_raid_online.sh $mdnum restart &
+        mig_flag="RECOVERY_R5"
+      fi
+    fi
+  fi
+  
+  if [ "${mig_flag}" = "RECOVERY_R5" ];then
+    update_status "Migrating"
+    /img/bin/raid_rebuild $mdnum reshape &
+  else
+    update_status "Recovering"
+    event_triger 205 "$raid_id"
+    event_triger 003 "$raid_id"
+   /img/bin/raid_rebuild $mdnum &
+  fi
+
+}
+
+raid_degrade() {
+  echo $RAID_MAX > /proc/sys/dev/raid/speed_limit_max
+  echo $RAID_MIN > /proc/sys/dev/raid/speed_limit_min
+
+  if [ $mdnum -ge 60 ];then
+    get_raid_id
+    get_disk_tray
+    sysmdnum=`expr $mdnum + 10`
+  elif [ $mdnum -ge 30 ];then
+    nestmd=`expr $mdnum - 30`
+    nestmd=`expr $nestmd / 2`
+    raid_name="raid"$nestmd
+    md_name="md"$nestmd
+    get_raid_id
+    get_disk_tray
+    sysmdnum=`expr $nestmd + 50`
+  else
+    get_raid_id
+    get_disk_tray
+    sysmdnum=`expr $mdnum + 50`
+  fi
+  
+  mig_flag=""
+  if [ -e /var/tmp/migrate/$raid_name/mig_flag ];then
+    mig_flag=`cat /var/tmp/migrate/$raid_name/mig_flag`
+  fi
+
+  #HA disable ?
+
+  buzzer_on
+  update_status "Degraded"
+  event_triger 206 "$raid_id"
+  event_triger 313 "$raid_id"
+  
+  hot_spare="`get_hot_spare`"
+  if [ "$hot_spare" != "" ];then
+    gdisk="/sbin/gdisk"
+    RAID_MAX=500000
+    RAID_MIN=70000
+    partition="/dev/${hot_spare}2"
+    swap="/dev/${hot_spare}1"
+    ramdisk="/dev/${hot_spare}3"
+
+    /img/bin/init_disk.sh ${hot_spare} 2>&1
+    sync
+    set_create_speed "${RAID_MAX}" "${RAID_MIN}"
+    ${mdadm} --zero ${swap}
+    ${mdadm} --zero ${partition}
+    ${mdadm} --zero ${ramdisk}
+    ${mdadm} /dev/md$mdnum --add ${partition}
+    ${mdadm} /dev/md10 --add ${swap}
+    ${mdadm} /dev/md$sysmdnum --add ${ramdisk}
+  fi
+        
+}
+
+raid_damage() {
+  if [ $mdnum -ge 30 ] && [ $mdnum -lt 60 ];then
+    nestmd=`expr $mdnum - 30`
+    nestmd=`expr $nestmd / 2`
+    sys_id=$nestmd
+    raid_name="raid"$nestmd
+    md_name="md"$nestmd
+    get_raid_id
+    get_disk_tray
+  else
+    sys_id=$mdnum
+    get_raid_id
+    get_disk_tray
+  fi
+  
+  led_raid_fail
+  ${PIC_MSG} LCM_MSG "RAID" "Damaged"
+  buzzer_on
+  update_status "Damaged"
+  mount -o remount,ro /$raid_name
+  mount -o remount,ro /raidsys/$sys_id
+  /img/bin/service stop
+  if [ "$HA_ENABLE" = "1" ] && [ "`echo x${md_name}x|grep 'xmd[0-9]x'`" != "" ] ;then
+    /img/bin/ha/script/stop_ha.sh damaged
+  else
+    master_raid=`ls /raid | grep data`
+    if [ "$master_raid" = "" ]
+    then
+      /img/bin/set_masterraid.sh
+    fi
+    
+    /img/bin/service start
+  fi
+  event_triger 204 "$raid_id"
+  event_triger 312 "$raid_id"
+}
+
+raid_healthy() {
+  if [ `/bin/ps | grep "[p]ost_create $mdnum " | wc -l` -ne 0 ]; then
+    #wait for rest action finished
+    sleep 5
+  fi
+
+  echo $RAID_MAX > /proc/sys/dev/raid/speed_limit_max
+  echo $RAID_MIN > /proc/sys/dev/raid/speed_limit_min
+
+  mdadm --grow /dev/$md_name --size=max
+
+  if [ $mdnum -ge 30 ] && [ $mdnum -lt 60 ];then
+    return
+  else
+    get_raid_id
+    get_disk_tray
+    nestmd_a=`expr $mdnum + $mdnum + 30`
+    nestmd_b=`expr $mdnum + $mdnum + 31`
+    if [ -e "/dev/md$nestmd_b" ] || [ -e "/dev/md$nestmd_b" ];then
+      state_a=`mdadm -D /dev/md$nestmd_a | awk -F' ' '/State :/{printf($4)}'`
+      state_b=`mdadm -D /dev/md$nestmd_b | awk -F' ' '/State :/{printf($4)}'`
+      if [ ! "${state_a}" = "" ] || [ ! "${state_b}" = "" ];then
+        return
+      fi
+    fi
+  fi
+  
+  if [ ! -f "/raidsys/$mdnum/HugeVolume" ]; then
+    event_triger 116 "$raid_id"
+    event_triger 207 "$raid_id"
+  fi
+
+  update_status "Healthy"
+  led_raid_healthy
+  buzzer_off
+}
+
+raid_disk_fail(){
+  diskname=`echo $1 | awk '{print substr($1,0,length($1)-1)}'`
+  strexec="awk '/Disk:${diskname} /{tray=substr(\$2,6);printf(\"%d\",tray)}' /proc/scsi/scsi"
+  disktray=`eval ${strexec}`
+
+  strexec="cat /proc/mdstat | awk '/$1/{FS=\" \";print \$1}'"
+  disk_md=`eval ${strexec}`
+  if [ "${disk_md}" != "" ]; then
+    mdadm --remove /dev/${disk_md} failed
+    #if remove fail, mark raid to damage
+    if [ $? -ne 0 ]; then
+      md_name=${disk_md}
+      mdnum=`getmdnum $md_name`
+      raid_damage ${disk_md}
+    fi
+  fi
+
+  [ "${disktray}" != "" ] || [ ${disktray} -gt 0 ] || return
+  if [ "`cat /proc/scsi/scsi | grep -c "Disk:${diskname} Model:IBLOCK"`" = 0 ];then
+    
+    strexec="cat /proc/mdstat | awk '/${diskname}2/{FS=\" \";print \$1}'"
+    disk_md=`eval ${strexec}`       #get disk md = md10
+    if [ "${disk_md}" != "" ]; then
+      msg=`get_event_msg "${diskname}"`
+      if [ "${msg}" != "" ];then
+        $event_exec 208 "${msg}"
+        $event_exec 314 "${msg}"
+      fi
+      
+      if [ ${disktray} -le ${max_tray} ]; then
+        led_light ${disktray} ${BLINK}
+      fi
+      md_name=${disk_md}
+      mdnum=`getmdnum $md_name`
+      raid_name="raid"$(($mdnum))
+      get_disktray
+      echo "TRAY$2 Error" > /tmp/TRAY$2
+    fi
+  fi
+}
+
+
+# to do hot-remove action
+hot_remove() {
+  diskname=$1
+  disktray=$2
+
+  #kill bad block scan process for removed device
+  if [ `/bin/ps | grep "[s]bin/badblocks /dev/${diskname}" | wc -l` -ne 0 ]; then
+    last_name=`echo $diskname | cut -c 3-`
+    /img/bin/block_scan.sh stop $last_name $disktray
+  fi
+
+
+  if [ ${disktray} -le ${max_tray} ] || [ ${disktray} -ge 53 ]; then
+    ${mdadm} /dev/md10 --fail detached 2>&1
+    ${mdadm} -D /dev/md10 2>&1
+    strexec="cat /proc/mdstat | awk '/${diskname}2/{FS=\" \";print \$1}'"
+    disk_md=`eval ${strexec}`       #get disk md = md10
+    if [ "${disk_md}" != "" ]; then
+      ${mdadm} /dev/${disk_md} --fail detached 2>&1
+      ${mdadm} -D /dev/${disk_md} 2>&1
+      if [ ${disktray} -le ${max_tray} ]; then
+        led_light ${disktray} ${BLINK}
+      fi
+      md_name=${disk_md}
+      mdnum=`getmdnum $md_name`
+      raid_name="raid"$(($mdnum))
+      get_disk_tray
+      echo "TRAY$2 Error" > /tmp/TRAY$2
+    fi
+    strexec="cat /proc/mdstat | awk '/${diskname}3/{FS=\" \";print \$1}'"
+    disk_md=`eval ${strexec}`
+    if [ "${disk_md}" != "" ]; then
+      ${mdadm} /dev/${disk_md} --fail detached 2>&1
+      ${mdadm} -D /dev/${disk_md} 2>&1
+    fi
+    strexec="cat /proc/mdstat | awk '/${diskname}4/{FS=\" \";print \$1}'"
+    disk_md=`eval ${strexec}`
+    if [ "${disk_md}" != "" ]; then
+      ${mdadm} /dev/${disk_md} --fail detached 2>&1
+      ${mdadm} -D /dev/${disk_md} 2>&1
+    fi
+    
+    if [ ${disktray} -ge 53 ]; then
+      disktray="$(($disktray/26-1))-$(($disktray%26))"
+    fi
+    event_triger 119 ${disktray}
+    event_triger 214 ${disktray}
+    if [ "`/img/bin/check_service.sh atmega168`" == "1" ];then
+        ${PIC_MSG} LCM_MSG "" "Disk ${disktray} removed"
+    else
+        ${PIC_MSG} LCM_MSG "Status:" "Disk ${disktray} removed"
+    fi
+  elif [ ${disktray} -ge ${esata_tray} ] && [ ${disktray} -lt ${USB_TRAY} ]; then
+    /img/bin/usb.hotplug remove esata
+    event_triger 149
+  elif [ "`cat /proc/mdstat | grep '^md[6-7][0-9] ' | grep " ${diskname}[2-3]\["`" != "" ];then
+    echo "HA disk ${diskname} remove!"
+    sh /img/bin/ha/script/disk.sh remove ${diskname}
+#  elif [ "`cat /proc/mdstat | grep '^md[0-9] ' | grep " ${diskname}[2-3]\["`" != "" ];then
+#    echo "Huge Volume disk ${diskname} remove!"
+#    sh /img/bin/HVdisk.sh remove ${diskname}
+  elif [ ${disktray} -ge ${USB_TRAY} ]; then
+    /img/bin/usb.hotplug remove usb
+  fi
+}
+
+## to do hot-add action, auto rebuild is done here
+hot_add() {
+  diskname=$1
+  disktray=$2
+  local ins
+  ins=""
+
+  /sbin/blockdev --setra 0 /dev/$diskname
+
+  /img/bin/hdspin.sh
+
+  if [ ${disktray} -le ${max_tray} ] || [ ${disktray} -ge 53 ]; then
+    ins=`slot_mapping ${disktray}`
+    if [ ${disktray} -le ${max_tray} ]; then
+      led_light ${disktray} ${OFF}
+    else
+      sg_ses --index=$(($disktray%26)) --clear=ident /dev/sg$(($disktray/26*26))
+      disktray="$(($disktray/26-1))-$(($disktray%26))"
+    fi
+    
+    if [ "`cat /proc/mdstat | grep sd${ins}2 | cut -d" " -f 1`" = "" ]; then
+      ${hot_addact} ${ins} $2 >/dev/null 2>&1 &
+      if [ "`/img/bin/check_service.sh atmega168`" == "1" ];then
+           ${PIC_MSG} LCM_MSG "" "Disk ${disktray} added"
+      else
+           ${PIC_MSG} LCM_MSG "Status:" "Disk ${disktray} added"
+      fi
+    fi
+    event_triger 118 ${disktray}
+  elif [ ${disktray} -ge ${esata_tray} ] && [ ${disktray} -lt ${USB_TRAY} ]; then
+    /img/bin/usb.hotplug add esata
+    event_triger 148
+  elif [ ${disktray} -ge ${USB_TRAY} ]; then
+    echo "0:${disktray} 1:${USB_TRAY} 3:${diskname}" >> /tmp/raid_m2_debug
+    if [ "`cat /proc/scsi/scsi | grep "Disk:${diskname} Model:IBLOCK"`" != "" ];then
+      if [ "$HA_ENABLE" = "1" ];then
+        echo "add ${diskname}" >> /tmp/raid_m2_debug
+        /img/bin/ha/script/disk.sh add ${diskname}
+      else
+        echo "Huge Volume disk ${diskname} add!" >> /tmp/raid_m2_debug
+        /img/bin/HVdisk.sh add ${diskname}
+      fi
+    else
+      /img/bin/usb.hotplug add usb
+      echo "add usb" >> /tmp/raid_m2_debug
+    fi
+  fi
+}
+
+expander_add() {
+  expander_id=$1
+  event_triger 160 "$expander_id"
+}
+
+expander_remove() {
+  expander_id=$1
+  event_triger 161 "$expander_id"
+}
+
+##################################################################
+#       Get event msg
+##################################################################
+get_event_msg(){
+  disk_name="${1}"
+  disk_tray="${2}"
+  if [ "${disk_tray}" == "" ];
+  then
+    strexec="awk '/Disk:${disk_name} /{tray=substr(\$2,6);printf(\"%d\",tray)}' /proc/scsi/scsi"
+    disk_tray=`eval ${strexec}`
+  fi
+
+  if [ "${disk_name}" != "" ] && [ "${disk_tray}" != "" ];then
+    if [ "${disk_name}" == "sdaaa" ];then
+      echo "[SATA DOM]"
+    elif [ "${disk_tray}" -le "${total_tray}" ];then
+      echo "${disk_tray}"
+    elif [ "${disk_tray}" -ge 53 ];then
+      echo "$((disk_tray/26-1))-$((disk_tray%26))"
+    elif [ ${disk_tray} -ge ${esata_tray} ] && [ ${disk_tray} -lt ${USB_TRAY} ];then
+      echo "[esata]"
+    else
+      strexec="cat /proc/scsi/scsi | grep "Intf:iSCSI" | grep ' Disk:${disk_name} '"
+      ret=`eval ${strexec}`
+    
+      if [ "${ret}" != "" ];then
+        strexec="df | awk -F' ' '/\/dev\/${disk_name} /{printf \$6}' | awk -F'/' '{printf \$5}'"
+        stack_folder=`eval ${strexec}`
+        if [ "${stack_folder}" != "" ];then
+          echo "stackable [ ${stack_folder} ]"
+        elif [ "`cat /proc/mdstat | grep md[6-7][0-9] | grep " ${disk_name}[2-3]\["`" != "" ];then
+          echo "[HA Disk]"
+        elif [ "`cat /proc/mdstat | grep md[0-9] | grep " ${disk_name}[2-3]\["`" != "" ];then
+          echo "[HugeVolume Disk]"
+        fi
+      fi
+    fi
+  fi
+}
+
+##################################################################
+#       Get stack record
+##################################################################
+get_stack_record(){
+  disk_name=$1;
+  iscsi_cmd=""
+  strexec="df | awk -F' ' '/\/dev\/${disk_name} /{printf \$6}' | awk -F'/' '{printf \$5}'"
+  stack_folder=`eval ${strexec}`
+  if [ "${stack_folder}" != "" ];then
+    ip_port_iqn=`$sqlite $stack_db "select ip,port,iqn from stackable where share='${stack_folder}'"`
+    ip_port=`echo -e "${ip_port_iqn}" | awk -F'\|' '{printf("%s:%s",$1,$2)}'`
+    iqn=`echo -e "${ip_port_iqn}" | awk -F'\|' '{printf("%s",$3)}'`
+    
+    if [ "${iqn}" != "" ] && [ "${ip_port}" != "" ];then
+      iscsi_cmd="-T $iqn -p $ip_port"
+    fi
+  fi
+  echo "${iscsi_cmd}"
+}
+
+####################################################################
+# to do hot-remove action
+####################################################################
+disk_io_fail() {
+  diskname=$1
+  fail=""
+  strexec="awk '/Disk:${diskname} /{tray=substr(\$2,6);printf(\"%d\",tray)}' /proc/scsi/scsi"
+  disk_tray=`eval ${strexec}`
+  if [ "${disk_tray}" != "" ];then
+    if [ ${disk_tray} -le ${total_tray} ];then
+      led_sata_fail ${disk_tray}
+    fi
+    #for enclosure
+    enc_loc=`awk "/Disk:${diskname} /{tray=substr(\\$8,5);printf(\"%d\",tray)}" /proc/scsi/scsi`
+    enc_tray=`awk "/Disk:${diskname} /{tray=substr(\\$9,5);printf(\"%d\",tray-1)}" /proc/scsi/scsi`
+    if [ ${enc_loc} -ge 1 ];then
+      sg_ses --index=$enc_tray --set=ident /dev/sg$enc_loc
+    fi
+  fi
+        
+  if [ "${disk_tray}" != "" ];then
+    if [ ${disk_tray} -ge ${esata_tray} ] && [ ${disk_tray} -lt ${USB_TRAY} ];then
+        sh /img/bin/eSATA_del.sh ${diskname}
+    else
+      strexec="cat /proc/scsi/scsi | grep "Intf:iSCSI" | grep ' Disk:${diskname} '"
+      ret=`eval ${strexec}`
+      
+      if [ "${ret}" != "" ];then
+        ###########################################################
+        #       Logout this record stackable
+        ###########################################################
+        record=`get_stack_record "${diskname}"`
+        if [ "${record}" != "" ];then
+          strexec="df | awk -F' ' '/\/dev\/${diskname} /{printf \$6}'"
+          stack_folder_path=`eval ${strexec}`
+          strexec="df | awk -F' ' '/\/dev\/${diskname} /{printf \$6}' | awk -F'/' '{printf \$5}'"
+          stack_folder=`eval ${strexec}`
+
+          fuser -mk ${stack_folder_path}
+          umount ${stack_folder_path}
+          
+          $iscsiadm -m node ${record} -u
+          $iscsiadm -m node -o delete ${record}
+          /img/bin/rc/rc.samba reload
+          /img/bin/rc/rc.initiator retry "${stack_folder}" &
+        elif [ "`cat /proc/mdstat | grep '^md[6-7][0-9] ' | grep " ${diskname}[2-3]\["`" != "" ];then
+          echo "HA disk ${diskname} remove!"
+          sh /img/bin/ha/script/disk.sh remove ${diskname}
+        elif [ "`cat /proc/mdstat | grep '^md[0-9] ' | grep " ${diskname}[2-3]\["`" != "" ];then
+          if [ `/bin/ps | grep "[H]Vdisk.sh remove ${diskname}" | wc -l` -ne 0 ]; then
+  	        return
+          fi
+          $event_exec 997 810 error email "$diskname"
+          echo "Huge Volume disk ${diskname} io_fail!" >> /tmp/raid_m2_debug
+          sh /img/bin/HVdisk.sh remove ${diskname}
+        else
+          echo "Disk is not exist!"
+        fi
+      fi
+    fi
+  fi
+}                
+
+##################################################################
+#
+#  Finally, exec main code
+#
+##################################################################
+
+killall lcm_display
+/img/bin/lcm_display
+
+#${PIC_MSG} PWR_S 2
+#FW_VER=`cat /etc/version`
+#${PIC_MSG} LCM_MSG "Firmware Version" "${FW_VER}" 
+
+while true
+do
+  event_msg=`cat /proc/thecus_eventc`
+  if [ "${event_msg}" = "" ];
+  then
+    continue
+  fi
+  event=`echo "$event_msg"|cut -d" " -f1`
+  param_1=`echo "$event_msg"|cut -d" " -f2`
+  param_2=`echo "$event_msg"|cut -d" " -f3`
+  md_name=$param_1
+  mdnum=`getmdnum $md_name`
+  raid_name="raid"$(($mdnum))
+  case "$event" in
+  disk_add)
+    ${save_log} ${event_msg}
+    if [ $param_2 -gt 0 ];then
+      hot_add ${param_1} ${param_2}
+    fi
+    ;;
+  disk_remove)
+    ${save_log} ${event_msg}
+    if [ $param_2 -gt 0 ];then
+      hot_remove ${param_1} ${param_2}
+    fi
+    ;;
+  disk_retry)
+    ;;
+  disk_io_fail)
+    ${save_log} ${event_msg}
+    disk_io_fail ${param_1}&
+    ;;
+  raid_healthy)
+    ${save_log} ${event_msg}
+    case "${param_1}" in
+    md[0-9]|md[3-4][0-9]|md1[1-9])
+      raid_healthy ${param_1}
+      ;;
+    md6[0-9])
+      raid_healthy ${param_1}
+      ${save_log} ${event_msg}
+      ha_raid_id=`echo "${param_1}" | tr -d md`
+      if [ -f "/tmp/raid${ha_raid_id}/ha_rss" ];then
+        rm -f "/tmp/raid${ha_raid_id}/ha_rss"
+      fi
+      ;;
+    esac
+    ;;
+  raid_degrade)
+    ${save_log} ${event_msg}
+    case "${param_1}" in
+    md[0-9]|md[3-4][0-9]|md1[1-9])
+      raid_degrade ${param_1}
+      ;;
+    md6[0-9])
+      get_raid_id
+      get_disk_tray
+      sysmdnum=`expr $mdnum + 10`
+      ha_raid_id=`echo "${param_1}" | tr -d md`
+      echo Degrade > "/tmp/raid${ha_raid_id}/ha_rss"
+
+      event_triger 116 "$raid_id"
+      event_triger 207 "$raid_id"
+
+      update_status "Healthy"
+      led_raid_healthy
+      buzzer_off
+      ;;
+    esac
+    ;;
+  raid_damage)
+    ${save_log} ${event_msg}
+    case "${param_1}" in
+    md[0-9]|md[3-4][0-9]|md1[1-9])
+      raid_damage ${param_1}
+      ;;
+    esac
+    ;;
+  raid_recovery)
+    ${save_log} ${event_msg}
+    case "${param_1}" in
+    md[0-9]|md[3-4][0-9]|md1[1-9]|md6[0-9])
+      raid_recovery ${param_1}
+      ;;
+    esac
+    ;;
+  raid_disk_fail)
+    ${save_log} ${event_msg}
+    raid_disk_fail ${param_1}
+    ;;
+  raid_create)
+    ;;
+  raid_auto_run)
+    ;;
+  raid_na)
+    ${save_log} ${event_msg}
+    case "${param_1}" in
+    md[0-9]|md[3-4][0-9]|md1[1-9]|md6[0-9])
+      raid_na ${param_1}
+      ;;
+    esac
+    ;;
+  expander_add)
+    expander_add ${param_1}
+    ;;
+  expander_remove)
+    expander_remove ${param_1}
+    ;;
+  esac
+done
+

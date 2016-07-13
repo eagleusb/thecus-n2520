@@ -1,0 +1,153 @@
+#!/bin/bash
+
+##################################################################
+#
+#  First, define some variables globally needed
+#
+##################################################################
+mdadm="/sbin/mdadm"
+sgdisk="/usr/sbin/sgdisk"
+total_tray=`/img/bin/check_service.sh total_tray` #sysconf.N16000 total_tray=16  thecus_io MAX_TRAY: 16
+sata=`cat /proc/scsi/scsi | sort -t':' -k 4 |awk '/Thecus:/{tray=substr($2,6,2);if(int(tray)<='$total_tray') strdisk=sprintf("%s %s",strdisk,substr($3,6,4))}END{print strdisk}'`
+disk_count=0
+swap_targets=""
+data_targets=""
+sys_targets=""
+md_num=0
+sysnum=50
+swapnum=10
+work_disk="/dev/md$md_num"
+mddisk="/dev/md$md_num"
+fsmode="ext4"
+raid_level=$1
+raid_id="RAID"
+
+REDIRECT=/var/run/build_fs_progress
+if [ ! -p $REDIRECT ]; then
+    REDIRECT=/dev/null
+fi
+
+
+[ "$sata" = "" ] && exit
+##################################################################
+#
+#  Second, declare sub routines needed
+#
+##################################################################
+## call to decorate sata string for use
+decorate_sata() {
+  #decorate disk target string
+  for i in ${sata}
+  do
+    disk_used=`cat /proc/mdstat | grep ${i}2`
+    [ ! "$disk_used" = "" ] && continue
+    /img/bin/init_disk.sh ${i}
+    disk_count=$(($disk_count+1))
+    swap_targets=${swap_targets}"/dev/${i}1 "
+    data_targets=${data_targets}"/dev/${i}2 "
+    sys_targets=${sys_targets}"/dev/${i}3 "
+  done
+  
+  #put missing for RAID1 with single disk
+  if [ "${raid_level}" == "1" ] && [ ${disk_count} -eq 1 ];then
+    disk_count=2
+    data_targets=${data_targets}"missing "
+    sys_targets=${sys_targets}"missing "
+  fi
+}
+
+stop_swap() {
+  swapoff /dev/md$swapnum
+  ${mdadm} -S /dev/md$swapnum
+}
+
+stop_sys() {
+  umount /dev/md$sysnum
+  ${mdadm} -S /dev/md$sysnum
+  rmdir /raidsys/$md_num
+}
+
+stop_raid() {
+  umount /raid$md_num
+  mdadm -S /dev/md$md_num
+  rmdir /raid$md_num
+  rm /tmp/raid$md_num
+}
+
+create_raid(){
+  echo "[BUILD-RAID:md$md_num]"
+  #create RAID
+  $mdadm -C /dev/md$md_num --assume-clean --force --metadata=1.2 --run -l ${raid_level} -n ${disk_count} ${data_targets} > /tmp/create_raid.log 2>&1
+  [ "$?" != "0" ] && exit
+  
+  #echo info to /tmp/raid
+  mkdir -p /var/tmp/raid${md_num}
+  echo "Constructing RAID ..." > /var/tmp/raid${md_num}/rss
+  echo $raid_id  > /var/tmp/raid${md_num}/raid_id
+  echo $raid_level > /var/tmp/raid${md_num}/raid_level
+  for v in $sata
+  do
+    disk_num=`cat /proc/scsi/scsi |awk /$v/'{if($3=='\"Disk:$v\"')print $2}'|awk -F: '{printf("\"%s\"\n",$2)}'`
+    echo -e "$disk_num" >> /var/tmp/raid${md_num}/disk_tray
+  done
+
+  #remove hot_spare record
+  dbpath="/etc/cfg/conf.db"
+  /usr/bin/sqlite ${dbpath} "delete from hot_spare "
+
+  #backup superblock
+  for savedisk in ${sata}
+  do
+    /usr/bin/save_super /dev/${savedisk}1 /syslog/sbdump.CR_${savedisk}1
+    /usr/bin/save_super /dev/${savedisk}2 /syslog/sbdump.CR_${savedisk}2
+    /usr/bin/save_super /dev/${savedisk}3 /syslog/sbdump.CR_${savedisk}3
+    /usr/bin/save_super /dev/${savedisk}4 /syslog/sbdump.CR_${savedisk}4
+    /usr/bin/save_super /dev/${savedisk}5 /syslog/sbdump.CR_${savedisk}5
+  done
+
+
+}
+
+
+##################################################################
+#
+#  Finally, exec main code
+#
+##################################################################
+
+#set md_num
+md_list=`cat /proc/mdstat | grep 'md[0-9] ' | awk -F " " '/md/{printf("%s\n",$1)}'`
+for md in $md_list
+do
+  md_num=$(($md_num+1))
+  sysnum=$(($sysnum+1))
+  #mdadm -S /dev/$md
+done
+
+decorate_sata
+create_raid
+
+sh -x /img/bin/mkswap_md.sh "${disk_count}" "${swap_targets}" >/tmp/mkswap_md.log 2>&1 &
+sh -x /img/bin/mksinglesys_md.sh "${disk_count}" "${sys_targets}" $md_num > /tmp/mksys_md$md_num.log 2>&1
+if [ ! -e "/raidsys/$md_num" ];then
+  stop_swap
+fi
+
+## stop until mdadm finish
+read line;
+
+echo "[BUILD-FS:md$md_num]"
+sh -x /img/bin/post_create $md_num 100 $raid_id 1 ext4 y > /tmp/post_create.log 2>&1
+
+echo "[BUILD-SHARE]"
+#set master raid
+master_raidname="raid$md_num"
+db_file="/raidsys/$md_num/smb.db"
+/usr/bin/sqlite $db_file "update conf set v='1' where k='raid_master'"
+
+rm -rf /raid
+ln -sf /$master_raidname/data /raid
+rm -rf /var/tmp/rss
+ln -sf /var/tmp/$master_raidname/rss /var/tmp/rss
+
+/img/bin/rc/rc.fs_monitor start

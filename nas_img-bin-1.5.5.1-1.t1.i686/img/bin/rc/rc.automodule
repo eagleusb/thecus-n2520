@@ -1,0 +1,857 @@
+#!/bin/sh
+MOD_SRC=/raid/data/_NAS_Module_Source_/
+MOD_PATH=/raid/data/module
+D_MODULE=${MOD_PATH}/.module
+D_TMP=${MOD_PATH}/.temp
+SQL=/usr/bin/sqlite
+PRE_DB=/raid/data/module/cfg/premod.db
+MOD_DB=/raid/data/module/cfg/module.db
+ModuleName=`cat /proc/thecus_io | awk '/MODELNAME/{print $2}'`
+ModuleName=`/img/bin/check_service.sh module_type`
+MOD_TMP=/raid/data/tmp/
+PACKAGE=${MOD_TMP}/modulepackage.zip
+MODULES=${MOD_TMP}/modules/
+WGET=/usr/bin/wget
+WEB_MODULE_LIST="http://www.thecus.com/download/module/ModuleList.csv"
+ONLINE_MODULE_LIST=/tmp/ModuleList.csv
+TMP_MODULE_LIST=/tmp/tmp_module.list
+. /img/bin/function/libmodule
+. /img/bin/function/libfile_act
+producer=`cat /etc/manifest.txt | awk '/producer/{print toupper($2)}'`
+module_exist=""
+DEFAULT_VAL=1000
+install_type="install"
+
+#################################################
+##       get module define key
+##       param : MOD: module name
+##              RDF: install.rdf
+##       return : key value
+#################################################
+get_mod_key(){
+  MOD=$1
+  RDF=$2
+  key=`awk -F'[<>/:]' '/md:Key/{print $4}' ${RDF}`
+  echo "${key}"
+}
+
+#################################################
+##       install.rdf parser db
+##       param : MOD: module name
+##               TDB: module database
+##              RDF: install.rdf
+#################################################
+rdf2db(){
+  TDB=$1
+  MOD=$2
+  RDF=$3
+  
+  ${SQL} ${TDB} "INSERT INTO 'mod' VALUES('${MOD}','1','type','Install')"
+
+  cat ${RDF} | \
+  awk -F '[<>]' "/<md:ModuleRDF>/,/<\/md:UI>/ \
+  {printf \"INSERT INTO 'mod' VALUES\('${MOD}','1','%s','%s'\);\n\",substr(\$2,4),\$3}" | \
+  ${SQL} ${TDB}
+    
+  cat ${RDF} | \
+  awk -F '[<>:]' "BEGIN{i=3}/<md:NAS>/,/<\/md:NasVersion>/ \
+  {if(\$3==\"NAS\"){i++;j=\"type\";k=\"NAS\"}else{j=\$3;k=\$4}; \
+  printf \"INSERT INTO 'mod' VALUES('${MOD}','%d','%s','%s');\n\",i,j,k}" | \
+  ${SQL} ${TDB}
+      
+  gid=`${SQL} ${TDB} "select gid from mod where module='${MOD}' and predicate='NasVersion'" | sort -n | tail -1`
+  gid=$((${gid}+1))
+    cat ${RDF} | \
+  awk -F '[<>]' "BEGIN{i=${gid}}/<md:DependCom>/,/<\/md:DependUrl>/ \
+  {if(\$2==\"md:DependCom\"){i++;j=\"type\";k=\"DependCom\"}else{j=substr(\$2,4);k=\$3}; \
+  printf \"INSERT INTO 'mod' VALUES('${MOD}','%d','%s','%s');\n\",i,j,k}" | \
+  ${SQL} ${TDB}
+      
+  insert_db "${MOD}" "${TDB}"
+}
+  
+#################################################
+##       list online recodr
+#################################################
+list_air(){
+  if [ "$1" = "" ];then
+  #  echo Need MODELNAME!
+    return
+  fi
+  MODEL="${1}"
+  ID=$2
+  
+  rm -f ${TMP_MODULE_LIST} ${ONLINE_MODULE_LIST}
+  ${WGET} -q -t 3 ${WEB_MODULE_LIST} -O ${TMP_MODULE_LIST}
+  if [ "$?" = "0" -a -f ${TMP_MODULE_LIST} ];then
+    cat ${TMP_MODULE_LIST} |tr -d "\r\"" |grep -v '^Table Version,' > ${ONLINE_MODULE_LIST}
+  fi
+  if [ ! -f ${ONLINE_MODULE_LIST} ];then
+    return
+  fi
+  
+  FIELD=`head -1 ${ONLINE_MODULE_LIST} | \
+    awk "{
+      split(\\$0,id,\",\");
+      for (i in id){
+        if (id[i]==\"${MODEL}\")
+          print i;
+      }
+    }"`
+  if [ "${FIELD}" = "" ];then
+  #  echo No ${MODEL} in Field
+    return
+  fi
+  #echo ${MODEL} in Field ${FIELD}
+
+  LINK1=`head -1 ${ONLINE_MODULE_LIST} | \
+    awk "{
+      split(\\$0,id,\",\");
+      for (i in id){
+        if (id[i]==\"Link-Module\")
+          print i;
+      }
+    }"`
+  #echo Link1 in Field ${LINK1}
+
+  MAC_S=`head -1 ${ONLINE_MODULE_LIST} | \
+    awk "{
+      split(\\$0,id,\",\");
+      for (i in id){
+        if (id[i]==\"Mac-Start\")
+          print i;
+      }
+  }"`
+
+  if [ "$MAC_S" == "" ];then
+    MAC_S=${DEFAULT_VAL}
+  fi
+  MAC_E=`head -1 ${ONLINE_MODULE_LIST} | \
+    awk "{
+      split(\\$0,id,\",\");
+      for (i in id){
+        if (id[i]==\"Mac-End\")
+          print i;
+      }
+  }"`  
+  if [ "$MAC_E" == "" ];then
+    MAC_E=${DEFAULT_VAL}
+  fi
+  WAN_MAC=`ifconfig eth0|grep HWaddr|awk '{print $5}' | awk -F':' '{print $1$2$3$4$5$6}'`
+
+  REALNAME=`head -1 ${ONLINE_MODULE_LIST} | \
+    awk "{
+      split(\\$0,id,\",\");
+      for (i in id){
+        if (id[i]==\"Real-Name\")
+          print i;
+      }
+  }"`
+
+  if [ "$REALNAME" == "" ];then
+    REALNAME=1
+  fi
+
+  MOD_LIST=`
+    cat ${ONLINE_MODULE_LIST} | \
+    awk -F"," \
+    "\\\$1!~/Module Name/{
+      if (\\\$${FIELD} > 0){
+          if (\"${MAC_S}\" != \"\"){
+            ret="0";
+            mac_start=\\\$${MAC_S};
+            if ( mac_start != \"\"){
+              if (\"${WAN_MAC}\" < mac_start){
+              continue;
+              }
+            }
+          }
+          if (\"${MAC_E}\" != \"\"){
+            mac_end=\\\$${MAC_E};
+            if ( mac_end != \"\"){
+              if (\"${WAN_MAC}\" > mac_end){
+                continue;
+              }
+            }
+          }          
+        printf \" %s\",\\\$1; 
+      }
+    }"
+  `
+  for MOD in ${MOD_LIST}
+  do
+    
+    ver=""
+    ver=`${SQL} ${MOD_DB} "select version from module where name='${MOD}'"`
+    if [ "${ver}" = "" ];then
+      ver="0.0.0"
+    fi
+    
+    MOD_VER=`
+      cat ${ONLINE_MODULE_LIST} | \
+      awk -F"," \
+      "\\\$1~/${MOD}/{
+        if (\\\$${FIELD} > 0){
+          printf \"%s\",\\\$2; 
+        }
+      }" | awk -F. '{print $1*10000+$2*100+$3}'
+    `
+    chk_predb_ver=""
+    chk_predb_ver=`echo ${ver}|awk -F. '{print $1*10000+$2*100+$3}'`
+    #if [ "${chk_predb_ver}" != "0" -a "${chk_predb_ver}" != "" ];then
+      if [ $MOD_VER -lt $chk_predb_ver ];then
+        continue
+      fi
+    #fi
+    
+    if [ ${ID} -gt 0 ];then
+      printf ","
+    fi
+    
+    NEED_VER=`
+      cat ${ONLINE_MODULE_LIST} | \
+      awk -F"," \
+      "\\\$1~/${MOD}/{
+        if (\\\$${FIELD} > 0){
+          printf \"%s\",\\\$4; 
+        }
+      }" | awk -F. '{print $1*10000+$2*100+$3}'
+    `
+    NAS_VER=`cat /etc/version | awk -F. '{print $1*10000+$2*100+$3}'`
+    
+    nas_check=1
+    if [ ${NEED_VER} -gt ${NAS_VER} ];then
+        nas_check=0
+    fi
+    
+    cat ${ONLINE_MODULE_LIST} | \
+    awk -F"," \
+    "\$1~/${MOD}/{
+      if (\$${FIELD} > 0){
+        printf \"${ID},'%s','%s','%s','%s','Thecus','${ver}|%s|${nas_check}','Online|%s|%s|%s'\" \
+              ,\$1,\$${REALNAME},\$2,\$3,\$4,\$(${LINK1}),\$(${LINK1}+1),\$(${LINK1}+2);
+      }
+    }"
+    
+    ID=`expr ${ID} + 1`
+  done
+}
+  
+#################################################
+##       check wan/lan1 MAC
+##       param : MOD: module name
+##       return : 0/1 (OK/Error)
+#################################################
+check_mac(){
+  MOD=$1
+	ret=0
+  mac_start=`cat ${MOD}/Configure/install.rdf | awk -F'[<>]' '/<md:MacStart>/{print $3}' | awk -F':' '{print $1$2$3$4$5$6}'`
+  mac_end=`cat ${MOD}/Configure/install.rdf | awk -F'[<>]' '/<md:MacEnd>/{print $3}' | awk -F':' '{print $1$2$3$4$5$6}'`
+	wan_mac=`ifconfig eth0|grep HWaddr|awk '{print $5}' | awk -F':' '{print $1$2$3$4$5$6}'`
+  wan_mac="$((16#${wan_mac}))"
+  if [ "$mac_start" != "" ];then
+    mac_start="$((16#${mac_start}))"
+    if [ ${wan_mac} -lt ${mac_start} ];then
+      ret=1
+    fi
+  fi
+  
+  if [ "$mac_end" != "" ];then
+    mac_end="$((16#${mac_end}))"
+    if [ ${wan_mac} -gt ${mac_end} ];then
+      ret=1
+    fi
+  fi
+	echo $ret
+}
+
+#################################################
+##       check tag type
+##       param : MOD: module name
+##               tag: tag mame
+##       return : 0/1 (OK/Error)
+#################################################
+check_nastype(){
+  MOD=$1
+  tag=$2
+	ret=0
+  
+  if [ `cat "${MOD}/Configure/install.rdf" | grep -ic "<md:${tag}>${ModuleName}</md:${tag}>"` == "0" ];then 
+	   ret=1
+	fi	
+	echo $ret
+}
+
+#################################################
+##       check tag exist
+##       param : MOD: module name
+##               tag: tag mame
+##       return : 0/1 (OK/Error)
+#################################################
+check_tag_exist(){
+  MOD=$1
+  tag=$2
+  ret=`grep "<md:${tag}>" ${MOD}/Configure/install.rdf`
+  echo "${ret}"
+}
+
+#################################################
+##       check nas is match module setting
+##       param : MOD: module name
+##       return : 0/1 (OK/Error)
+#################################################
+check_setting(){
+  ret=0
+  MOD=$1
+  
+  ret=`check_mac ${MOD}`
+  if [ "$ret" == "0" ];then
+    protol=`check_tag_exist "${MOD}" "NasProtol"`
+    if [ "${protol}" != "" ];then
+      ret=`check_nastype "${MOD}" "NasProtol"`
+    else
+      if [ "${ModuleName}" != "N7700" -a "${ModuleName}" != "N4100PRO" -a "${ModuleName}" != "N5200" ];then
+        type=`check_tag_exist "${MOD}" "NasType"`
+        if [ "${type}" != "" ];then
+          ret=`check_nastype "${MOD}" "NasType"`
+        fi
+      fi
+    fi
+  fi
+
+  echo $ret
+}
+
+#################################################
+##       get tag line
+##       param : tag: tag mame
+##               MOD: module name
+##       return : line number
+#################################################
+get_match_line(){
+  tag=$1
+  MOD=$2
+  line=0
+  str="awk '/<md:${tag}>${ModuleName}<\/md:${tag}>/{print NR}' ${MOD}/Configure/install.rdf"
+  line=`eval "${str}" `
+  echo $line
+}
+
+#################################################
+##       get module set nas version
+##       param : MOD: module name
+##       return : 
+#################################################
+nas_version_setting(){
+  MOD=$1
+  ret=1
+  mod_ver="0.0.0"
+  protol=`check_tag_exist "${MOD}" "NasProtol"`
+  type=`check_tag_exist "${MOD}" "NasType"`
+
+  if [ "${protol}" != "" ];then
+    line=`get_match_line "NasProtol" "${MOD}"`    
+  elif [ "${type}" != "" ];then
+    line=`get_match_line "NasType" "${MOD}"`
+  else
+    line=0
+  fi
+
+  if [ "$line" != "0" ];then
+    line=$(($line+1))
+    nas_verint=`cat /etc/version | awk -F'.' '{print $1*10000+$2*100+$3}'`
+    str="awk -F'[<>.]' '/<md:NasVersion>/{if(NR==${line}) print \$3*10000+\$4*100+\$5}' ${MOD}/Configure/install.rdf"
+    mod_verint=`eval "${str}"`
+    #mod_verint=`cat ${MOD}/Configure/install.rdf |awk -F'[<>.]' '/<md:NasVersion>/{print $3*10000+$4*100+$5}' | head -1`
+    if [ "${mod_verint}" != "" ];then
+      str="awk -F'[<>]' '/<md:NasVersion>/{if(NR==${line}) print \$3}' ${MOD}/Configure/install.rdf"
+      mod_ver=`eval "${str}"`
+      if [ ${nas_verint} -lt ${mod_verint} ];then
+        ret=0
+   	  fi
+   	fi
+  fi  
+  
+  if [ "${ret}" == "1" ];then
+    mod_ver="${mod_ver}|1"
+  else
+    mod_ver="${mod_ver}|0"
+  fi
+  echo "$mod_ver"
+}
+
+#################################################
+##       check module key type
+##       param : MOD: module name
+##               RDF: install.rdf
+##       return : 1/0(OK/Error)
+#################################################
+check_mod_key_type(){
+  MOD=$1
+  RDF=$2
+  ret=1
+  key=`get_mod_key "${MOD}" "${RDF}"`
+  if [ "${key}" != "" ];then
+    match_def=`echo "${key}" |  awk '/[^a-zA-Z0-9_]/{print $0}'`
+    if [ "$match_def" != "" ];then
+      ret=0
+    fi
+
+  fi
+
+  echo $ret
+}
+
+#################################################
+##       list auto module list
+#################################################
+list(){
+  rm -rf ${D_MODULE}/module.list
+  rm -rf ${PRE_DB}
+
+  if [ ! -f ${PRE_DB} ];then
+    ${SQL} ${PRE_DB} "CREATE TABLE mod (module,gid,predicate,object)"
+    ${SQL} ${PRE_DB} "CREATE TABLE module (name,version,description,enable,updateurl,icon,mode,homepage,ui)"
+  fi
+    
+  cd ${D_MODULE}
+  if [ ! -f ${D_MODULE}/module.list ];then
+    count=0
+#    printf "[" > ${D_MODULE}/module.list
+    for MOD in *
+    do
+      ret=0
+      if [ "${MOD}" = "" ];then continue ;fi
+      if [ -f ${MOD}/Configure/install.rdf ];then
+        ret=`check_setting "${MOD}"`
+        if [ "${ret}" == "1" ];then
+	    continue
+	  fi
+
+        if [ ${count} -gt 0 ];then
+          printf "," >> ${D_MODULE}/module.list
+        fi
+        ver="";
+        ver=`${SQL} ${MOD_DB} "select version from module where name='${MOD}'"`
+        if [ "${ver}" = "" ];then
+          ver="0.0.0"
+        fi
+        mod_ver=`nas_version_setting "${MOD}"`
+        key_type=`check_mod_key_type "${MOD}" "${MOD}/Configure/install.rdf"`
+       	ver="${ver}|${mod_ver}|${key_type}"
+       	
+       	if [ "${key_type}" == "1" ];then
+       	  key_value=`get_mod_key "${MOD}" "${MOD}/Configure/install.rdf"`
+       	  if [ "${key_value}" != "" ];then
+       	    if [ "${MOD}" != "${key_value}" ];then
+       	      cd ${MOD_SRC}
+       	      match_list=`ls ${MOD}_*`       	      
+       	      echo -e "${match_list}" |\
+              while read item
+       	      do
+       	        extern_file=`echo "${item}" | awk "{print substr(\\$0,length(\"${MOD}\")+1)}"`
+                mv "${item}" "${key_value}${extern_file}"
+       	      done
+       	      cd ${D_MODULE}
+       	      mv "${MOD}" "${key_value}"
+       	      MOD="${key_value}"       	      
+       	    fi
+       	  fi
+       	fi
+
+       	mod_name=`awk -F'[<>/:]' '/md:Name/{print $4}' "${MOD}/Configure/install.rdf"`
+       	
+        cat ${MOD}/Configure/install.rdf | \
+        awk -F'[<>:]' "BEGIN{printf \"$count,'${MOD}','${mod_name}'\"}/<md:Version>/||/<md:Description>/||/<md:UI>/{printf \",'%s'\",\$4}END{printf \",'$ver',\"}" \
+        >> ${D_MODULE}/module.list
+       
+        if [ -f "${D_MODULE}/${MOD}"/Configure/Guide.pdf ];then
+        	GUIDE_PATH=`realpath "${D_MODULE}/${MOD}"/Configure/Guide.pdf`
+	        if [ "$?" = "0" ];then
+        	   GUIDE_PATH="1"
+	        else
+        	   GUIDE_PATH=""
+	        fi
+	else 
+       	   GUIDE_PATH=""
+	fi
+	if [ -f "${D_MODULE}/${MOD}"/Configure/Note ];then
+	        NOTE_PATH=`realpath "${D_MODULE}/${MOD}"/Configure/Note`
+        	if [ "$?" = "0" ];then
+	           NOTE_PATH="1"
+        	else
+	           NOTE_PATH=""
+        	fi
+	else 
+       	   NOTE_PATH=""
+        fi
+        printf "'Disk||${GUIDE_PATH}|${NOTE_PATH}'" >> ${D_MODULE}/module.list
+        
+        count=`expr ${count} + 1`
+  
+  	rdf2db ${PRE_DB} ${MOD} ${MOD}/Configure/install.rdf
+      fi
+    done
+    
+    list_air ${ModuleName} ${count} >> ./module.list
+    
+#    printf "]\n" >> ${D_MODULE}/module.list
+  fi
+  cat ${D_MODULE}/module.list
+  cd - > /dev/null 2>&1
+}
+
+#################################################
+##       check val1 > val2
+##       param : val1
+##               val2
+##       return : 0/1(OK/Error)
+#################################################
+compare(){
+  val1=$1
+  val2=$2
+  ret=0
+  val1=`echo "${val1}" | awk -F'.' '{print $1*10000+$2*100+$3}'`
+  val2=`echo "${val2}" | awk -F'.' '{print $1*10000+$2*100+$3}'`
+  
+  if [ ${val1} -lt ${val2} ];then
+    ret=1
+  fi
+  echo ${ret}
+}
+
+#################################################
+##       check depend module
+##       param:   mod_name : module name
+#################################################
+check_depend_modue(){
+  MOD=$1
+  DB=$2
+  ret=0
+  depend_data=`${SQL} ${DB} "select gid from mod where module = '${MOD}' and predicate = 'DependName'"`
+  
+  if [ "${depend_data}" != "" ];then
+  for gid in ${depend_data}
+  do    
+    mod_name=`${SQL} ${DB} "select object from mod where module = '${MOD}' and predicate = 'DependName' and gid='${gid}'"`
+    mod_version=`${SQL} ${DB} "select object from mod where module = '${MOD}' and predicate = 'DependVer' and gid='${gid}'"`
+    if [ "${mod_name}" == "" ];then
+      continue
+    fi
+    mod_url=`${SQL} ${DB} "select object from mod where module = '${MOD}' and predicate = 'DependUrl' and gid='${gid}'"`
+    if [ "${mod_url}" != "" ];then
+      mod_url="(${mod_url})"
+    fi
+    mod_exist=`${SQL} ${MOD_DB} "select module from mod where module != '${MOD}' and object = '${mod_name}' and predicate = 'Name'"`
+
+    if [ "${mod_exist}" != "" ];then
+      inversion=`${SQL} ${MOD_DB} "select object from mod where module = '${mod_exist}' and predicate = 'Version'"`
+      ret=`compare "${inversion}" "${mod_version}"`
+      if [ "${ret}" == "1" ];then
+        set_word "${M_tmp_log_file}" "module" "no_depend_mod" "${mod_name}" "${mod_version}" "${mod_url}"
+      fi
+    else
+      ret=1      
+      set_word "${M_tmp_log_file}" "module" "no_depend_mod" "${mod_name}" "${mod_version}" "${mod_url}"
+    fi
+  done
+  fi
+  echo $ret
+}
+
+#################################################
+##       create lock flag
+#################################################
+create_lock(){
+  if [ ! -e "${M_tmp_path}" ];then
+    mkdir -p "${M_tmp_path}"
+  fi
+  echo "0" > "$M_lock_flag"
+  rm "${M_tmp_log_file}"
+}
+
+#################################################
+##       get action is install or upgrate
+##       param : MOD: module name
+##       return : install/update
+#################################################
+get_install_type(){
+  MOD=$1
+  if [ "$module_exist" == "1" ];then
+    if [ -e "${D_MODULE}/${MOD}/Shell/upgrade.sh" ];then
+      act="update"
+    else
+      act="install"  
+    fi
+  else
+    act="install"
+  fi
+  echo "${act}"
+}
+
+#################################################
+##       before install action
+##       param : MOD: module name
+##               DB: module.db
+#################################################
+before_install(){
+  MOD=$1
+  DB=$2  
+
+  install_type=`get_install_type ${MOD}`
+  set_install_act "${install_type}" "${MOD}" 
+  name=`${SQL} ${DB} "select object from mod where module='${MOD}' and predicate='Name'"`
+  version=`${SQL} ${DB} "select object from mod where module='${MOD}' and predicate='Version'"`
+  set_word "${M_tmp_log_file}" "module" "module_name_msg" "${name}"
+  set_word "${M_tmp_log_file}" "module" "module_version_msg" "${version}"
+  set_word "${M_tmp_log_file}" "module" "${M_start_word}" "${name}" 
+  ret=`check_depend_modue "${MOD}" "${DB}"`
+  
+  if [ "${ret}" == "1" ];then
+    recover_mod "${MOD}"
+    set_word "${M_tmp_log_file}" "module" "${M_fail_msg}"
+    ${M_event} 997 "${M_fail_code}" error email "${name}"
+    cp "${M_tmp_log_file}" "${MOD_PATH}/${MOD}/log.txt"
+    del_tmp_file "${MOD}"
+    exit
+  fi
+  
+ 
+}
+
+#################################################
+##       install/upgrade module
+##       param : MOD: module name
+#################################################
+install(){
+  if [ "$1" = "" ];then
+#    echo Need Module name!
+    return
+  fi
+  MOD=$1
+  module_exist=`backup_module "${MOD}" "auto_module"`
+  before_install "${MOD}" "${PRE_DB}"
+  ${SQL} ${MOD_DB} "delete from mod where module='${MOD}'"
+
+  ${SQL} ${MOD_DB} "delete from module where name='${MOD}'"
+
+  ${SQL} ${PRE_DB} ".dump" | grep ${MOD} | ${SQL} ${MOD_DB}
+
+  ln -fs ${D_MODULE}/${MOD} /raid/data/tmp/module
+
+  cd  ${D_MODULE}/${MOD}
+
+  ret=`execute_install "${MOD}" "${install_type}"`
+  rm -f /raid/data/tmp/module
+  if [ "${ret}" == "pass" ];then
+    remove "${MOD}"
+  fi
+  del_tmp_file "${mod_name}"
+}
+
+#################################################
+##       install online module
+##       param : MOD: module
+##               MOD_URL: module url
+##               MOD: module real name
+#################################################
+online(){
+  MOD=$1
+  MOD_URL=$2
+  MOD_NAME=$3
+  DIR=`pwd`
+  ONLINE_MODULE_TMP="module_tmp"
+  cd ${MOD_TMP}
+  mkdir ${ONLINE_MODULE_TMP} 
+  cd ${ONLINE_MODULE_TMP}
+  set_word "${M_tmp_log_file}" "module" "download_mod" "${MOD_NAME}"
+      ${WGET} -q -t 3 $2 -O ${MOD}.zip
+      if [ $? != 0 ];then
+    set_word "${M_tmp_log_file}" "module" "download_mod_fail" "${MOD_NAME}"
+    cd ${MOD_TMP}
+    lib_remove_file "${ONLINE_MODULE_TMP}"
+    del_tmp_file "${MOD}"
+        return
+      fi
+  UMOD_NAME=`unzip -o ${MOD}.zip | awk -F ': ' '/ inflating: /||/ extracting: /{print $2}' | head -1`
+  tmp_dd="module.dd"
+  dd if=${UMOD_NAME} of=${tmp_dd} count=4 bs=1
+  APPMOD=`hexdump ${tmp_dd} | head -1 | awk '$1~/0000000/&&$2~/8b1f/{print "1"}'`
+  rm -rf ${tmp_dd}
+  if [ "${APPMOD}" != "1" ];then
+    des -k AppModule -D ${UMOD_NAME} ${MOD}.tar.gz
+  else
+    mv ${UMOD_NAME} ${MOD}.tar.gz
+  fi
+  EMOD_NAME=`tar -tf ${MOD}.tar.gz | head -1 | awk '{print substr($0,0,length($0)-1)}'`
+  tar zxvf ${MOD}.tar.gz > /dev/null 2>&1
+  if [ "${EMOD_NAME}" != "${MOD}" ];then
+      mv ${MOD_TMP}module_tmp/${EMOD_NAME} ${MOD_TMP}module_tmp/${MOD}
+  fi
+  module_exist=`backup_module "${MOD}"  "auto_module"`
+  ${SQL} ${MOD_DB} "delete from mod where module='${MOD}'"
+  ${SQL} ${MOD_DB} "delete from module where name='${MOD}'"
+  ln -fs ${MOD_TMP}module_tmp/${MOD} /raid/data/tmp/module
+      rdf2db ${MOD_DB} ${MOD} ./${MOD}/Configure/install.rdf
+  before_install "${MOD}" "${MOD_DB}"
+  cd "${MOD}"
+  execute_install "${MOD}" "${install_type}"
+  
+  cd ${MOD_TMP} > /dev/null 2>&1
+  lib_remove_file "module"
+  lib_remove_file "${ONLINE_MODULE_TMP}"  
+  del_tmp_file "${MOD}"
+  cd ${DIR}
+}
+
+#################################################
+##       scan _NAS_Module_Source_
+#################################################
+scan(){
+  cd ${MOD_SRC}
+  for folder in ${D_TMP} ${D_MODULE}
+  do
+    if [ ! -d ${folder} ];then
+      mkdir ${folder}
+    fi
+  done
+  rm -rf ${D_TMP}/* ${D_MODULE}/*
+  for mod in *
+  do
+    if [ "${mod}" = "" ];then continue ;fi
+    if [ -f ${mod} ];then
+      mod_md5=""
+      if [ -f ${mod}.md5 ];then
+        mod_md5=${mod}.md5
+      elif [ -f ${mod}.sum ];then
+        mod_md5=${mod}.sum
+      fi
+      if [ -f "${mod_md5}" ];then
+        if [ "`awk '{print $1}' ${mod_md5}`" != "`md5sum ${mod} | awk '{print $1}'`" ];then
+          break
+        fi
+        dd if=${mod} of=${mod}.dd count=4 bs=1
+        if [ "`hexdump ${mod}.dd | head -1 | awk '$1~/0000000/&&$2~/8b1f/{print \"1\"}'`" = "1" ];then
+          cp -rf ${mod} ${D_TMP}/${mod}.tar.gz
+        else
+          des -k AppModule -D ${mod} ${D_TMP}/${mod}.tar.gz
+        fi
+        rm -rf ${mod}.dd
+        tar zxvf ${D_TMP}/${mod}.tar.gz -C ${D_MODULE} > /dev/null 2>&1
+        MOD=`tar zvft ${D_TMP}/${mod}.tar.gz | head -1 | awk '{print $6}'`
+        if [ -f "${mod}".note -a ! -f ${D_MODULE}/${MOD}/Configure/Note ];then
+          cp "${mod}".note ${D_MODULE}/${MOD}/Configure/Note
+        fi
+        if [ -f "${mod}".guide.pdf -a ! -f ${D_MODULE}/${MOD}/Configure/Guide.pdf ];then
+          cp "${mod}".guide.pdf ${D_MODULE}/${MOD}/Configure/Guide.pdf
+        fi
+      fi
+    fi
+  done
+  rm -rf ${D_MODULE}/module.list
+  cd - > /dev/null 2>&1
+}
+
+#################################################
+##       upload file
+#################################################
+upload(){
+  if [ ! -f ${PACKAGE} ];then
+    return
+  fi
+
+  unzip -o ${PACKAGE} -d ${MOD_TMP}
+  cp -f ${MODULES}/* ${MOD_SRC}
+  rm -rf ${MODULES}
+  rm -rf ${PACKAGE}
+}
+
+#################################################
+##       remove temp module
+#################################################
+remove(){
+  if [ "$1" = "" ];then
+    #echo Need Module name!
+    return
+  fi
+  MOD=$1
+
+  ${SQL} ${PRE_DB} "delete from mod where module='${MOD}'"
+  ${SQL} ${PRE_DB} "delete from module where name='${MOD}'"
+
+  rm -rf ${MOD_SRC}/${MOD}_*
+  rm -rf ${D_TMP}/${MOD}_*
+  rm -rf ${D_MODULE}/${MOD}
+}
+
+check_raid(){
+  sys_path=`/bin/ls -l /raid/sys | awk -F' ' '{printf $11}'`
+  data_path=`/bin/ls -l /raid/data | awk -F' ' '{printf $11}'`
+  if [ "$sys_path" == "" ] || [ "$data_path" == "" ];
+  then
+    echo "Your Master RAID link is not exist"
+    exit
+  fi
+}
+
+boot(){
+  if [ ! -d "${MOD_SRC}" ];then
+      /img/bin/create_sys_folder.sh "_NAS_Module_Source_" "" "yes" "yes"
+    fi
+  
+  if [ ! -d "${D_MODULE}" ] || [ ! -d ${D_TMP} ];then
+    scan
+  fi
+}
+
+check_raid
+
+####################################################################
+#       Check producer
+####################################################################
+if [ "${producer}" != "THECUS" ];
+then
+  echo "Not support this function!"
+  exit 1
+fi
+
+#################################################
+##      Main code
+#################################################
+case "$1"
+in
+  list)
+    list
+  ;;
+
+  install)
+    create_lock
+    install $2
+  ;;
+  
+  online)
+    create_lock
+    online $2 $3 "$4"
+  ;;
+  
+  scan)
+    scan
+  ;;
+
+  upload)
+    upload
+  ;;
+
+  remove)
+    remove $2
+  ;;
+
+  boot|start)
+    boot
+  ;;
+  
+  *)
+    echo "Usage: $0 { list |online modulename moduleurl | install modulename | scan | upload | remove modulename | boot | start}"
+  ;;
+esac
+        

@@ -1,0 +1,349 @@
+#!/bin/sh
+if [ $# -lt 1 ]; then
+echo "Need At Least one argument : Event ID"
+exit 1
+fi
+event_id=${1}
+param_1=${2}
+param_2=${3}
+param_3=${4}
+param_4=${5}
+param_5=${6}
+param_6=${7}
+param_7=${8}
+occur_time=`date "+%Y-%m-%d %H:%M:%S"`
+msmtp="/usr/bin/msmtp"
+sqlite="/usr/bin/sqlite"
+confdb="/etc/cfg/conf.db"
+moddb="/raid/data/module/cfg/module.db"
+ip_addr=`/sbin/ifconfig eth0|grep "addr:"|awk '{print substr($2,RSTART+6)}'`
+md_list=`awk -F ':' '/^md[0-9] /||/^md6[0-9]/{print substr($1,3)}' /proc/mdstat|sort -u`
+for md in $md_list
+do
+  ismaster=`$sqlite /raidsys/${md}/smb.db "select v from conf where k='raid_master'"`
+  if [ ${ismaster} == "1" ] && [ ! -f "/raidsys/${md}/ha_raid" ];then
+    model=`cat /proc/mdstat|grep "md${md} "|cut -d ' ' -f4`
+  fi
+done
+
+host_name=`hostname`
+body='%s level event occurred
+
+This notification message is generated automatically from %s (%s).
+The system experienced the following event(s).
+
+%s
+
+Please be aware of the event(s) above. Also if necessary, please react to the 
+event(s).
+
+==============================================
+The automated message is generated at %s by %s (%s) (%s).
+'
+
+#################################################
+##	Define procedure
+#################################################
+get_domainname() {
+	sqlcmd="select v from conf where k like 'nic1_domainname%'"
+	nicdomain=`${sqlite} ${confdb} "${sqlcmd}"`
+	if [ "$event_id" != "MSNTest" ];then
+		sqlcmd="select v from conf where k = 'notif_from'"
+		notif_from=`${sqlite} ${confdb} "${sqlcmd}"`
+		if [ "$notif_from" != "" ];then
+			echo ${notif_from}
+		else
+			echo "admin@$host_name.$nicdomain"
+		fi
+	else
+		if [ "${param_6}" != "" ];then
+			echo ${param_6}
+		else
+			echo "admin@$host_name.$nicdomain"
+		fi
+	fi
+}
+
+## called to retrieve user's setting about notification
+get_notif_setting() {
+	if [ "$event_id" != "MSNTest" ];then
+        	## msn, beep
+        	if [ ! "$1" = "" ];then
+                	field=notif_"${1}"
+	                sqlcmd="select enable from module where name='MSN_Notification'"
+        	        ${sqlite} ${moddb} "${sqlcmd}"
+        	fi
+	else
+		echo "Yes"
+	fi
+}
+
+## format msn body to send out
+generate_body() {
+	if [ "${model}" = "linear" ]; then
+		model=JBOD
+	fi
+
+      case $event_id in
+           MSNTest)
+#test
+	   level="information"
+	   description="
+This is a test MSN sent by [${host_name}].
+If you received this MSN, that means the configuration was set up correctly.
+		"
+	   msn_msg=`printf "${body}" "${level}" "${host_name}" "${ip_addr}" "${description}" "${occur_time}" "${host_name}" "${model}" "${ip_addr}"`
+	   exit 0
+	   ;;
+           201)
+#025-201
+	   level="Warning"
+	   description="
+The system [${host_name}] temperature is higher than 65 degree celsius! The buzzer will beep until the system temperature is below 65 degree celsius.
+                "
+	   ;;
+           202)
+#029-202
+	   level="Warning"
+          description="
+The system [${host_name}] temperature is normal.
+                "
+	   ;;
+           203)
+#037-203
+	    level="Warning"
+           description="
+The ADS server ${param_1} connection was lost.
+                "
+	   ;;
+           204)
+#038-204
+	   level="error"
+	   description="
+The RAID [${param_1}] on system [${host_name}] is suffering from severe disk problem.
+RAID is damaged. Unfortunately, the data in RAID are lost. 
+Please solve the disk problem (e.g. replacing with a new hard disk). 
+RAID can be re-initialized later by an administrator.
+		"
+	   ;;
+           205)
+#040-205
+	   level="warning"
+	   description="
+The RAID [${param_1}] on system [${host_name}] is recovering the RAID and rebuilding is in progress.
+		"
+	   ;;
+           206)
+#042-206
+	   level="warning"
+	   description="
+The RAID [${param_1}] on system [${host_name}] is suffering from disk problem.
+RAID status is DEGRADED now. However, the data access is still functional. 
+Please solve the disk problem (e.g. replacing with a new hard disk). 
+The system will bring RAID back to the healthy state automatically.	
+		"
+	   ;;
+           207)
+#044-207
+	   level="warning"
+	   description="The RAID [${param_1}] on system [$host_name] is healthy now."
+	   ;;
+           208)
+#051-208
+	   level="warning"
+	   description="
+Hard Disk ${param_1} on [${host_name}] has an I/O error.
+This hard disk might have bad sectors on it.  
+Please replace the hard disk as soon as possible.
+		"
+	   ;;
+           209)
+#053-209
+	   level="warning"
+	   description="
+The system [${host_name}]'s Flash memory is full.
+Please check the system as soon as possible.
+		"
+	   ;;
+           210)
+#055-210
+	   level="warning"
+	   raid_name=$param_1
+	   description="
+The system [${host_name}]'s $raid_name disk usage has reached 90%.
+		"
+	   ;;
+           211)
+#062-211
+	   Task=${param_1}
+	   level="warning"
+	   description="
+Network Synchronization: Task ${Task} has failed, because the target machine is unreachable.
+		"
+	   ;;
+           212)
+#063-212
+	   Task=${param_1}
+	   level="warning"
+	   description="
+Network Synchronization: Task ${Task} has failed due to last task still in processing.
+		"
+	   ;;
+#new-213
+           213)
+	   Task=${param_1}
+	   level="warning"
+	   description="
+The system [${host_name}] doesn't contain any existing RAID configuration now.
+		"
+	   ;;
+           214)
+#049-214
+	   level="warning"
+	   description="
+Disk ${param_1} on [${host_name}] has been removed.
+		"
+           ;;
+           215)
+#050-215	
+	   level="error"
+	   description="
+Disk ${param_1} on [${host_name}] has failed.
+		"
+	   ;;
+           216)
+#031-216	
+	   level="error"
+	   description="
+The system fan has failed. Please shut down the system to prevent overheat.
+		"
+	   ;;
+#UPS Event
+	   			 217)
+	   level="warning"
+	   description="
+The AC Power has recovered for system [${host_name}].
+		"
+	   ;;
+	   			 218)
+	   level="warning"
+	   description="
+The system [${host_name}] is on battery power.
+UPS Model : ${param_1}   Battery Status : ${param_2} %    Power : Battery
+		"
+	   ;;
+	   			 219)
+	   level="warning"
+	   description="
+The system [${host_name}] found UPS has low battery.
+		"
+	   ;;
+	   			 220)
+	   level="warning"
+	   description="
+The system [${host_name}] found UPS has being shutdown by the master.
+		"
+	   ;;
+	   			 221)
+	   level="warning"
+	   description="
+The system [${host_name}] found communications established with the UPS.
+		"
+	   ;;
+	   			 222)
+	   level="warning"
+	   description="
+The system [${host_name}] found communications lost to the UPS.
+The USB UPS connection failed could caused by system reboot, please unplug/plug and re-enable USB UPS again to correct it.
+		"
+	   ;;
+	   			 223)
+	   level="warning"
+	   description="
+The system [${host_name}] will be shutdown by UPS trigger.
+		"
+	   ;;
+	   			 224)
+	   level="warning"
+	   description="
+The system [${host_name}] found UPS battery is bad and needs to be replaced.
+		"
+	   ;;
+	   			 225)
+	   level="warning"
+	   description="
+The system [${host_name}] found UPS is unavailable.
+		"
+	   ;;
+	   			 226)
+	   level="warning"
+	   description="
+The system [${host_name}] found UPS has low battery less then user define ,and system will auto shutdown.
+		"
+	   ;;
+	                         227)
+	   disk_tray=${param_1}
+	   level="information"
+	   description="
+The FileSystem Check RAID [ $disk_tray ] is Success and NO Error to be found.
+		"
+           ;;
+                                 228)
+           error_code_sys=${param_1}
+           error_msg_sys=${param_2}
+           raid_id=${param_3}
+           level="error"
+           description="
+The FileSystem Check [$raid_id] is done.This work have something error.
+The result code is \"${error_code_sys}\".
+The result massage is \"${error_msg_sys}\".
+		"
+           ;;
+           229)
+#227-217
+	      level="information"
+              Time=${param_1}
+	      description="
+The system [${host_name}] booted at ${Time} as scheduled.
+		"
+           ;;
+           230)
+#228-218
+	      level="information"
+              Time=${param_1}
+	      description="
+The system [${host_name}] is shutting down at ${Time} as scheduled.
+		"
+           ;;
+           231)
+	   level="information"
+	   description="
+The system [${host_name}] boot successfully..
+                "
+		;;
+           997)
+             ##########################################
+             #    Event_ID=$event_id
+             #    Event_Message_ID=$param_1
+             #    Level=$param_2
+             #    MSG=$param_3
+             ##########################################
+             event_id_tmp=$event_id
+             event_id=${param_1}
+             level=${param_2}
+             description="${param_3}"
+           ;;
+	   *)
+		exit 1
+	   ;;
+      esac
+
+	msn_msg=`printf "${body}" "${level}" "${host_name}" "${ip_addr}" "${description}" "${occur_time}" "${host_name}" "${model}" "${ip_addr}"`
+}
+
+setting=`get_notif_setting msn`
+if [ "${setting}" = "Yes" ]; then
+	generate_body
+	sh /raid/data/module/MSN_Notification/shell/msnsendmsg.sh "$msn_msg"
+fi
+

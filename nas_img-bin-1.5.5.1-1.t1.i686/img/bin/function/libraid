@@ -1,0 +1,269 @@
+#!/bin/sh
+#==================================================
+#        FILE:  raid library
+# DESCRIPTION:  library for share folder
+#       NOTES:  none
+#      AUTHOR:  enian
+#     VERSION:  1.0.0
+#     CREATED:  2011/6/30
+#    REVISION:  2011/6/30
+#==================================================
+
+#==================================================
+#  Variable Defined
+#==================================================
+Lraid_NasKey="`/img/bin/check_service.sh "arch"`"  # Nas Type
+Lraid_Sqlite="/usr/bin/sqlite"                   # sqlite path
+
+#==================================================
+#  Function Defined
+#==================================================
+
+#################################################
+#         NAME:  Lraid_check_raid
+#  DESCRIPTION:  check has any raid
+#      PARAM 1:  none
+#       RETURN:  none
+#       AUTHOR:  enian
+#      CREATED:  30,06,2011
+#################################################
+Lraid_check_raid(){
+    local Lraid_fSysPath="`/bin/ls -l /raid/sys | awk -F' ' '{printf $11}'`"
+    local Lraid_fDataPath="`/bin/ls -l /raid/data | awk -F' ' '{printf $11}'`"
+
+    if [ "${Lraid_fSysPath}" == "" ] || [ "${Lraid_fDataPath}" == "" ];
+    then
+        echo "Your Master RAID link is not exist"
+        exit
+    fi
+    if [ "${Lraid_NasKey}" == "x86_32" ];then
+        local Lraid_fMountSys="`/bin/mount | grep "${Lraid_fSysPath}"`"
+        local Lraid_fMountData="`/bin/mount | grep "${Lraid_fDataPath}"`"
+    else
+        local Lmaster_raid="`Lraid_get_master_raid`"
+        local Lmaster_id="`echo "${Lmaster_raid}" | awk '{print substr($0,5)}'`"
+        local Lraid_fMountSys="`/bin/mount | grep "/raidsys/${Lmaster_id}"`"
+        local Lraid_fMountData="`/bin/mount | grep "${Lmaster_raid}"`"
+    fi
+    if [ "${Lraid_fMountSys}" == "" ] || [ "${Lraid_fMountData}" == "" ];
+    then
+        echo "Your RAID is not mounted"
+        exit
+    fi
+}
+
+#################################################
+#         NAME:  Lraid_get_md_list
+#  DESCRIPTION:  get all raid md number
+#      PARAM 1:  none
+#       RETURN:  md number list
+#       AUTHOR:  enian
+#      CREATED:  30,06,2011
+#################################################
+Lraid_get_md_list(){
+    local Lraid_fMdList # md number list
+
+    if [ "${Lraid_NasKey}" == "x86_32" ];then
+        Lraid_fMdList="`cat /proc/mdstat | awk -F: '/^md[1-9] :/{print substr($1,3)}' | sort -u`"
+    else
+        Lraid_fMdList="`cat /proc/mdstat | awk '/^md6[0-9] :/{print substr($1,3)}' | sort -u`"
+        if [ "${Lraid_fMdList}" == "" ];then
+            Lraid_fMdList="`cat /proc/mdstat | awk -F: '/^md[0-9] :/{print substr($1,3)}' | sort -u`"
+        fi
+    fi
+
+    echo "${Lraid_fMdList}"
+}
+
+#################################################
+#         NAME:  Lraid_md_to_raidid
+#  DESCRIPTION:  change md number to raid number
+#      PARAM 1:  Lraid_fMd: md number
+#       RETURN:  raid number list
+#       AUTHOR:  enian
+#      CREATED:  30,06,2011
+#################################################
+Lraid_md_to_raidid(){
+    local Lraid_fMd=$1
+    local Lraid_fRaidId    # raid id
+
+    if [ "${Lraid_NasKey}" == "x86_32" ];then
+        Lraid_fRaidId="$(($Lraid_fMd-1))"
+    else
+        Lraid_fRaidId="${Lraid_fMd}"
+    fi
+    echo "${Lraid_fRaidId}"
+}
+
+#################################################
+#         NAME:  Lraid_raidid_to_md
+#  DESCRIPTION:  change raid number to md number
+#      PARAM 1:  Lraid_fRaidId: raid number
+#       RETURN:  md number list
+#       AUTHOR:  enian
+#      CREATED:  30,06,2011
+#################################################
+Lraid_raidid_to_md(){
+    local Lraid_fMd
+    local Lraid_fRaidId=$1                                   # raid id
+
+    if [ "${Lraid_NasKey}" == "x86_32" ];then
+        Lraid_fMd="$(($Lraid_fRaidId+1))"
+    else
+        Lraid_fMd="${Lraid_fRaidId}"
+    fi
+    echo "${Lraid_fMd}"
+}
+
+#################################################
+#         NAME:  Lraid_check_raid_exist
+#  DESCRIPTION:  check one raid exist
+#      PARAM 1:  Lraid_fMd: md number
+#       RETURN:  md number list
+#       AUTHOR:  enian
+#      CREATED:  30,06,2011
+#################################################
+Lraid_check_raid_exist(){
+    local Lraid_fMd="$1"                                     # md number
+    local Lraid_fRaidId="`Lraid_md_to_raidid "${Lraid_fMd}"`"  # raid id
+    local Lraid_fRet="0"                                     # error code
+    local Lraid_SearchStr                                    # search string
+    local Lraid_fCheckMountData                              # mount data
+
+    if [ "${Lraid_NasKey}" == "x86_32" ];then
+        Lraid_SearchStr=" /raid${Lraid_fRaidId}/data "
+    else
+        Lraid_SearchStr=" /raid${Lraid_fRaidId} "
+    fi
+                                                                        
+    Lraid_fCheckMountData="`/bin/mount | grep "${Lraid_SearchStr}"`"
+    
+    if [ "${Lraid_fCheckMountData}" == "" ];then
+        Lraid_fRet="1"
+    fi
+    echo "${Lraid_fRet}"
+}
+
+#################################################
+#         NAME:  Lraid_get_raidmd_list
+#  DESCRIPTION:  get already mount raid md number list
+#      PARAM 1:  none
+#       RETURN:  already mountraid md number list
+#       AUTHOR:  enian
+#      CREATED:  30,06,2011
+#################################################
+Lraid_get_raidmd_list(){
+    local Lraid_fMdList="`Lraid_get_md_list`"                  # Md number List
+    local Lraid_fRaidList=""                                 # Raid md number List
+    local Lraid_fMd                                          # one Raid md
+
+    for Lraid_fMd in ${Lraid_fMdList}
+    do
+        if [ "${Lraid_fMd}" != "" ];then
+            Lraid_fCheckMountRaid="`Lraid_check_raid_exist "${Lraid_fMd}"`"
+            
+            if [ "${Lraid_fCheckMountRaid}" == "0" ];then
+                if [ "${Lraid_fRaidList}" == "" ];then
+                    Lraid_fRaidList="${Lraid_fMd}"
+                else
+                    Lraid_fRaidList="${Lraid_fRaidList} ${Lraid_fMd}"
+                fi
+            fi
+        fi
+    done
+
+    echo "${Lraid_fRaidList}"
+}
+
+#################################################
+#         NAME:  Lraid_get_raid_info
+#  DESCRIPTION:  get one raid information
+#      PARAM 1:  Lraid_fMd: md number
+#      PARAM 2:  Lraid_fAttr: raid attribute for db
+#       RETURN:  raid information
+#       AUTHOR:  enian
+#      CREATED:  30,06,2011
+#################################################
+Lraid_get_raid_info(){
+    local Lraid_fMd="$1"
+    local Lraid_fRaidId="`Lraid_md_to_raidid "${Lraid_fMd}"`" #raid id
+    local Lraid_fAttr="$2"
+    local Lraid_fSys="/raid${Lraid_fRaidId}/sys"            #raid sys folder path
+    local Lraid_fVal                                        #raid information value
+    
+    if [ "${Lraid_NasKey}" == "x86_32" ];then
+        Lraid_fRaiddb="${Lraid_fSys}/raid.db"
+    else
+        Lraid_fRaiddb="${Lraid_fSys}/smb.db"
+    fi
+    if [ -f "${Lraid_fRaiddb}" ];then
+        Lraid_fVal="`${Lraid_Sqlite} ${Lraid_fRaiddb} "select v from conf where k='${Lraid_fAttr}'"`"
+    fi
+    echo "${Lraid_fVal}"
+}
+
+
+#################################################
+#         NAME:  Lraid_get_raid_status
+#  DESCRIPTION:  get raid status information
+#      PARAM 1:  Lraid_fMd: md number
+#       RETURN:  raid status information
+#       AUTHOR:  enian
+#      CREATED:  30,06,2011
+#################################################
+Lraid_get_raid_status(){
+    local Lraid_fMd="$1" 
+    local Lraid_fRaidId="`Lraid_md_to_raidid "${Lraid_fMd}"`" # raid id
+    local Lraid_fStatus                                     # raid status
+
+    Lraid_fStatus="`cat /var/tmp/raid${Lraid_fRaidId}/rss`"
+    echo "${Lraid_fStatus}"
+}
+
+#################################################
+#         NAME:  Lraid_get_master_raid
+#  DESCRIPTION:  get master raid folder
+#      PARAM 1:  none
+#       RETURN:  master raid folder name
+#       AUTHOR:  enian
+#      CREATED:  30,06,2011
+#################################################
+Lraid_get_master_raid(){
+    local Lraid_fMasterRaid="`ls -al /var/tmp/rss | awk '{print $NF}' | awk -F'/' '{print $4}'`"
+    echo "${Lraid_fMasterRaid}"
+}
+
+#################################################
+#         NAME:  Lraid_check_ismasterraid
+#  DESCRIPTION:  check raid is master raid
+#      PARAM 1:  Lraid_fMd: md number
+#       RETURN:  0/1 (yes/no)
+#       AUTHOR:  enian
+#      CREATED:  30,06,2011
+#################################################
+Lraid_check_ismasterraid(){
+    local Lraid_fMd="$1" 
+    local Lraid_fRaidId="`Lraid_md_to_raidid "${Lraid_fMd}"`"
+    local Lraid_fVal=0
+
+    if [ "raid${Lraid_fRaidId}" == "`Lraid_get_master_raid`" ];then
+        Lraid_fVal=1
+    fi
+    
+    echo "${Lraid_fVal}"
+}
+
+#################################################
+#         NAME:  Lraid_get_raid_uuid
+#  DESCRIPTION:  get raid uuid
+#      PARAM 1:  Lraid_fMd: md number
+#       RETURN:  raid uuid
+#       AUTHOR:  enian
+#      CREATED:  30,06,2011
+#################################################
+Lraid_get_raid_uuid(){
+    local Lraid_fMd="$1"
+    local Lraid_fUUID="`mdadm -D /dev/md${Lraid_fMd} | awk -F' : ' '/ UUID /{print $2}'`"
+    echo "${Lraid_fUUID}"    
+}
+

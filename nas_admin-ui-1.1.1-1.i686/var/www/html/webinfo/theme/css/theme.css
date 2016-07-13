@@ -1,0 +1,398 @@
+
+.t-ctl {
+    background:url(/theme/images/t/base/ctl-bg.png) repeat;
+}
+.t-ctl-bar {
+    background: 40px 20px url(/theme/images/t/base/logo.png) no-repeat;
+    height: 45px;
+    margin-right: 10px;
+    padding-top: 15px;
+    border: 0px;
+}
+
+/**
+ * Define t-nav-bar style
+ */
+.t-nav-bar {
+    background:url(/theme/images/t/base/bg_myFav.png) repeat-x;
+    padding: 0px;
+}
+
+/**
+ * Define t-nav-index style
+ */
+.t-nav-index {
+    color: black;
+}
+.t-nav-index .x-toolbar td, .x-toolbar span {
+    font-family: calibri;
+    font-size: 16px;
+}
+
+/**
+ * Define t-nav-home style
+ */
+.t-nav-home {
+    width: 76px;
+    height: 40px;
+    background-size: 100% !important;
+    background: url(/theme/images/t/base/bg_favHome.png) no-repeat;
+}
+.t-nav-home-icon {
+    width: 36px;
+    height: 36px;
+    margin-top: 1px;
+    margin-left: 5px;
+    border: 0px;
+    background: 0px 0px url(/theme/images/t/base/icon_home.png) no-repeat;
+}
+.t-nav-home-icon:hover {
+    cursor: pointer;
+    background: -36px 0px url(/theme/images/t/base/icon_home.png) no-repeat;
+}
+.t-nav-home-icon:active {
+    background: 0px 0px url(/theme/images/t/base/icon_home.png) no-repeat;
+}
+
+/**
+ * Define t-admin-btn style
+ **/
+.t-admin-btn {
+    height: 28px;
+    background: url(/theme/images/t/base/black_bg.png) repeat-x;
+    border: 1px solid transparent;
+}
+.t-admin-btn .x-btn-left {
+    background: 2px 4px url(/theme/images/t/base/icon_admin.png) no-repeat;
+    padding-left: 16px;
+}
+.t-admin-btn button {
+    color: white;
+}
+/* Over style */
+.t-admin-btn.x-btn-over {
+    background: #497cc0;
+    border: 1px solid #AACCF6;
+}
+.t-admin-btn.x-btn-over .x-btn-left {
+    background: 2px 4px url(/theme/images/t/base/icon_admin.png) no-repeat;
+    padding-left: 16px;
+}
+.t-admin-btn.x-btn-over .x-btn-right {
+    background: transparent;
+}
+.t-admin-btn.x-btn-over .x-btn-center{
+    background: transparent;
+}
+.t-admin-btn.x-btn-over button{
+    color: white;
+}
+/* Active style */
+.t-admin-btn.x-btn-menu-active {
+    border: 1px solid black;
+}
+.t-admin-btn.x-btn-menu-active .x-btn-left {
+    background: 2px 4px url(/theme/images/t/base/icon_admin.png) no-repeat;
+    padding-left: 16px;
+}
+.t-admin-btn.x-btn-menu-active .x-btn-right {
+    background: transparent;
+}
+.t-admin-btn.x-btn-menu-active .x-btn-center{
+    background: transparent;
+}
+
+/**
+ * Define t-htlp-btn style
+ */
+.t-help-btn {
+    width: 20px;
+    height: 20px;
+    margin: 0px 5px 0px 5px;
+    background: 0px 0px url(/theme/images/t/base/icon_help.png) no-repeat;
+}
+.t-help-btn:hover {
+    width: 20px;
+    height: 20px;
+    margin: 0px 5px 0px 5px;
+    cursor: pointer;
+    background: 0px -19px url(/theme/images/t/base/icon_help.png) no-repeat;
+}
+
+/**
+ * Define t-log-btn style
+ */
+.t-log-zero {
+    width: 20px;
+    height: 20px;
+    margin: 0px 5px 0px 5px;
+    background: 0px 0px url(/theme/images/t/base/icon_log.png) no-repeat;
+}
+.t-log-more {
+    background: 0px -19px url(/theme/images/t/base/icon_log.png) no-repeat;
+}
+.t-log-zero:hover {
+    cursor: pointer;
+    background: 0px -19px url(/theme/images/t/base/icon_log.png) no-repeat;
+}
+
+/**
+ * Define t-nasapp-upgrade style
+ */
+.t-nasapp-upgrade {
+    width: 54px;
+    height: 18px;
+    margin: 0px 5px 0px 5px;
+    background: url(/theme/images/t/base/icon_nasapp_upgrade.gif) no-repeat;
+    cursor: pointer;
+}
+
+/**
+ * Define t-news-btn style
+ */
+.t-news-zero {
+    width: 18px;
+    height: 18px;
+    margin: 0px 5px 0px 5px;
+    background: 0px 0px url(/theme/images/t/base/icon_news.png) no-repeat;
+}
+.t-news-more {
+    background: 0px -18px url(/theme/images/t/base/icon_news.png) no-repeat;
+}
+.t-news-zero:hover {
+    cursor: pointer;
+    background: 0px -18px url(/theme/images/t/base/icon_news.png) no-repeat;
+}
+
+/**
+ * Define t-menu style
+ */
+.t-menu {
+    border: 0px;
+    background: #343940;
+}
+.t-menu a.x-menu-item {
+    color: #acb3bf;
+}
+.t-menu .x-menu-item-active {
+    background: #497cc0;
+}
+.t-menu .x-menu-item-active a.x-menu-item {
+    color: white;
+}
+
+/**
+ * Define t-search style
+ */
+.t-search {
+    background-image: url(/theme/images/t/base/icon_magnifier.png);
+    background-repeat:no-repeat;
+    background-position: right center;
+}
+.ext-strict .x-small-editor .x-form-text.t-search {
+    width: 150px !important;
+    height: 22px !important;
+}
+
+/**
+ * Define t-power-btn style
+ **/
+.t-power-btn {
+    background: transparent;
+    border: 0px;
+}
+.t-power-btn .x-btn-center em {
+    background: transparent;
+}
+.t-power-btn .x-btn-left {
+    width: 36px;
+    background: 0px 0px url(/theme/images/t/base/butn_power.png) no-repeat;
+    padding-left: 36px;
+}
+.t-power-btn button {
+    color: white;
+    height: 36px;
+}
+/* Over style */
+.t-power-btn.x-btn-over {
+    border: 0px;
+}
+.t-power-btn.x-btn-over .x-btn-left {
+    width: 36px;
+    background: 0px -36px url(/theme/images/t/base/butn_power.png) no-repeat;
+    padding-left: 36px;
+}
+.t-power-btn.x-btn-over .x-btn-right {
+    background: transparent;
+}
+.t-power-btn.x-btn-over .x-btn-center{
+    background: transparent;
+}
+.t-power-btn.x-btn-over button{
+    color: white;
+}
+/* Active style */
+.t-power-btn.x-btn-menu-active {
+    border: 0px;
+}
+.t-power-btn.x-btn-menu-active .x-btn-left {
+    width: 36px;
+    background: 0px -72px url(/theme/images/t/base/butn_power.png) no-repeat;
+    padding-left: 36px;
+}
+.t-power-btn.x-btn-menu-active .x-btn-right {
+    background: transparent;
+}
+.t-power-btn.x-btn-menu-active .x-btn-center{
+    background: transparent;
+}
+
+/**
+ * Define t-reboot-btn style
+ */
+.t-reboot-btn {
+    background: 4px 1px url(/theme/images/t/base/power_menu_reboot.png) no-repeat;
+}
+
+/**
+ * Define t-shutdown-btn style
+ */
+.t-shutdown-btn {
+    background: 4px 1px url(/theme/images/t/base/power_menu_shutdown.png) no-repeat;
+}
+
+/**
+ * Define t-raid-status style
+ */
+.t-raid-status {
+    width: 30px;
+    height: 30px;
+    margin-bottom: 3px;
+    cursor: pointer;
+    background: 0px 0px url(/theme/images/t/base/icon_status_raid.png) no-repeat;
+}
+.t-raid-status-inactive {
+    background: 0px -30px url(/theme/images/t/base/icon_status_raid.png) no-repeat;
+}
+.t-raid-status-active {
+    background: 0px -60px url(/theme/images/t/base/icon_status_raid.png) no-repeat;
+}
+
+/**
+ * Define t-fan-status style
+ */
+.t-disk-status {
+    width: 30px;
+    height: 30px;
+    margin-bottom: 3px;
+    cursor: pointer;
+    background: 0px 0px url(/theme/images/t/base/icon_status_disk.png) no-repeat;
+}
+.t-disk-status-inactive {
+    background: 0px -30px url(/theme/images/t/base/icon_status_disk.png) no-repeat;
+}
+.t-disk-status-active {
+    background: 0px -60px url(/theme/images/t/base/icon_status_disk.png) no-repeat;
+}
+
+/**
+ * Define t-fan-status style
+ */
+.t-fan-status {
+    width: 30px;
+    height: 30px;
+    margin-bottom: 3px;
+    cursor: pointer;
+    background: 0px 0px url(/theme/images/t/base/icon_status_fan.png) no-repeat;
+}
+.t-fan-status-inactive {
+    background: 0px -30px url(/theme/images/t/base/icon_status_fan.png) no-repeat;
+}
+.t-fan-status-active {
+    background: 0px -60px url(/theme/images/t/base/icon_status_fan.png) no-repeat;
+}
+
+/**
+ * Define t-ups-status style
+ */
+.t-ups-status {
+    width: 30px;
+    height: 30px;
+    margin-bottom: 3px;
+    background: 0px 0px url(/theme/images/t/base/icon_status_ups.png) no-repeat;
+}
+.t-ups-status-inactive {
+    background: 0px -30px url(/theme/images/t/base/icon_status_ups.png) no-repeat;
+}
+.t-ups-status-active {
+    background: 0px -60px url(/theme/images/t/base/icon_status_ups.png) no-repeat;
+}
+
+/**
+ * Define t-temp-status style
+ */
+.t-temp-status {
+    width: 30px;
+    height: 30px;
+    margin-bottom: 3px;
+    cursor: pointer;
+    background: 0px 0px url(/theme/images/t/base/icon_status_temp.png) no-repeat;
+}
+.t-temp-status-inactive {
+    background: 0px -30px url(/theme/images/t/base/icon_status_temp.png) no-repeat;
+}
+.t-temp-status-active {
+    background: 0px -60px url(/theme/images/t/base/icon_status_temp.png) no-repeat;
+}
+
+/**
+ * Define t-net-status style
+ */
+.t-net-status {
+    width: 30px;
+    height: 30px;
+    margin-bottom: 3px;
+    background: 0px 0px url(/theme/images/t/base/icon_status_network.png) no-repeat;
+}
+.t-net-status-inactive {
+    background: 0px -30px url(/theme/images/t/base/icon_status_network.png) no-repeat;
+}
+.t-net-status-active {
+    background: 0px -60px url(/theme/images/t/base/icon_status_network.png) no-repeat;
+}
+
+/**
+ * Define t-group-win style
+ */
+.t-group-win {
+    background:url(/theme/images/t/base/ctl-bg.png) repeat;
+    border: 1px solid #acb3bf;
+}
+.t-group-win .x-window-tl {
+    background: transparent;
+}
+.t-group-win .x-window-tr {
+    background: transparent;
+}
+.t-group-win .x-window-tc {
+    background: transparent;
+}
+.t-group-win .x-window-header {
+    text-align: center;
+}
+.t-group-win .x-window-header span {
+    color: white;
+}
+.t-group-win .x-tool-close {
+    background: 1px 3px url(/theme/images/t/base/popup_close.png) no-repeat;
+}
+
+.t-center-bg {
+    background:#c3d2e2;
+}
+.t-status {
+    background: url(/theme/images/t/base/black_bg.png) repeat-x;
+    border: 0px;
+    height: 40px;
+    padding: 2px 10px 0 10px;
+}

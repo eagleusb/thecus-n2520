@@ -1,0 +1,422 @@
+#!/bin/sh
+
+#################
+#initial
+################
+
+init(){
+	LANG=en_US
+	BASE="/etc/cfg/"
+	AP_LIST=${BASE}"iwlist.list"
+	ALL_AP=${BASE}"AP.list"
+	SQLITE="/usr/bin/sqlite3"
+	SQLITE_DB=${BASE}"cwireless.db"
+
+	NMCLI="/usr/bin/nmcli"
+	IFCONFIG="/sbin/ifconfig"
+	IWLIST="/sbin/iwlist"
+	IWCONFIG="/sbin/iwconfig"
+
+	DEVICE_NAME=`/bin/ls /sys/class/net/ | grep wlan | xargs | awk '{print $1}'`
+	if [ -n "$DEVICE_NAME" ]; then
+		${IFCONFIG} ${DEVICE_NAME} up
+		WIFI_STATE=`${NMCLI} dev | grep ${DEVICE_NAME} | awk '{print $3}'`
+			if [ "$WIFI_STATE" = "unavailable" ]; then	
+	 			WIFI_STATE=${WIFI_STATE}", NOT SUPPORT"
+			fi
+	else
+		WIFI_STATE="NO DEVICE"
+	fi
+}
+
+#################
+#start NetworkManager
+#################
+
+nm_start(){
+		service NetworkManager disable
+		service NetworkManager restart 2> /dev/null
+		#echo "NetworkManager start successfully"
+}
+
+gen_resolv(){
+       RESOLV_FILE_STATE=`cat /etc/resolv.conf | grep -v "#" | grep nameserver`
+       if [ "${RESOLV_FILE_STATE}" == "" ]; then
+               SEARCH_DOMAIN=`sqlite /etc/cfg/conf.db "select v from conf where k='nic1_domainname'"`
+               DNS1=`sqlite /etc/cfg/conf.db "select v from conf where k='nic1_dns'" | xargs | awk '{print $1}'`
+               DNS2=`sqlite /etc/cfg/conf.db "select v from conf where k='nic1_dns'" | xargs | awk '{print $2}'`
+               DNS3=`sqlite /etc/cfg/conf.db "select v from conf where k='nic1_dns'" | xargs | awk '{print $3}'`
+
+               if [ "$SEARCH_DOMAIN" != "" ]; then
+                       echo "search $SEARCH_DOMAIN" >> /etc/resolv.conf
+               fi
+
+               if [ "$DNS1" != "" ]; then
+                       echo "nameserver $DNS1" >> /etc/resolv.conf 
+               fi
+
+               if [ "$DNS2" != "" ]; then
+                       echo "nameserver $DNS2" >> /etc/resolv.conf 
+               fi
+
+               if [ "$DNS3" != "" ]; then
+                       echo "nameserver $DNS3" >> /etc/resolv.conf 
+               fi
+       fi
+}
+
+
+gen_file(){
+	service NetworkManager stop
+	HANDLE_FILE="/etc/NetworkManager/dispatcher.d/30_GW_DNS_HANDLE"
+	ETH_IFCFG="/etc/sysconfig/network-scripts/ifcfg-eth0"
+
+	sed -i '/^NM_CONTROLLED/d' ${ETH_IFCFG}
+        sed -i '/^HWADDR/d' ${ETH_IFCFG}        
+        sed -i '/^DNS/d' ${ETH_IFCFG}   
+
+        DNS1=`sqlite /etc/cfg/conf.db "select v from conf where k='nic1_dns'" | xargs | awk '{print $1}'`
+        DNS2=`sqlite /etc/cfg/conf.db "select v from conf where k='nic1_dns'" | xargs | awk '{print $2}'`
+        DNS3=`sqlite /etc/cfg/conf.db "select v from conf where k='nic1_dns'" | xargs | awk '{print $3}'`
+
+        if [ "$DNS1" != "" ]; then
+              echo "DNS1=$DNS1" >> $ETH_IFCFG
+        fi
+
+        if [ "$DNS2" != "" ]; then
+              echo "DNS2=$DNS2" >> $ETH_IFCFG
+        fi
+
+        if [ "$DNS3" != "" ]; then
+              echo "DNS3=$DNS3" >> $ETH_IFCFG
+        fi
+
+
+	check_hwaddr=`cat $ETH_IFCFG | grep HWADDR`
+	if [ -z "$check_hwaddr" ]; then
+		eth_hwaddr=`/sbin/ifconfig eth0 | grep HWaddr | awk '{print $5}'`
+		echo "HWADDR=$eth_hwaddr" >> $ETH_IFCFG
+	fi
+
+	check_eth=`cat $ETH_IFCFG | grep "NM_CONTROLLED"`
+        if [ -z  "$check_eth" ]; then
+                echo "NM_CONTROLLED=\"no\"" >> $ETH_IFCFG
+        fi
+
+	if [ ! -f "${HANDLE_FILE}" ]; then
+	        echo "#!/bin/sh" >> ${HANDLE_FILE}
+       		echo "#####  this file should be place in /etc/NetworkManager/dispatcher.d/ . generate by rc.cwireless" >> ${HANDLE_FILE}
+	        echo "up_do(){" >> ${HANDLE_FILE}
+	        echo "  WIRELESS_GW=\`/usr/bin/nmcli dev list iface \$1 | grep \"GATEWAY:\" | cut -d: -f2 | xargs\`" >> ${HANDLE_FILE}
+	        echo "  ETH_STATE=\`/sbin/ifconfig eth0 | grep \"inet addr:\" | cut -d: -f2 | awk '{print \$1}'\`" >> ${HANDLE_FILE}
+	        echo "  if [ -n \"\$ETH_STATE\" ]; then" >> ${HANDLE_FILE}
+            echo "          /sbin/route add default gw \"\$WIRELESS_GW\" metric 2 dev \$1" >> ${HANDLE_FILE}
+	        echo "          WLAN_DNS=\`nmcli dev list iface \$1 | grep DNS: | cut -d: -f2 | xargs\`" >> ${HANDLE_FILE}
+	        echo "          cp -f /tmp/wire_dns /etc/resolv.conf" >> ${HANDLE_FILE}
+                echo "          for i in \$WLAN_DNS; do" >> ${HANDLE_FILE}
+	        echo "              echo "nameserver \$i" >> /etc/resolv.conf" >> ${HANDLE_FILE}
+                echo "          done" >> ${HANDLE_FILE}
+	        echo "  else" >> ${HANDLE_FILE}
+            echo "          /sbin/route add default gw \"\$WIRELESS_GW\" metric 2 dev \$1" >> ${HANDLE_FILE}
+	        echo "  fi" >> ${HANDLE_FILE}
+	        echo "}" >> ${HANDLE_FILE}
+	        echo "" >> ${HANDLE_FILE}
+
+	        echo "down_do(){" >> ${HANDLE_FILE}
+	        echo "  ETH_STATE=\`/sbin/ifconfig eth0 | grep \"inet addr:\" | cut -d: -f2 | awk '{print \$1}'\`" >> ${HANDLE_FILE}
+	        echo "  if [ -n \"\$ETH_STATE\" ]; then" >> ${HANDLE_FILE}
+	        echo "  cp -f /tmp/wire_dns /etc/resolv.conf" >> ${HANDLE_FILE}
+	        echo "  fi" >> ${HANDLE_FILE}
+	        echo "}" >> ${HANDLE_FILE}
+	        echo "" >> ${HANDLE_FILE}
+
+		echo "case \$2 in" >> ${HANDLE_FILE}
+	        echo "'up')" >> ${HANDLE_FILE}
+	        echo "  up_do \$1" >> ${HANDLE_FILE}
+	        echo "  ;;" >> ${HANDLE_FILE}
+	        echo "'down')" >> ${HANDLE_FILE}
+	        echo "  down_do" >> ${HANDLE_FILE}
+	        echo "  ;;" >> ${HANDLE_FILE}
+	        echo "esac" >> ${HANDLE_FILE}
+	fi
+	/bin/chmod +x $HANDLE_FILE
+}
+
+
+#################
+#Check DB
+################
+
+check_db(){
+	[ -e "${SQLITE_DB}" ] && return
+	${SQLITE} ${SQLITE_DB} ""
+	${SQLITE} ${SQLITE_DB} "create table AP_LIST(id INTEGER PRIMARY KEY, essid TEXT, signal TEXT, keys TEXT, ap_hwaddr TEXT);"		
+	${SQLITE} ${SQLITE_DB} "create table DEVICE_INFO(id INTEGER PRIMARY KEY, state TEXT, type TEXT, dev_hwaddr TEXT, essid TEXT, ipv4 TEXT, ipv6 TEXT, apip TEXT);"
+	${SQLITE} ${SQLITE_DB} "create table CON_STATE(id INTEGER PRIMARY KEY, state TEXT);"
+	${SQLITE} ${SQLITE_DB} "INSERT INTO CON_STATE VALUES(1, '');;"
+}
+
+#################
+#scan AP and get AP list
+#################
+
+get_AP_list(){
+	local SIGNAL
+	local ESSID
+	local KEYS
+		${SQLITE} ${SQLITE_DB} "DELETE FROM AP_LIST;"
+		tmp=1
+		cat ${AP_LIST} | \
+		while read line; do
+			ESSID=`echo $line | awk -F "'" '{print $2}'`
+			SIGNAL=`echo $line | awk -F "MB/s" '{print $2}' | awk '{print $1}'`
+			#AP_HWADDR=`${NMCLI} dev list | grep -A7 "$ESSID"  | grep "BSSID:" | awk '{print $2}'`
+			AP_HWADDR=`echo $line | cut -d"'" -f3 | awk '{print $1}'`
+			KEYS_TMP1=`echo $line | awk -F "MB/s" '{print $2}' | awk '{print $2}'`
+			KEYS_TMP2=`echo $line | awk -F "MB/s" '{print $2}' | awk '{print $3}'`
+
+			if [ "$KEYS_TMP2" = "WPA2" ]; then
+				KEYS="$KEYS_TMP2"
+			else
+				KEYS="${KEYS_TMP1}"
+			fi
+
+			local AP_TMP="insert into AP_LIST values($tmp,'"${ESSID}"', '"${SIGNAL}"', '"${KEYS}"', '"$AP_HWADDR"');"
+			${SQLITE} ${SQLITE_DB} "$AP_TMP"
+#echo $line
+#echo "--"
+		tmp=$[$tmp+1]
+		done
+	
+}
+
+scan(){
+	if [ ! "$DEVICE_NAME" == "" ]; then
+		if [ "${WIFI_STATE}" != "unavailable, NOT SUPPORT" ]; then
+			${NMCLI} nm wifi on
+			${IWLIST} $DEVICE_NAME scan > /dev/null
+		#	${NMCLI} dev wifi | grep -v ^SSID > ${AP_LIST} 	
+#			nmcli dev list | grep -A1000 "AP1.SSID" > ${AP_LIST}
+		#	${IWLIST} ${DEVICE_NAME} scan | grep -v "\"\"" | grep -B5 "ESSID" > ${AP_LIST}
+	                nmcli dev wifi | grep -v ^SSID > ${AP_LIST}
+			get_AP_list		
+		fi
+
+	fi
+}
+
+
+#################
+#Disconnet wifi
+#################
+
+disconnect_wifi(){
+	local GETAP=`${NMCLI} dev list iface ${DEVICE_NAME} | grep "ACTIVE:" | grep "yes" | cut -d. -f1`
+        if [ "$GETAP" == "" ]; then
+		echo "State: Disconnect"
+	else
+	APESSID=`${IWCONFIG} 2> /dev/null | grep ${DEVICE_NAME} | awk -F ":" '{print $2}' | xargs`
+
+        IFCFG_FILE="/etc/sysconfig/network-scripts/ifcfg-${APESSID}"
+	/bin/sed -i '/^ONBOOT/d' $IFCFG_FILE
+	/bin/echo "ONBOOT=no" >> $IFCFG_FILE
+
+	${NMCLI} dev disconnect iface ${DEVICE_NAME}
+	fi
+}
+
+#################
+#Connect to specific AP with password
+#################
+
+connect(){
+	APNAME="$1"
+	disconnect_wifi
+	if [ -n "${DEVICE_NAME}" ] && [ -n "$1" ]; then
+		local KEYS
+		IFCFG_FILE="/etc/sysconfig/network-scripts/ifcfg-$APNAME"
+		KEYS_FILE="/etc/sysconfig/network-scripts/keys-$APNAME"
+		rm -fr "${IFCFG_FILE}" "${KEYS_FILE}"
+	
+		#state 2 => Connecting
+		${SQLITE} ${SQLITE_DB} "UPDATE CON_STATE SET state = '2' where id = 1;"
+
+		CONNECT_INFO=`${SQLITE} ${SQLITE_DB} "select id, essid, signal, keys, ap_hwaddr from AP_LIST where ap_hwaddr='"$2"';"`
+	
+			if [ "${CONNECT_INFO}" != "" ]; then
+				ESSID=`echo $CONNECT_INFO |awk -F "|" '{print $2}'`	
+				KEYS=`echo $CONNECT_INFO |awk -F "|" '{print $4}'`
+
+				echo "ESSID=\""${ESSID}"\"" >> ${IFCFG_FILE}
+				echo "MODE=Managed" >> ${IFCFG_FILE}
+				echo "TYPE=Wireless" >> ${IFCFG_FILE}
+				echo "BOOTPROTO=dhcp" >> ${IFCFG_FILE}
+				echo "DEFROUTE=no" >> ${IFCFG_FILE}
+				echo "NAME=\""${ESSID}"\"" >> ${IFCFG_FILE}
+				echo "ONBOOT=yes" >> ${IFCFG_FILE}
+				echo "HWADDR="${HWADDR} >> ${IFCFG_FILE}
+				echo "PEERDNS=yes" >> ${IFCFG_FILE}
+				echo "PEERROUTES=yes" >> ${IFCFG_FILE}
+				CON_KEYS="$3"
+				case ${KEYS} in
+					--)
+        					;;
+					WEP)
+						echo "DEFAULTKEY=1" >> ${IFCFG_FILE}
+      						echo "KEY1=\"${CON_KEYS}\"" > ${KEYS_FILE}
+						;;
+					WPA)
+						echo "KEY_MGMT=WPA-PSK" >> ${IFCFG_FILE}
+  						echo "WPA_PSK=\"${CON_KEYS}\"" > ${KEYS_FILE}
+        					;;
+					WPA2)
+						echo "KEY_MGMT=WPA-PSK" >> ${IFCFG_FILE}
+        					echo "WPA_PSK=\"${CON_KEYS}\"" > ${KEYS_FILE}
+        					;;
+					*)
+						echo "unknow encryption"
+						;;
+				esac
+
+				sync
+				sleep 2
+				${NMCLI} con up id "$1" 2>&1 > /dev/null
+				sleep 2
+				check_connect=`${NMCLI} dev | grep ${DEVICE_NAME} | awk '{print $3}'`
+				if [ "$check_connect" = "connected" ]; then
+					#state 9 => Connect OK
+					${SQLITE} ${SQLITE_DB} "UPDATE CON_STATE SET state = '9' where id = 1;"	
+				else
+					#state 99 => Fail
+					${SQLITE} ${SQLITE_DB} "UPDATE CON_STATE SET state = '99' where id = 1;"
+				fi
+			else
+				${SQLITE} ${SQLITE_DB} "UPDATE CON_STATE SET state = '3' where id = 1;"
+				echo "there is no SSID named $1"
+				echo 999
+			fi
+		
+	fi
+}
+
+
+#################
+#If wifi is connecting then get wifi's information
+#
+#	IPV4,  APIP, APIP, SSID
+#
+#################
+
+get_wifi_info(){
+	if [ "$WIFI_STATE" = "connected" ]; then
+		APESSID=`${IWCONFIG} 2> /dev/null | grep ${DEVICE_NAME} | awk -F ":" '{print $2}' | xargs`	
+		IPV4=`${IFCONFIG} ${DEVICE_NAME} | awk -F'[ :]+' '/Bcast/{print $4}'`	
+		IPV6=`${IFCONFIG} ${DEVICE_NAME} | grep inet6 | awk -F 'addr:' '{print $2}' | awk -F 'Scope' '{print $1}' | xargs`
+		APIP=`${NMCLI} dev list iface ${DEVICE_NAME} | grep "SETTINGS.GATEWAY:" | cut -d: -f2 | xargs`
+	else
+		IPV4="N/A"
+		IPV6="N/A"
+		APIP="N/A"
+	fi
+}
+
+
+
+
+#################
+#get wifi-device's information
+#
+#	TYPE, HWADDR
+#
+#################
+
+get_device_info(){
+	if [ -n "$DEVICE_NAME" ]; then
+		TYPE=`$IWCONFIG 2> /dev/null | grep $DEVICE_NAME | awk '{print $3}'`
+		HWADDR=`${NMCLI} dev list iface ${DEVICE_NAME} | grep GENERAL.HWADDR | awk '{print $2}'`			
+	else
+		TYPE="N/A"
+		HWADDR="N/A"
+	fi
+}
+
+
+#################
+#get_all_information
+################
+
+
+get_all_info(){
+        ${SQLITE} ${SQLITE_DB} "DELETE FROM DEVICE_INFO;"
+
+	get_device_info
+	get_wifi_info
+
+	local SQLITE_TMP="insert into DEVICE_INFO values(1, '"${WIFI_STATE}"', '"${TYPE}"', '"${HWADDR}"', '"${APESSID}"', '"${IPV4}"', '"${IPV6}"', '"${APIP}"');"
+	echo $SQLITE_TMP
+	${SQLITE} ${SQLITE_DB} "${SQLITE_TMP}"
+}
+
+
+
+
+
+
+################
+#Main
+###############
+
+
+
+main(){
+
+
+case $1 in
+
+boot)
+	if [ "`/img/bin/check_service.sh cwireless`" = "1" ];then
+		gen_file
+		sync
+		sleep 1
+		nm_start
+		init
+		check_db
+		gen_resolv
+	fi
+	;;
+check)
+	init
+	check_db
+	;;
+
+get_info)
+	init
+	check_db
+	get_all_info
+	;;
+connect)
+	echo "$2"
+	init
+	get_device_info
+	connect "$2" $3 $4
+	;;
+scan)
+	init
+	check_db
+	scan
+	;;
+disconnect)
+	init
+	disconnect_wifi
+	;;
+*)
+	nm_start
+	scan
+	;;
+esac
+
+
+}
+
+main "$1" "$2" $3 $4
+

@@ -1,0 +1,225 @@
+/*
+ * Ext JS Library 2.0 Alpha 1
+ * Copyright(c) 2006-2007, Ext JS, LLC.
+ *
+ * @license LGPL
+ * @author Kemal Tunador <tunador@madrabaz.com>
+
+ */
+/****************************************
+                  Panel
+*****************************************/
+/*Panel Title 的邊框顏色*/
+.x-panel-header {
+	font-family: Tahoma, Arial, Times New Roman;
+    color:#2a4d6a;             /*Panel Title 的文字顏色*/
+    border:1px solid #d2d2d2;  /*Panel Title 的邊框顏色*/
+}
+/*Panel的邊框顏色*/
+.x-panel-body {
+    border-color:#d2d2d2; 
+
+} 
+.x-panel-bbar .x-toolbar {
+    border-color:#d2d2d2;
+}
+.x-panel-tbar .x-toolbar {
+    border-color:#d2d2d2;
+} 
+.x-panel-tbar-noheader .x-toolbar, .x-panel-mc .x-panel-tbar .x-toolbar {
+    border-color:#d2d2d2;
+}
+.x-panel-body-noheader, .x-panel-mc .x-panel-body {
+    border-color:#d2d2d2;
+}
+.x-panel-tl {
+    border-color:#d2d2d2;
+} 
+.panelbg{
+}
+/*Panel內容*/
+.x-panel-mc {
+    color:#f9f9f9;       /*Panel內容的文字顏色*/
+}
+.x-panel-header-menu-body{ 
+  border:1px solid #d2d2d2;  /*Panel layout的邊框顏色*/ 
+}/*
+.x-panel{
+    background:#ebebec repeat-x top left; 
+}
+*/
+
+/****************************************
+                  Buttons
+*****************************************/
+.x-btn-text{
+   font-family: Tahoma, Arial, Times New Roman;
+   color: #2a4864; /*Button的文字顏色*/
+} 
+
+/****************************************
+                  qtips狀態列圖說文字
+*****************************************/
+.x-tip .x-tip-body {
+	font-family: Tahoma, Arial, Times New Roman;
+    color:#3d697d;  /* tip文字顏色*/
+}
+
+ 
+
+/****************************************
+                  Toolbars
+*****************************************/
+.x-toolbar button {
+	font-family: Tahoma, Arial, Times New Roman;
+    color:#2a4864; /* toolbar 文字顏色*/
+}
+.x-toolbar .x-btn-over button {
+	font-family: Tahoma, Arial, Times New Roman;
+    color:#2a4864; /* toolbar 滑鼠移過去的文字顏色*/
+}
+.x-paging-info {
+	font-family: Tahoma, Arial, Times New Roman;
+    color:#2a4864;  /*分頁文字顏色*/
+}
+.x-toolbar{ 
+}
+
+/****************************************
+                  Form
+*****************************************/
+.x-form-text, textarea.x-form-field{
+    border: 1px solid #69858f;         /*輸入框的邊框顏色*/
+}
+.x-form-focus, textarea.x-form-focus{
+	border: 1px solid #69858f;     /*Focus到輸入框時的邊框顏色*/
+}
+.x-form fieldset {
+    border:1px solid #b5b8c8;   /*Fieldset的邊框顏色*/
+  /*  border:1px solid #69858f; */
+}
+
+
+
+/****************************************
+                  Tabs
+*****************************************/
+.x-tab-panel-header, .x-tab-panel-footer {
+	background: #8894a4;      /*tab上方和下方分隔線的顏色*/
+}
+.x-tab-panel-header {
+	border-color:#b5c4c8;   /* tab整塊上方邊框顏色 */
+}
+ul.x-tab-strip-top{
+	border-color:#b5c4c8;  /*選取tab時,當下tab的邊框顏色*/
+    padding-top: 2px;
+}
+.x-tab-strip span.x-tab-strip-text {
+	font-family: Tahoma, Arial, Times New Roman;
+	color:#2a4d6a;     /*沒有選取的tab文字顏色*/
+}
+.x-tab-strip-over span.x-tab-strip-text {
+	font-family: Tahoma, Arial, Times New Roman;
+	color:#2a4d6a;  /*滑鼠移過到tab時的文字顏色*/
+}
+
+.x-tab-strip-active span.x-tab-strip-text {
+	font-family: Tahoma, Arial, Times New Roman;
+	color:#234255; /*被選取到的tab文字顏色*/
+}
+
+.x-tab-panel-body {
+    border-color:#b5c4c8;   /*tab邊框顏色*/
+}  
+  
+ 
+/****************************************
+                  Window
+*****************************************/
+.x-window-tl .x-window-header {
+    color:#2a4d6a;   /*Title文字顏色*/
+}
+.x-window-mc {
+    border:1px solid #555555;  /*內部的邊框顏色*/
+}
+
+body.x-body-masked .x-window-mc, body.x-body-masked .x-window-plain .x-window-mc {
+    background-color: #c4d4e7;   /*alert出來時裡面的背景顏色*/
+}
+
+/****************************************
+          Date Picker 日期選取器 
+*****************************************/
+.x-date-picker { 
+    background:#8099ab;  /*日期背景色*/
+}
+.x-date-inner th {
+	border-bottom: 1px solid #41576e;  /*星期的下方框線顏色*/
+	color:#eeeef2;                     /*星期的文字顏色*/
+}
+.x-date-inner .x-date-selected a{
+	border:1px solid #41576e; /*選取的框線顏色*/
+    color:#ffffff;                /*選取的文字顏色*/
+}
+.x-date-bottom {
+    border-top: 1px solid #3d6880;     /*下方框線顏色*/
+}  
+.x-date-inner a:hover, .x-date-inner .x-date-disabled a:hover{
+    color:#eeeef2;             /*滑鼠移過日期時的文字顏色*/
+    background: #d9e4ea;       /*滑鼠移過日期時的背景顏色*/
+}
+td.x-date-mp-month a:hover,td.x-date-mp-year a:hover {
+	color:#eeeef2;            /*滑鼠移過月份時的文字顏色*/
+	background: #333333;      /*滑鼠移過月份時的背景顏色*/
+}
+  
+/****************************************
+          Other 
+*****************************************/
+*{
+	font-family: Tahoma, Arial, Times New Roman;
+	font-size:12px;
+	color:#234255;
+} 
+.deepgray_w12 { 
+   font-family: Tahoma, Arial, Times New Roman;
+   font-size:12px; 
+   color: #2e363d;   /*Menu大項的文字顏色*/
+}
+.white_w12 { 
+   font-family: Tahoma, Arial, Times New Roman;
+   font-size:12px; 
+   color: #ffffff; /*Menu,Language的文字顏色*/
+}
+.x-fieldset legend{   /*Fieldset的文字顏色*/ 
+   font-family: Tahoma, Arial, Times New Roman;
+   font-size:12px; 
+   color:#466a81;
+}    
+
+ /*Tree,Menu Tree的文字顏色*/ 
+.x-tree-node a span,.x-dd-drag-ghost a span,.x-tree-node .x-tree-node-disabled a span,.x-date-inner a,
+.x-date-inner .x-date-active,.x-date-inner a:hover,.x-date-inner .x-date-disabled a:hover,.x-date-mmenu .x-menu-item
+{color:#445b6d !important;}
+
+.style1 table{
+	border:thin dotted #000000;
+}
+.style1 td{
+	padding: 0px;
+	border-top-width: 1px;
+	border-right-width: 1px;
+	border-bottom-width: 1px;
+	border-left-width: 1px;
+	border-top-style: none;
+	border-right-style: solid;
+	border-bottom-style: solid;
+	border-left-style: none;
+	border-top-color: #B6C8D6;
+	border-right-color: #B6C8D6;
+	border-bottom-color: #B6C8D6;
+	border-left-color: #B6C8D6;
+}  
+
+ /*設一個空白(透明)的panel*/ 
+.x-panel{  }

@@ -1,0 +1,276 @@
+#!/bin/sh
+# chkconfig: - 91 35
+# description: This package enables Linux to talk to Macintosh computers via the \
+#              AppleTalk networking protocol. It includes a daemon to allow Linux \
+#              to act as a file server over EtherTalk or IP for Mac's.
+# processname: atalkd
+# pidfile: /var/run/atalkd.pid
+# config: /usr/local/etc/netatalk/*
+if [ ! -d '/raid/sys' ] && [ "$1" != "stop" ];then
+  exit
+fi
+etc_path="/etc/atalk"
+sbin_path="/usr/sbin"
+bin_path="/usr/bin"
+sql_cmd="/usr/bin/sqlite /etc/cfg/conf.db"
+tmp_stack_afp_conf="/tmp/iscsi_AppleVolumes.default"
+
+ATALK_NAME=`$sql_cmd "select v from conf where k='nic1_hostname'"`
+atalkd=`$sql_cmd "select v from conf where k='apple_talkd'"`
+atalkd_log=`$sql_cmd "select v from conf where k='apple_log'"`
+TMPIPV6EN="/var/tmp/ipv6_en"
+
+if [ "$atalkd" = "1" ] && [ "$1" != "stop" ];then
+  echo 'auth       sufficient   pam_ldap.so' > /etc/pam.d/netatalk
+  echo 'auth       sufficient   pam_winbind.so' >> /etc/pam.d/netatalk
+  echo 'auth       required     pam_unix.so use_first_pass' >> /etc/pam.d/netatalk
+  echo 'account    sufficient   pam_ldap.so' >> /etc/pam.d/netatalk
+  echo 'account    sufficient   pam_winbind.so' >> /etc/pam.d/netatalk
+  echo 'account    required     pam_unix.so' >> /etc/pam.d/netatalk
+  echo 'session    sufficient   pam_ldap.so' >> /etc/pam.d/netatalk
+  echo 'session    required     pam_unix.so' >> /etc/pam.d/netatalk
+
+  if [ ! -d "${etc_path}" ];then
+    mkdir "${etc_path}"
+  fi
+
+  if [ ! -f "${etc_path}/AppleVolumes.system" ];then
+    cp /etc/netatalk/AppleVolumes.system ${etc_path}
+  fi
+
+  apple_zone=`$sql_cmd "select v from conf where k='apple_zone'"`
+  if [ "$apple_zone" != "*" -a "$apple_zone" != "" ];then
+    TALK_ZONE="@$apple_zone"
+  fi
+
+  NETWORKING=yes
+  AFPD_MAX_CLIENTS=300
+  ATALK_MAC_CHARSET=`$sql_cmd "select v from conf where k='apple_charset'"`
+  ATALK_UNIX_CHARSET='UTF8'
+  AFPD_GUEST=nobody
+  ATALKD_RUN=yes
+  CNID_METAD_RUN=yes
+  AFPD_RUN=yes
+  PAPD_RUN=no
+  TIMELORD_RUN=no
+  A2BOOT_RUN=no
+  ATALK_BGROUND=no
+  export ATALK_MAC_CHARSET
+  export ATALK_UNIX_CHARSET
+  
+  #ENABLE_IPV6=`/usr/bin/sqlite /etc/cfg/conf.db "select v from conf where k='nic1_enable_ipv6'"`; 
+  ENABLE_IPV6=`cat ${TMPIPV6EN}` 
+  listen_ipv6=""
+  if [ "$ENABLE_IPV6" == "1" ];then
+    listen_ipv6="-ipaddr ::"
+  fi
+  if [ "$atalkd_log" == "1" ];then
+    setuplog="-setuplog \"default LOG_NOTE\""
+  fi
+#  echo "- -transall -uamlist uams_guest.so,uams_clrtxt.so,uams_dhx.so,uams_dhx2.so -setuplog \"default log_maxdebug /var/log/afpd.log\" \
+  echo "- -transall -uamlist uams_guest.so,uams_clrtxt.so,uams_dhx.so,uams_dhx2.so \
+    -nosavepassword $listen_ipv6 -maccodepage $ATALK_MAC_CHARSET -unixcodepage $ATALK_UNIX_CHARSET" \
+    $setuplog -nozeroconf \
+  > ${etc_path}/afpd.conf
+
+  #ifconfig bond0
+  fbond=`/img/bin/function/get_interface_info.sh check_eth_bond eth0`
+  if [ "${fbond}" != "" ];then
+    echo "${fbond} -phase 1" > ${etc_path}/atalkd.conf
+  else
+    echo "eth0 -router" > ${etc_path}/atalkd.conf
+  fi
+
+  tm_enable=`$sql_cmd "select v from conf where k='apple_tm'"`
+  if [ "$tm_enable" = "1" ];then
+    tm_folder=`/usr/bin/sqlite /etc/cfg/conf.db "select v from conf where k='apple_tm_folder'"`
+  else
+    tm_folder=""
+  fi
+
+  #eval "awk -F'[][]' '/\\[/{if(\$2!=\"global\"){share=\$2;printf \"\\\"/raid/data/%s\\\" \\\"%s\\\" \
+  #options:usedots,noadouble$tm_option maccharset:$ATALK_MAC_CHARSET volcharset:UTF8\\n\",share,share}}' \
+  #/etc/samba/smb.conf > ${etc_path}/AppleVolumes.default"
+  rm ${etc_path}/AppleVolumes.default
+  folders=`cat /etc/samba/smb.conf | grep '\[*\]' | awk -F'[][]' '{if($2 !="global"){print $2}}'`
+  echo -e "${folders}" | \
+  while read folder
+  do
+    if [ "$tm_folder" != "" -a "$tm_folder" = "$folder" ];then
+      tm_option="tm,"
+    else
+      tm_option=""
+    fi
+    public=`/usr/bin/sqlite /raid/sys/smb.db "select \"guest only\" from smb_specfd where share='$folder'"`
+    if [ "$public" = "yes" ];then
+      echo "\"/raid/data/$folder\" \"$folder\" options:${tm_option}upriv,usedots,noadouble dperm:0777 fperm:0777 umask:02000 maccharset:$ATALK_MAC_CHARSET volcharset:UTF8" >> ${etc_path}/AppleVolumes.default
+    elif [ "$public" = "no" ];then
+      echo "\"/raid/data/$folder\" \"$folder\" options:${tm_option}upriv,usedots,noadouble dperm:0774 fperm:0776 umask:02001 maccharset:$ATALK_MAC_CHARSET volcharset:UTF8 deny:nobody" >> ${etc_path}/AppleVolumes.default
+    fi
+  done
+
+  md_list=`cat /proc/mdstat | awk -F: '/^md6[0-9] :/{print substr($1,3)}' | sort -u`
+  if [ "${md_list}" == "" ];then
+    md_list=`cat /proc/mdstat | awk -F: '/^md[0-9] :/{print substr($1,3)}' | sort -u`
+  fi
+
+  for md in $md_list
+  do
+    echo -e "${folders}" | \
+    while read folder
+    do
+      if [ "$tm_folder" != "" -a "$tm_folder" = "$folder" ];then
+        tm_option="tm,"
+      else
+        tm_option=""
+      fi
+      public=`/usr/bin/sqlite /raid${md}/sys/smb.db "select \"guest only\" from smb_userfd where share='$folder'"`
+      if [ "$public" = "yes" ];then
+        echo "\"/raid${md}/data/$folder\" \"$folder\" options:${tm_option}upriv,usedots,noadouble dperm:0777 fperm:0777 umask:02000 maccharset:$ATALK_MAC_CHARSET volcharset:UTF8" >> ${etc_path}/AppleVolumes.default
+      elif [ "$public" = "no" ];then
+        echo "\"/raid${md}/data/$folder\" \"$folder\" options:${tm_option}upriv,usedots,noadouble dperm:0774 fperm:0776 umask:02001 maccharset:$ATALK_MAC_CHARSET volcharset:UTF8 deny:nobody" >> ${etc_path}/AppleVolumes.default
+      fi
+    done          	
+  done
+
+  /bin/rm -rf $tmp_stack_afp_conf
+  /img/bin/rc/rc.initiator assemble
+  
+  if [ -f "$tmp_stack_afp_conf" ];then
+    /bin/cat $tmp_stack_afp_conf >> ${etc_path}/AppleVolumes.default
+  fi
+fi
+
+getraidnum() {
+  name=$1
+  echo "$name" | awk '{h=substr($1,0,4);n=substr($1,5);if (h=="raid") printf("%d\n",n);}'
+}
+
+timemachine() {
+smb_conf="/etc/samba/smb.conf"
+##awk_folder="NAS_Public"
+tm_folder=`/usr/bin/sqlite /etc/cfg/conf.db "select v from conf where k='apple_tm_folder'"`
+hostname=`/usr/bin/sqlite /etc/cfg/conf.db "select v from conf where k='nic1_hostname'"`
+conf_file="/var/run/timemachine.conf"
+
+cmd="cat ${smb_conf} | awk -F 'path = /' '/path =/&&/\/${tm_folder}$/{printf(\"/%s\",substr(\$2,1,length(\$2)))}'"
+folder_path=`eval ${cmd}`
+raid_path=`echo ${folder_path} | awk -F"/" '{print $2}'`
+
+if [ "${raid_path}" == "raid" ];
+then
+    raid_path=`ls -al /${raid_path} | awk '{print $11}' | awk -F"/" '{print $2}'` 
+fi
+
+grep_mount=`getraidnum "${raid_path}"`
+                         
+get_UUID=`/sbin/blkid | /bin/grep "^/dev/md${grep_mount}:" | /usr/bin/cut -d\" -f2` 
+
+Mac_Addr=`/bin/cat /sys/class/net/eth0/address`
+
+echo "${hostname}(TimeMachine)" > ${conf_file}
+echo "_adisk._tcp." >> ${conf_file}
+echo "9" >> ${conf_file}
+echo "sys=waMA=${Mac_Addr},adVF=0x100" >> ${conf_file}
+echo "dk0=adVF=0x83,adVN=${tm_folder},adVU=${get_UUID}" >> ${conf_file}
+
+}
+
+start() {
+  raid_exist=`cat /proc/mdstat | awk -F: '/^md[0-9] :/{print substr($1,3)}' | wc -l`
+  if [ $raid_exist -gt 0 -a -d '/raid/sys' ];then
+    modprobe appletalk
+    modprobe p8022
+    
+    #echo -n $"Starting AppleTalk services: "
+    ${sbin_path}/cnid_metad
+    touch ${etc_path}/afp_signature.conf
+    ${sbin_path}/atalkd -f $etc_path/atalkd.conf
+    ${bin_path}/nbprgstr -p 4 "${ATALK_NAME}:Workstation"
+    ${bin_path}/nbprgstr -p 4 "${ATALK_NAME}:netatalk"
+    ${sbin_path}/afpd -c ${AFPD_MAX_CLIENTS} -n ${ATALK_NAME} \
+		  -f ${etc_path}/AppleVolumes.default -F ${etc_path}/afpd.conf -s ${etc_path}/AppleVolumes.system -m 000 &
+    echo
+    touch /var/lock/subsys/atalk
+	
+    if [ "$tm_enable" == "1" ];then
+      timemachine
+      /usr/bin/mDNSResponderPosix -f /var/run/timemachine.conf -b -P /var/lock/bonjour.timemachine > /dev/null 2>&1
+    fi
+     
+  fi
+}
+  
+stop() {
+	#echo -n $"Shutting down AppleTalk services: "
+	killall cnid_metad
+	killall afpd
+	${bin_path}/nbpunrgstr "${ATALK_NAME}:Workstation@*"
+	${bin_path}/nbpunrgstr "${ATALK_NAME}:netatalk@*"
+	killall atalkd
+	rm -f /var/lock/subsys/atalk
+	
+	if [ -f /var/lock/bonjour.timemachine ];then
+		pidoftarget=`cat /var/lock/bonjour.timemachine`
+		kill -9 $pidoftarget
+		rm -f /var/lock/bonjour.timemachine
+	fi
+	pidoftarget=`ps w | awk '/[Bb]onjour.timemachine/&&/[Mm]DNSResponderPosix/{print $1}'`
+	if [ "${pidoftarget}" != "" ];then
+		kill -9 $pidoftarget
+	fi	
+	echo ""
+}
+
+
+restart() {
+	stop
+	start
+}
+
+reload(){
+  killall -SIGHUP afpd
+}
+
+check(){
+    tm_folder=$1
+    folders=`cat /etc/samba/smb.conf | grep '\[*\]' | awk -F'[][]' '{if($2 !="global"){print $2}}'`
+    echo -e "${folders}" | \
+        while read folder
+        do
+            if [ "$tm_folder" == "$folder" ];then
+                echo 1
+                exit
+            fi
+        done 
+        echo 0
+}
+
+case "$1" in
+    start|boot)
+	if [ "$atalkd" = "1" ];then
+		start
+	fi	
+	;;
+    stop)
+	stop
+	;;
+    restart)
+	if [ "$atalkd" = "1" ];then
+		restart
+	fi
+	;;
+    reload)
+        if [ "$atalkd" = "1" ];then
+                reload
+        fi
+        ;;
+    check)
+        check $2
+        ;;
+    *)
+	echo $"Usage: $0 {start|stop|restart|boot|reload}"
+	exit 1
+esac
+
+exit 0

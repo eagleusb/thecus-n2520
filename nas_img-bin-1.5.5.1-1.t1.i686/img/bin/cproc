@@ -1,0 +1,70 @@
+#!/bin/sh
+#################################################
+##	Define global vars
+#################################################
+
+if [ "$mdnum" = "" ];then
+	mdnum="0"
+fi
+busy=1
+not_busy=0
+thecus_io="/proc/thecus_io"
+if [ $mdnum -ge 30 ] && [ $mdnum -lt 60 ];then
+  nestmd=`expr $mdnum - 30`
+  nestmd=`expr $nestmd / 2`
+  stat="/var/tmp/raid$nestmd/rss"
+else
+  stat="/var/tmp/raid$mdnum/rss"
+fi
+evatime="/var/tmp/evatime"
+mdadm="/sbin/mdadm"
+sqlite="/usr/bin/sqlite"
+confdb="/etc/cfg/conf.db"
+speed_limit_max="/proc/sys/dev/raid/speed_limit_max"
+speed_limit_min="/proc/sys/dev/raid/speed_limit_min"
+
+#################################################
+##	Define global procdeur
+#################################################
+
+## called to drive /proc/thecus_io
+drive_thecus_io() {
+	echo "$1" > ${thecus_io} 
+}
+
+## set sata led light on
+led_busy() {
+	if [ ! "$1" = "" ]
+	then
+		cmd="Busy $1"
+		drive_thecus_io "${cmd}"
+	fi
+}
+
+## update RAID status description file
+update_status() {
+	if [ ! "$1" = "" ]
+	then
+		echo "$1" > ${stat}
+		drive_thecus_io "LCM_RAID $1"
+	fi
+}
+
+## render time
+render_time() {
+	if [ ! "$1" = "" ]
+	then
+		echo "$1" > ${evatime}
+	else
+		cat /dev/null > ${evatime}
+	fi
+}
+
+## set create speed
+set_create_speed() {
+	if [ ! "$1" = "" ] && [ ! "$2" = "" ]
+	then
+		echo "$1" > ${speed_limit_max}
+		echo "$2" > ${speed_limit_min}
+	fi
+}

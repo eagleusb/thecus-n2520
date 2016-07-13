@@ -1,0 +1,63 @@
+chat_path="/etc/ppp/hsdpa-huawei.chat"
+sql_cmd="/usr/bin/sqlite /etc/cfg/conf.db"
+
+if [ -b /dev/ttyUSB0 ];then
+	hsdpa="1"
+
+	NETWORKING=yes
+	AFPD_MAX_CLIENTS=50
+	hsdpa_dial=`$sql_cmd "select v from conf where k='hsdpa_dial'"`
+	hsdpa_apn=`$sql_cmd "select v from conf where k='hsdpa_apn'"`
+
+
+	echo 'TIMEOUT 3
+ABORT "BUSY"
+ABORT "NO CARRIER"
+ABORT "VOICE"
+ABORT "NO DIALTONE"
+ABORT "NO DIAL TONE"
+ABORT "NO ANSWER"
+ABORT DELAYED
+"" ATZ
+OK ATQ0&FEV1X1S0=0&C1&D2
+OK AT+CGDCONT=16,"IP","'$hsdpa_apn'"
+OK ATDT'$hsdpa_dial'
+CONNECT ""'	> ${chat_path}
+
+
+fi
+start() {
+    pppd call hsdpa-huawei
+}
+  
+stop() {
+	killall pppd
+}
+
+
+restart() {
+	stop
+	sleep 5
+	start
+}
+
+case "$1" in
+    start|boot)
+	if [ "$hsdpa" = "1" ];then
+		start
+	fi	
+	;;
+    stop)
+	stop
+	;;
+    restart|reload)
+	if [ "$hsdpa" = "1" ];then
+		restart
+	fi
+	;;
+    *)
+	echo $"Usage: $0 {start|stop|restart|boot}"
+	exit 1
+esac
+
+exit 0

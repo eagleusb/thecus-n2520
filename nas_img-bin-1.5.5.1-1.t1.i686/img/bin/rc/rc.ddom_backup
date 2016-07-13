@@ -1,0 +1,141 @@
+#!/bin/bash
+crond_conf="/etc/cfg/crond.conf"
+tmp_crond_conf="/tmp/crond.tmp"
+####################################################
+#
+####################################################
+check_dual_dom(){
+  a_dom=`/bin/cat /proc/partitions | awk '/sdaaa$/{print \$4}'`
+  b_dom=`/bin/cat /proc/partitions | awk '/sdaab$/{print \$4}'`
+
+  if [ "${a_dom}" == "" ] || [ "${b_dom}" == "" ];then  
+   echo "0"
+  else
+   echo "1"
+  fi
+}
+
+check_only_bdom(){
+  a_dom=`/bin/cat /proc/partitions | awk '/sdaaa$/{print \$4}'`
+  b_dom=`/bin/cat /proc/partitions | awk '/sdaab$/{print \$4}'`
+
+  if [ "${a_dom}" == "" ] && [ "${b_dom}" != "" ];then  
+   echo "0"
+  else
+   echo "1"
+  fi
+}
+
+modify_auto_setting(){
+  if [ "${ddom_setting}" == "auto" ] || [ "${ddom_setting}" == "" ];then
+    crond_data=`cat ${crond_conf} | grep '/img/bin/dom_backup.sh'`
+    if [ "${crond_data}" != "" ];then
+      hour_data=`echo "$crond_data" | awk '{print $2}'`
+      if [ "$hour_data" != "*" ];then
+        cat ${crond_conf} | grep -v "/img/bin/dom_backup.sh" > ${tmp_crond_conf}
+        cp ${tmp_crond_conf} ${crond_conf}
+        echo "0 * * * * /img/bin/dom_backup.sh > /dev/null 2>&1" >> ${crond_conf}
+      fi
+    fi
+  fi
+}
+
+start_dom_backup(){
+  crond_exist=`cat ${crond_conf} | grep "/img/bin/dom_backup.sh" | grep -v grep`
+
+#  dual_dom_exist=`check_dual_dom`
+#  if [ "${dual_dom_exist}" == "0" ];then
+#    if [ "${crond_exist}" != "" ];
+#    then
+#      cat ${crond_conf} | grep -v "/img/bin/dom_backup.sh" > ${tmp_crond_conf}
+#      cp ${tmp_crond_conf} ${crond_conf}
+#    fi
+#  else
+    ddom_enable=`/usr/bin/sqlite /etc/cfg/conf.db "select v from conf where k='dom_backup_enabled'"`
+    ddom_setting=`/usr/bin/sqlite /etc/cfg/conf.db "select v from conf where k='dom_backup_schedule'"`
+    modify_auto_setting
+    cron_week='*'
+    cron_day='*'
+    cron_para='SCHEDULE'
+    
+    if [ "${ddom_enable}" == "" ];then
+      if [ "${crond_exist}" == "" ];then
+        echo "0 * * * * /img/bin/dom_backup.sh > /dev/null 2>&1" >> ${crond_conf}
+      fi
+    else
+      if  [ "${ddom_enable}" == "1" ];then
+        if [ "${crond_exist}" == "" ];then
+          ddom_type=`echo ${ddom_setting} | awk -F '_' '{print \$1}'`
+          
+          case $ddom_type in
+          'daily')
+            cron_time=`echo ${ddom_setting} | awk -F '_' '{print \$2}'`
+            cron_hour=`echo ${cron_time} | awk -F ':' '{print \$1}'`
+            cron_min=`echo ${cron_time} | awk -F ':' '{print \$2}'`
+            ;;
+          'weekly')
+            cron_week=`echo ${ddom_setting} | awk -F '_' '{print \$2}'`
+            cron_time=`echo ${ddom_setting} | awk -F '_' '{print \$3}'`
+            cron_hour=`echo ${cron_time} | awk -F ':' '{print \$1}'`
+            cron_min=`echo ${cron_time} | awk -F ':' '{print \$2}'`
+            ;;
+          'monthly')
+            cron_day=`echo ${ddom_setting} | awk -F '_' '{print \$2}'`
+            cron_time=`echo ${ddom_setting} | awk -F '_' '{print \$3}'`
+            cron_hour=`echo ${cron_time} | awk -F ':' '{print \$1}'`
+            cron_min=`echo ${cron_time} | awk -F ':' '{print \$2}'`
+            ;;
+          *)
+            cron_hour="*"
+            cron_min="0"
+            cron_para=""
+            ;;
+          esac
+          echo "${cron_min} ${cron_hour} ${cron_day} * ${cron_week} /img/bin/dom_backup.sh ${cron_para} > /dev/null 2>&1" >> ${crond_conf}
+        fi
+      elif [ "${ddom_enable}" == "0" ];then
+        if [ "${crond_exist}" != "" ];then
+          cat ${crond_conf} | grep -v "/img/bin/dom_backup.sh" > ${tmp_crond_conf}
+          cp ${tmp_crond_conf} ${crond_conf}
+        fi
+      fi
+    fi
+#  fi
+  
+  rm -f ${tmp_crond_conf}
+  
+  /usr/bin/killall crond
+  sleep 1
+  /usr/sbin/crond
+  /usr/bin/crontab ${crond_conf} -u root
+}
+
+stop(){
+  cat ${crond_conf} | grep -v "/img/bin/dom_backup.sh" > ${tmp_crond_conf}
+  cp ${tmp_crond_conf} ${crond_conf}  
+
+  /usr/bin/killall crond
+  sleep 1
+  /usr/sbin/crond
+  /usr/bin/crontab ${crond_conf} -u root
+}
+
+case "$1" in
+	boot)
+		echo "Start Doul Dom Backup Crond Job"
+		start_dom_backup
+	;;
+	check_ddom)
+		check_dual_dom
+	;;
+	check_bdom)
+		check_only_bdom
+	;;
+	stop)
+		stop
+	;;
+	*)
+		echo "Usage: {boot|check_ddom}" >&2
+		exit 1
+	;;
+esac

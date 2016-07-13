@@ -1,0 +1,254 @@
+<?
+session_start();
+require_once('../../../function/conf/localconfig.php');
+require_once(INCLUDE_ROOT.'session.php');
+require_once("GlobalVars.html");
+require_once("functions.html");
+check_auth($_SESSION);
+
+require_once(WEBCONFIG);
+$words=$session->PageCode("photoshow");
+$gwords=$session->PageCode("global");
+function view(){
+	require_once("HtmlHeader.html");
+	body();	  
+}
+$_GET['album']=fix_post($_GET['album']);
+if (User_exist($_GET['id'])){
+	if (Album_exist($_GET['id'],$_GET['album'])){
+		view();
+		exit;
+	}
+	else
+	   direct_out("iframe_gallery.html");
+}
+else
+       direct_out("iframe_gallery.html");
+?>
+<?function body(){
+global $words;
+?>
+<style type="text/css">
+<!--
+body,td,th {
+	font-family: Arial, Helvetica, sans-serif;
+}
+body {
+	margin-left: 0px;
+	margin-top: 0px;
+	margin-right: 0px;
+	margin-bottom: 0px;
+	color:#ffffff;
+}
+.style1 {	font-size: 14px;
+	font-weight: bold;
+	color: #0000FF;
+}
+.style2 {
+	font-size: 11px;
+	color: #666666;
+	font-weight: bold;
+}
+a:link {
+	color: #0000ff;
+}
+a:visited {
+	color: #0000ff;
+}
+.shadow1, 
+.shadow2, 
+.shadow3 {display:inline-table}
+.shadow1 {float:left;background:url(/usr/gallery/img/shadow.gif) right bottom no-repeat}
+.shadow2 {background:url(/usr/gallery/img/corner_bl.gif) left bottom no-repeat}
+.shadow3 {padding:0 6px 6px 0;
+	background:url(/usr/gallery/img/corner_tr.gif) right top no-repeat
+}
+.shadow11 {float:left;background:url(/usr/gallery/img/shadow.gif) right bottom no-repeat}
+.shadow21 {background:url(/usr/gallery/img/corner_bl.gif) left bottom no-repeat}
+.shadow31 {padding:0 6px 6px 0;
+	background:url(/usr/gallery/img/corner_tr.gif) right top no-repeat
+}
+-->
+</style>
+<body bgcolor="#686868" text="#000000" leftmargin="0" topmargin="0" marginwidth="0" marginheight="0" onLoad="runSlideShow()">
+<script language="JavaScript" type="text/JavaScript">
+// (C) 2000 www.CodeLifter.com
+// http://www.codelifter.com
+// Free for all users, but leave in this  header
+// NS4-6,IE4-6
+// Fade effect only in IE; degrades gracefully
+// ------------------------------------------------------------------------- //
+
+// Set slideShowSpeed (milliseconds)
+var slideShowSpeed = 5000;
+
+// Agent sniffer shamelessly 'stolen' from the excellent X library from cross-browser.com
+var xOp7=false,xOp5or6=false,xIE4Up=false,xNN4=false,xUA=navigator.userAgent.toLowerCase();
+if(window.opera){
+  xOp7=(xUA.indexOf('opera 7')!=-1 || xUA.indexOf('opera/7')!=-1);
+  if (!xOp7) xOp5or6=(xUA.indexOf('opera 5')!=-1 || xUA.indexOf('opera/5')!=-1 || xUA.indexOf('opera 6')!=-1 || xUA.indexOf('opera/6')!=-1);
+}
+else if(document.layers) xNN4=true;
+else {xIE4Up=document.all && xUA.indexOf('msie')!=-1 && parseInt(navigator.appVersion)>=4;}
+
+// Duration of crossfade (seconds)
+var crossFadeDuration = 3
+
+// Specify the image files
+var Pic = new Array() // don't touch this
+var PicFilename = new Array() // don't touch this
+// to add more images, just continue
+// the pattern, adding to the array below
+<?php
+$i = 0;
+$j = 0;
+$PageIndex=1;
+if($_GET['Page']) $PageIndex=$_GET['Page'];
+$pid = (int)$PageIndex-1;
+$start_img = '';
+$pic_data = ScanDirs($_GET['id'],$_GET['album']);
+foreach ($pic_data as $picture) {
+  $filename = Fix_encode($picture[1]);
+  $picture_url = GetImgSrc( fix_encode($_GET['id']), fix_encode($_GET['album' ]) ,$filename,
+                            "slide","medium");
+
+  echo "Pic[$i] = '" . $picture_url . "';\n";
+  echo "PicFilename[$i] = '" . str_replace(" ", "&nbsp;", escapeshellcmd($picture[1])). "';\n";
+  if ($i == $pid) {
+    $j = $i;
+    $start_img = $picture_url;
+  }
+  $i++;
+}
+if (!$i) {
+  echo "Pic[0] = '/usr/gallery/img/gallery_personal.jpg'\n";
+}
+?>
+var t;
+var j = <?=$j?>;
+var p = Pic.length;
+var pos = j;
+
+var preLoad = new Array();
+
+function preLoadPic(index)
+{
+  if (Pic[index] != ''){
+    window.status='Loading : '+Pic[index];
+    preLoad[index] = new Image();
+    preLoad[index].src = Pic[index];
+    preLoad[index].fileName = PicFilename[index];
+    Pic[index] = '';
+    window.status='';
+  }
+}
+
+function runSlideShow()
+{
+  if (xIE4Up){
+    document.images.SlideShow.style.filter="blendTrans(duration=2)";
+    document.images.SlideShow.style.filter= "blendTrans(duration=crossFadeDuration)";
+    document.images.SlideShow.filters.blendTrans.Apply();
+  }
+  if( preLoad[j].height > 300 ||  preLoad[j].width > 300) { 
+       if (preLoad[j].height > preLoad[j].width) { 
+            document.images.SlideShow.height = 300;
+            document.images.SlideShow.width = (300/preLoad[j].height)*preLoad[j].width;
+       } 
+       if (preLoad[j].height <= preLoad[j].width) { 
+            document.images.SlideShow.width = 300; 
+            document.images.SlideShow.height = (300/preLoad[j].width)*preLoad[j].height;
+       } 
+  //if(preLoad[j].fileName=="IMG_0039.JPG"){
+  //	alert (document.images.SlideShow.height+" ++ "+document.images.SlideShow.width+" ++ "+preLoad[j].src);
+  //}
+       document.images.SlideShow.src = preLoad[j].src; 
+  } 
+  else { 
+       document.images.SlideShow.height = preLoad[j].height; 
+       document.images.SlideShow.width = preLoad[j].width; 
+       document.images.SlideShow.src = preLoad[j].src; 
+  }
+  var div = document.getElementById('fileNameTarget');
+  div.innerHTML = preLoad[j].fileName;
+  if (xIE4Up){
+    document.images.SlideShow.filters.blendTrans.Play();
+  }
+
+  pos = j;
+
+  j = j + 1;
+  if (j > (p-1)) j=0;
+  t = setTimeout('runSlideShow()', slideShowSpeed);
+  preLoadPic(j);
+}
+
+function endSlideShow()
+{
+  if(j == 0) j=p;
+  self.document.location = 'PhotoShow.html?id=<?=Fix_encode($_GET['id'])?>&album=<?=Fix_encode($_GET['album'])?>&Page=' + j;
+}
+
+preLoadPic(j);
+
+</script>
+
+<table width="719px" border="0" cellspacing="0" cellpadding="0" align="center" class="outerpage">
+  <? require_once("HtmlBanner.html"); ?>
+  <tr>
+    <td align="center" valign="top">
+        <table width="95%"  border="0" cellpadding="0" cellspacing="0">
+          <tr>
+            <td width="95%" align="right">
+              <a href="javascript:endSlideShow()">
+                 <img src="/usr/gallery/img/slidestop.png" border="0" alt="<?=$words['altStopSlide']?>" />
+              </a>
+	    </td>
+	  </tr>
+          <tr>
+            <td width="95%" align="left">
+            </td>
+          </tr>
+        </table>
+        <br>
+        <table width="100%"  border="0" cellpadding="0" cellspacing="0">
+          <tr>
+            <td align="center" valign="middle" nowrap>
+              <table width="0%" height=300  border="1" cellpadding="2" cellspacing="0" bordercolor="#666666">
+                <tr>
+                  <td bgcolor="#FFFFFF">
+                    <div class="shadow11">
+                      <div class="shadow21">
+                        <div class="shadow31">
+		          <img src="/usr/gallery/img/loading_icon.gif" width=200 height=300 name="SlideShow" class="image" />
+                        </div>
+                      </div>
+                    </div>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          <tr>
+            <td align="center" valign="middle">&nbsp;
+              <b><nobr><div id='fileNameTarget'></div></nobr></b>
+            </td>
+          </tr>
+          <tr>
+            <td align="center" valign="middle"><table width="80%"  border="0" cellpadding="0" cellspacing="0">
+              <tr>
+                <td align=center width="600">
+                </td>
+              </tr>
+            </table></td>
+          </tr>
+        </table>
+	</td>
+  </tr>
+  <? require_once("HtmlBottom.html"); ?>
+</table>
+</body>
+</html>
+<?
+}
+?>

@@ -1,0 +1,55 @@
+#!/bin/sh
+# License:  GNU General Public License (GPL)
+#
+
+. $HA_FUNCS
+. /etc/ha/script/conf.ha
+. /etc/ha/script/func.ha
+
+echo "`date` $HA_st $HA_src" >> /tmp/ha_disk.log
+local_md_count=`cat /proc/mdstat | grep -c '^md[0-9] :'`
+ha_monitor_count=`ls -l /var/lock/ha_monitor_* 2> /dev/null | wc -l`
+
+case $HA_st in
+  dead)	
+    if [ "$local_md_count" = "$ha_monitor_count" ] && [ "`echo ${node_namex}|tr A-Z a-z`" = "${HA_src}" ];then
+      cat /tmp/ha_exten_disks | \
+      while read lun
+      do
+        read disk
+        mdadm /dev/md6${lun} --fail /dev/${disk}2
+        mdadm /dev/md6${lun} --remove /dev/${disk}2
+        mdadm /dev/md6${lun} --remove /dev/${disk}2
+        mdadm /dev/md7${lun} --fail /dev/${disk}3
+        mdadm /dev/md7${lun} --remove /dev/${disk}3
+        mdadm /dev/md7${lun} --remove /dev/${disk}3
+      done
+      ${ISCSI_BLOCK} ${HB_LINE} ${ipx3} stop s
+    fi
+    touch /tmp/ha_raid_damaged
+    $HA_NOARCHBIN/mach_down $HA_src
+  ;;
+  active)
+    if [ "$local_md_count" = "$ha_monitor_count" ] && [ "`echo ${node_namex}|tr A-Z a-z`" = "${HA_src}" ];then
+      if [ "${ha_auto_failback}" = "0" ] || [ "${ha_role_db}" = "0" ];then
+        discovery=`iscsiadm -m discovery -tst --portal ${ipx3}:3260 2>/dev/null|awk "/${ipx3}:3260/&&/nas:iscsi.ha/{print 1}"`
+        if [ "${discovery}" = "1" ];then
+          ${ISCSI_BLOCK} ${HB_LINE} ${ipx3} start s
+          rm -f /tmp/ha_exten_disks
+          for lun in 0 1 2 3 4
+          do
+            disk=`${DEV_MAP} ${HB_LINE} ${ipx3} dev ${lun}`
+            if [ "$disk" != "" ];then
+              echo $lun >> /tmp/ha_exten_disks
+              echo $disk >> /tmp/ha_exten_disks
+            fi 
+          done
+        fi
+        nas_ftpd stop
+      fi
+      ${RC_HA} check_version
+    else
+      echo "Not another node active"
+    fi
+  ;;
+esac

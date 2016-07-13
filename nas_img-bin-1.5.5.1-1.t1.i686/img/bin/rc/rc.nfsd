@@ -1,0 +1,389 @@
+#!/bin/sh 
+#
+# nfs           This shell script takes care of starting and stopping
+#               the NFS services.
+#
+# chkconfig: - 60 20
+# description: NFS is a popular protocol for file sharing across TCP/IP \
+#              networks. This service provides NFS server functionality, \
+#              which is configured via the /etc/exports file.
+# probe: true
+# config: /etc/sysconfig/nfs
+nfsd_path="/usr"
+rc_path="/img/bin/rc"
+
+. ${rc_path}/functions
+
+sqlite="/usr/bin/sqlite"
+conf_db="/etc/cfg/conf.db"
+nfs_tmp="/tmp/exports"
+root_folder="/raid/data/_NAS_NFS_Exports_"
+string_cmd="/usr/bin/specstr_handle"
+nfs_now_folder="/tmp/now_export_folder"
+nfs_need_folder="/tmp/need_export_folder"
+nfs_file_path="/tmp/nfs"
+nfs_folder_file="filelist"
+
+if [ $1 = 'boot' ];then
+	modprobe nfsd
+	mkdir -p /var/lib/nfs/rpc_pipefs
+	/bin/mount -t rpc_pipefs sunrpc /var/lib/nfs/rpc_pipefs
+	/bin/mount -t nfsd nfsd /proc/fs/nfsd
+	if [ -f /sbin/rpcbind ]; then
+		#rpcbind can prevent duplicate running.
+		/sbin/rpcbind
+	else
+		/img/bin/rc/rc.portmap boot
+	fi
+	old_table=`$sqlite /etc/cfg/conf.db ".schema" | grep -c 'CREATE TABLE nfs(share,hostname,privilege,rootaccess);'`
+	if [ $old_table -eq 1 ];then
+		$sqlite /etc/cfg/conf.db "alter table nfs add os_support"
+		$sqlite /etc/cfg/conf.db "alter table nfs add sync"
+	fi
+	#Clean remain tab at the beginning, to prevent get the old mount info.
+	#For further info please "man rpc.mountd".
+	rm -rf /var/lib/nfs/rmtab
+fi
+
+#check Raid & DB
+if [ "`cat /proc/mdstat | grep md[0-9] | wc -l`" == "0" ];then
+	exit;
+fi
+
+rs=`$sqlite $conf_db "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='nfs'"`
+if [ "$rs" = "0" ];then
+	$sqlite $conf_db "create table nfs(share,hostname,privilege,rootaccess)"
+fi
+
+#===========================================
+#	Assemble NFS exports
+#===========================================
+set_nfs_exports(){
+  rm -rf $nfs_tmp
+  touch $nfs_tmp
+  folders=`$sqlite $conf_db "select share from nfs" | sort -u`
+  master_raid=`ls -al /raid | awk '{print $NF}'`
+  root_folder="${master_raid}/_NAS_NFS_Exports_"
+  echo "\"${root_folder}\" *(rw,fsid=0,secure,hide,root_squash,sync,subtree_check,anonuid=99,anongid=99)" >> ${nfs_tmp}
+  nfs_file="${nfs_file_path}/${nfs_folder_file}"
+  rm -rf ${nfs_file}
+  touch ${nfs_file}
+ 
+  echo "${folders}" | \
+  while read folder
+  do
+    if [ "${folder}" != "" ];then
+      md_list=`cat /proc/mdstat | awk -F: '/^md6[0-9] :/{print substr($1,3)}' | sort -u`
+      if [ "${md_list}" == "" ];then
+        md_list=`cat /proc/mdstat | awk -F: '/^md[0-9] :/{print substr($1,3)}' | sort -u`
+      fi
+      
+      for md in $md_list
+      do
+        raid_db="/raid${md}/sys/smb.db"
+        ismaster=`$sqlite $raid_db "select v from conf where k='raid_master'"`
+        if [ "$ismaster" == "1" ];
+        then
+          nfs_folder=`$sqlite $raid_db "select * from smb_specfd where share='${folder}' union select * from smb_userfd where share='${folder}'"`
+        else
+          nfs_folder=`$sqlite $raid_db "select * from smb_userfd where share='${folder}'"`
+        fi
+
+        if [ "${nfs_folder}" != "" ];then
+          export_folder="${root_folder}/${folder}"
+          echo "${export_folder}" >> ${nfs_file}
+          if [ ! -d "${export_folder}" ];then
+            mkdir "${export_folder}"
+            mount --bind "/raid${md}/data/${folder}" "${export_folder}"
+          else
+            grep_folder=`${string_cmd} "grep" "${folder}"`
+            mount_exist=`df | grep "/${grep_folder}$"`
+            if [ "${mount_exist}" == "" ];then
+              mount --bind "/raid${md}/data/${folder}" "${export_folder}"
+            fi
+          fi
+          $sqlite $conf_db "select *,ROWID from nfs where share='${folder}'" | \
+          awk -F'|' "{if (\$5==\"\")\$5=\"secure\";if (\$6==\"\")\$6=\"sync\";printf \"\\\"${export_folder}\\\" %s(%s,fsid=%s,%s,%s,%s,anonuid=99,anongid=99,no_subtree_check)\n\",\$2,\$3,\$7,\$4,\$5,\$6}" >> $nfs_tmp
+        fi
+      done
+    fi
+  done
+
+  echo ${root_folder}
+  ls "${root_folder}/" | sort -u > ${nfs_now_folder}
+  echo "${folders}" > ${nfs_need_folder} 
+  del_folder=`diff -u ${nfs_need_folder} ${nfs_now_folder} | sed '1,2d' | grep "^+"|sed s/^+//g`  
+  
+  echo "${del_folder}" |
+  while read del_share
+  do
+    if [ "${del_share}" != "" ];then
+      del_path="${root_folder}/${del_folder}"
+#      fuser -mk "${del_path}"
+      umount -l -f "${del_path}"
+      rm -rf "${del_path}"
+    fi
+  done
+ 
+  /bin/cp $nfs_tmp /raid/sys
+
+  #====================================
+  #       Check /etc/export link
+  #====================================
+  conf_link=`/bin/ls -l /etc/exports`
+  res=`echo $?`
+  if [ "$res" == "0" ];
+  then
+    auth_mod=`echo $conf_link | awk -F ' ' '{printf($1)}'`
+    if [ "$auth_mod" == "lrwxrwxrwx" ];
+    then
+      link="1"
+    else
+      link="0"
+      rm -rf /etc/exports
+    fi
+    if [ "$link" == "0" ];
+    then
+      ln -s /raid/sys/exports /etc/exports
+    fi
+  else
+    ln -s /raid/sys/exports /etc/exports
+  fi
+}
+#===========================================
+
+## retrieve sqlite upnp setting
+get_nfs_setting() {
+	sqlcmd="select v from conf where k='nfsd_nfsd'"
+	${sqlite} ${conf_db} "${sqlcmd}"
+}
+
+umount_export_folder(){
+	nfs_export_share=`ls "${root_folder}/"`
+	echo "${nfs_export_share}" | while read nfs_share
+	do
+	    if [ "${nfs_share}" != "" ];then
+	        nfs_path="${root_folder}/${nfs_share}"
+	        #fuser -mk "${nfs_path}"
+	        umount -l -f "${nfs_path}"
+	    fi
+	done
+}
+
+nfs_stop() {
+	# Stop daemons.
+	#[ -x ${nfsd_path}/sbin/rpc.svcgssd ] && ${rc_path}/rpcsvcgssd stop
+	echo -n $"Shutting down NFS mountd: "
+	killproc rpc.mountd
+	echo
+	echo -n $"Shutting down NFS daemon: "
+	killproc nfsd
+	echo
+	# Reset the lockd ports if they were set
+	if [ -n "$LOCKD_TCPPORT" ]; then
+	    /sbin/sysctl -w fs.nfs.nlm_tcpport=0 >/dev/null 2>&1
+	fi
+	if [ -n "$LOCKD_UDPPORT" ]; then
+	    /sbin/sysctl -w fs.nfs.nlm_udpport=0 >/dev/null 2>&1
+	fi
+	# Do it the last so that clients can still access the server
+	# when the server is running.
+	action $"Shutting down NFS services: " ${nfsd_path}/sbin/exportfs -au
+	rm -f /var/lock/subsys/nfs
+	killall rpc.idmapd
+	killall rpc.statd
+	umount_export_folder
+	nfs_file="${nfs_file_path}/${nfs_folder_file}"
+	rm -rf ${nfs_file}
+}
+
+check_nfs_anony_user() {
+    add_anony_user=`${sqlite} ${conf_db} "select v from conf where k='nfsd_add_anony_user'"`
+    anony_user_exist=`cat /etc/passwd | grep ^nfsnobody`
+    anony_group_exist=`cat /etc/group | grep ^nfsnobody`
+    if [ "${add_anony_user}" == "1" ];then
+        if [ "${anony_group_exist}" == "" ];then
+            /usr/sbin/addgroup -g 65534 nfsnobody
+        fi
+
+        if [ "${anony_user_exist}" == "" ];then
+            /usr/sbin/adduser -D -u 65534 -G nfsnobody -s /dev/null -h /var/lib/nfs -H -g nfsnobody nfsnobody 
+        fi
+    else
+        if [ "${anony_user_exist}" != "" ];then
+            /usr/sbin/userdel nfsnobody
+        fi
+
+        if [ "${anony_group_exist}" != "" ];then
+            /usr/sbin/groupdel nfsnobody 
+        fi
+    fi   
+}
+
+able=`get_nfs_setting`
+if [ "${able}" != "1" ]
+then
+	if [ "$1" != "boot" ];then
+		nfs_stop
+		check_nfs_anony_user
+		echo "NFS is disable, not running ..."
+	fi
+	exit
+fi
+
+# Source function library.
+
+[ -x ${nfsd_path}/sbin/rpc.nfsd ] || exit 0
+[ -x ${nfsd_path}/sbin/rpc.mountd ] || exit 0
+[ -x ${nfsd_path}/sbin/exportfs ] || exit 0
+
+# Don't fail if /etc/exports doesn't exist; create a bare-bones version and continue.
+[ -r /etc/exports ] || \
+    { touch /etc/exports && chmod u+rw,g+r,o+r /etc/exports ; } || \
+    { echo "/etc/exports does not exist" ; exit 0 ; }
+
+# Check for and source configuration file otherwise set defaults
+[ -f /etc/sysconfig/nfs ] && . /etc/sysconfig/nfs
+
+#[ -z "$MOUNTD_NFS_V2" ] && MOUNTD_NFS_V2=default
+#[ -z "$MOUNTD_NFS_V3" ] && MOUNTD_NFS_V3=default
+MOUNTD_NFS_V2=default
+MOUNTD_NFS_V3=default
+
+# Number of servers to be started by default
+[ -z "$RPCNFSDCOUNT" ] && RPCNFSDCOUNT=8
+
+# See how we were called.
+case "$1" in
+  start)
+ 	if [ ! -d "${root_folder}" ];then
+ 	    mkdir "${root_folder}"
+ 	    chmod 111 "${root_folder}"
+ 	fi
+ 	if [ ! -d "${nfs_file_path}" ];then
+    	    mkdir "${nfs_file_path}"
+ 	fi 
+  	#Assemble exports
+  	set_nfs_exports
+  	
+	# Start daemons.
+	#[ -x ${nfsd_path}/sbin/rpc.svcgssd ] && ${rc_path}/rpcsvcgssd start
+
+	mkdir /var/lib/nfs
+	check_nfs_anony_user
+
+	action $"Starting NFS services: " ${nfsd_path}/sbin/exportfs -r
+
+	# Set the ports lockd should listen on
+	if [ -n "$LOCKD_TCPPORT" ]; then
+	    /sbin/sysctl -w fs.nfs.nlm_tcpport=$LOCKD_TCPPORT >/dev/null 2>&1
+	fi
+	if [ -n "$LOCKD_UDPPORT" ]; then
+	    /sbin/sysctl -w fs.nfs.nlm_udpport=$LOCKD_UDPPORT >/dev/null 2>&1
+	fi
+
+	echo -n $"Starting NFS daemon: "
+	${nfsd_path}/sbin/rpc.nfsd $RPCNFSDCOUNT
+	echo
+
+	[ -n "$MOUNTD_PORT" ] \
+	&& RPCMOUNTDOPTS="$RPCMOUNTDOPTS -p $MOUNTD_PORT"
+
+	case $MOUNTD_NFS_V2 in
+	no|NO)
+	    RPCMOUNTDOPTS="$RPCMOUNTDOPTS --no-nfs-version 2" ;;
+	esac
+
+	case $MOUNTD_NFS_V3 in
+	no|NO)
+	    RPCMOUNTDOPTS="$RPCMOUNTDOPTS --no-nfs-version 3" ;;
+	esac
+
+	echo -n $"Starting NFS mountd: "
+	${nfsd_path}/sbin/rpc.mountd $RPCMOUNTDOPTS
+	echo
+	touch /var/lock/subsys/nfs
+
+	# Let rpc.idmapd know that rpc.mountd just started
+	[ -x ${nfsd_path}/sbin/rpc.idmapd ] && ${nfsd_path}/sbin/rpc.idmapd
+	[ -x /sbin/rpc.statd ] && /sbin/rpc.statd
+
+	;;
+  stop)
+	# Stop daemons.
+	#[ -x ${nfsd_path}/sbin/rpc.svcgssd ] && ${rc_path}/rpcsvcgssd stop
+	echo -n $"Shutting down NFS mountd: "
+	killproc rpc.mountd
+	echo
+	echo -n $"Shutting down NFS daemon: "
+	killproc nfsd
+	echo
+	#if [ -n "$RQUOTAD" -a "$RQUOTAD" != "no" ]; then
+	#	echo -n $"Shutting down NFS quotas: "
+	#	killproc rpc.rquotad
+	#	echo
+	#fi
+	# Reset the lockd ports if they were set
+	if [ -n "$LOCKD_TCPPORT" ]; then
+	    /sbin/sysctl -w fs.nfs.nlm_tcpport=0 >/dev/null 2>&1
+	fi
+	if [ -n "$LOCKD_UDPPORT" ]; then
+	    /sbin/sysctl -w fs.nfs.nlm_udpport=0 >/dev/null 2>&1
+	fi
+	# Do it the last so that clients can still access the server
+	# when the server is running.
+	action $"Shutting down NFS services: " ${nfsd_path}/sbin/exportfs -au
+	rm -f /var/lock/subsys/nfs
+        killall rpc.idmapd
+        killall rpc.statd
+	umount_export_folder        
+	nfs_file="${nfs_file_path}/${nfs_folder_file}"
+	rm -rf ${nfs_file}
+	;;
+  status)
+	#[ -x ${nfsd_path}/sbin/rpc.svcgssd ] && ${rc_path}/rpcsvcgssd status
+	echo -n $"Shutting down NFS mountd: "
+	status rpc.mountd
+	status nfsd
+	#if [ -n "$RQUOTAD" -a "$RQUOTAD" != "no" ]; then
+	#	status rpc.rquotad
+	#fi
+	;;
+  boot)
+	$0 start
+	;;
+  restart)
+	$0 stop
+	$0 start
+	;;
+  reload)
+      	set_nfs_exports
+	${nfsd_path}/sbin/exportfs -r
+	touch /var/lock/subsys/nfs
+	;;
+  probe)
+	if [ ! -f /var/lock/subsys/nfs ] ; then
+	  echo $"start"; exit 0
+	fi
+	/sbin/pidof rpc.mountd >/dev/null 2>&1; MOUNTD="$?"
+	/sbin/pidof nfsd >/dev/null 2>&1; NFSD="$?"
+	if [ $MOUNTD = 1 -o $NFSD = 1 ] ; then
+	  echo $"restart"; exit 0
+	fi
+	if [ /etc/exports -nt /var/lock/subsys/nfs ] ; then
+	  echo $"reload"; exit 0
+	fi
+	;;
+  condrestart)
+	#[ -x ${nfsd_path}/sbin/rpc.svcgssd ] && /sbin/service rpcsvcgssd condrestart
+  	[ -f /var/lock/subsys/nfs ] && {
+		$0 stop
+		$0 start
+	}
+	;;
+  *)
+	echo $"Usage: nfs {start|stop|status|restart|reload|condrestart}"
+	exit 1
+esac
+
+exit 0

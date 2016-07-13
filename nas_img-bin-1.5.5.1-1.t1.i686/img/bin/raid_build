@@ -1,0 +1,69 @@
+#!/bin/sh
+sleep_sec=10
+progress=''                             ## global, progress
+timex=''                                ## global, mean time grep from /proc/mdstat
+mdnum=$1
+if [ "$mdnum" = "" ];then
+	mdnum="0"
+fi                           
+. /img/bin/cproc                        ## include cproc
+
+set_proc() {
+  progress=$1
+  timex=$2
+}
+
+
+renice -10 -p `pidof httpd`
+renice 10 -p `pidof ksoftirqd/0`
+set_proc `/bin/cat /proc/mdstat|sed -n '/^md'$mdnum' /,/^md[0-9]/p'|grep -v bitmap |awk 'NR==3{p=$4;t=$6;sub("finish=","",t);if($1=="resync=DELAYED") p="...";print p,t}'`
+while [ ! "${progress}" = "" ]
+do
+  if [ $mdnum -ge 30 ] && [ $mdnum -lt 60 ];then
+    even=`expr $mdnum / 2 \* 2`
+    if [ ! $mdnum -eq $even ];then
+      progress_odd_10=`echo ${progress} | awk -F% '{print $1*10}'`
+      progress_even_10=`/bin/cat /proc/mdstat|sed -n '/^md'$even' /,/^md[0-9]/p'|grep -v bitmap |awk 'NR==3{p=$4;if($1=="resync=DELAYED") p="...";print p}' | awk -F% '{print $1*10}'`
+      progress_odd=`echo ${progress} | awk -F% '{print $1}'`
+      progress_even=`/bin/cat /proc/mdstat|sed -n '/^md'$even' /,/^md[0-9]/p'|grep -v bitmap |awk 'NR==3{p=$4;if($1=="resync=DELAYED") p="...";print p}' | awk -F% '{print $1}'`
+    else
+      odd=`expr $mdnum + 1`
+      progress_odd_10=`/bin/cat /proc/mdstat|sed -n '/^md'$odd' /,/^md[0-9]/p'|grep -v bitmap |awk 'NR==3{p=$4;if($1=="resync=DELAYED") p="...";print p}' | awk -F% '{print $1*10}'`
+      progress_even_10=`echo ${progress} | awk -F% '{print $1*10}'`
+      progress_odd=`/bin/cat /proc/mdstat|sed -n '/^md'$odd' /,/^md[0-9]/p'|grep -v bitmap |awk 'NR==3{p=$4;if($1=="resync=DELAYED") p="...";print p}' | awk -F% '{print $1}'`
+      progress_even=`echo ${progress} | awk -F% '{print $1}'`
+    fi
+    if [ $progress_even_10 -eq 0 ];then
+      progress=$progress_odd%
+    elif [ $progress_odd_10 -eq 0 ];then
+      progress=$progress_even%
+    elif [ $progress_odd_10 -gt $progress_even_10 ];then
+      progress=$progress_even%
+    elif [ $progress_odd_10 -lt $progress_even_10 ];then
+      progress=$progress_odd%
+    fi
+  fi
+  
+  update_status "Building: ${progress}"
+  render_time ${timex}
+  sleep ${sleep_sec}
+	set_proc `/bin/cat /proc/mdstat|sed -n '/^md'$mdnum' /,/^md[0-9]/p'|grep -v bitmap |awk 'NR==3{p=$4;t=$6;sub("finish=","",t);if($1=="resync=DELAYED") p="...";print p,t}'`
+done
+renice 0 -p `pidof httpd`
+renice 0 -p `pidof ksoftirqd/0`
+raid_status=`mdadm -D /dev/md$mdnum | awk -F' ' '/State :/{printf($4)}'`
+if [ "$raid_status" = "" ];then
+	raid_status="Healthy"
+fi
+if [ "$raid_status" = "FAILED" ];then
+	raid_status="Damaged"
+fi
+raid_status=`echo ${raid_status:0:1} | tr '[:lower:]' '[:upper:]'`${raid_status:1}
+update_status $raid_status
+
+if [ "$raid_status" == "Healthy" ] && [ -f "/raidsys/$mdnum/HugeVolume" ] && [ "`cat /raidsys/$mdnum/HugeVolume`" == "" ];then
+	raidLabel=`cat /raidsys/$mdnum/raid_id`
+	/img/bin/logevent/event 997 813 "info" "email" "${raidLabel}" "created"
+fi
+
+echo "LCM_RAID $raid_status" > /proc/thecus_io

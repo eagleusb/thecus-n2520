@@ -1,0 +1,87 @@
+#!/bin/sh
+
+PATH=$PATH:/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin:/usr/lib/nas_img-tools
+
+show_usage(){
+	echo "Usage:"
+	echo " `basename $0` <Type> <Device> <Options> [<file>]"
+	echo 
+	echo "  Type:"
+	echo "   emmc                      2G eMMC device"
+	echo "   emmc4                     4G eMMC device"
+	echo "   flash                     SPI Flash device"
+	echo 
+	echo "  Device:                    Target device, could be a bin file."
+	echo 
+	echo "  Options:"
+	echo "   -s | --show               Display MFH table"
+	echo "   -v | --info               Display version information"
+	echo "   -g | --signature          Display MFH Signature"
+	echo "   -k | --kernel <file>      Update kernel by file"
+	echo "   -i | --initrd <file>      Update initramfs by file"
+
+	exit $RET
+}
+
+init_env(){
+	TYPE="$1"
+	DEVICE="$2"
+	OPT="$3"
+	FILE="$4"
+
+	case "$TYPE" in
+	emmc)
+		USER_DATA=0x200000
+		;;
+	emmc4)
+		USER_DATA=0x400000
+		;;
+	flash)
+		USER_DATA=0
+		;;
+	*)
+		echo "Unsupported type!"
+		exit 1
+	esac
+
+	[ ! -e "$DEVICE" ] && echo "${DEVICE}: file not found!" && RET=1
+
+	RET=0
+}
+
+[ -z "$1" -o -z "$2" -o -z "$3" ] && show_usage
+
+init_env "$@"
+source libce
+
+if [ -e $DEVICE ];then
+	get_mfh
+	case "$OPT" in
+	-s|--show)
+		display_mfh
+		;;
+	-v|--info)
+		display_info
+		;;
+	-g|--signature)
+		display_sig
+		;;
+	-k|--kernel)
+		[ ! -f "$FILE" ] && RET=1 && show_usage
+		update_item "KERNEL" $FILE
+		;;
+	-i|--initrd)
+		[ ! -f "$FILE" ] && RET=1 && show_usage
+		update_item "RAMDISK" $FILE
+		;;
+	*)  RET=1
+		show_usage
+	esac
+	RET=$?
+else
+	echo "$DEVICE is not found!"
+	RET=1
+fi
+
+exit $RET
+

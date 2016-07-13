@@ -1,0 +1,192 @@
+<?
+require_once("HtmlHeader.html");
+require_once("GlobalVars.html");
+require_once("functions.html");
+?>
+<body bgcolor="#686868" text="#000000" leftmargin="0" topmargin="0" marginwidth="0" marginheight="0">
+<style type="text/css">
+<!--
+.style1 {	font-size: 14px;
+	font-weight: bold;
+	color: #FFFFFF;
+}
+body {
+	margin-left: 0px;
+	margin-top: 0px;
+	margin-right: 0px;
+	margin-bottom: 0px;
+	color: #FFFFFF;
+}
+body,td,th {
+	font-family: Arial, Helvetica, sans-serif;
+}
+.style2 {color: #666666; font-weight: bold; font-size: 12px; }
+.style3 {color: #FFFFFF; font-weight: bold; font-size: 12px; }
+.style4 {color: #000000; font-weight: bold; font-size: 12px; }
+a:link {
+	color: #FFFFFF;
+}
+a:visited {
+	color: #FFFFFF;
+}
+.shadow1, 
+.shadow2, 
+.shadow3 {display:inline-table}
+.shadow1 {float:left;background:url(/usr/gallery/img/shadow.gif) right bottom no-repeat}
+.shadow2 {background:url(/usr/gallery/img/corner_bl.gif) left bottom no-repeat}
+.shadow3 {padding:0 6px 6px 0;
+	background:url(/usr/gallery/img/corner_tr.gif) right top no-repeat
+}
+.shadow11 {float:left;background:url(/usr/gallery/img/shadow.gif) right bottom no-repeat}
+.shadow21 {background:url(/usr/gallery/img/corner_bl.gif) left bottom no-repeat}
+.shadow31 {padding:0 6px 6px 0;
+	background:url(/usr/gallery/img/corner_tr.gif) right top no-repeat
+}
+-->
+</style>
+<script language="javascript" src="/pub/isAccount.js"></script>
+<form method=post name=newAlbum >
+<input type=hidden name=album value="<?=$_POST['album']?>">
+<input type=hidden value="" name=admin>
+<table width="719px" border="0" cellspacing="0" cellpadding="0" align="center" class="outerpage">
+  <? require_once("HtmlBanner.html"); ?>
+  <tr>
+    <td align="center" valign="top">
+        <table width="95%"  border="0" cellpadding="0" cellspacing="0">
+          <tr>
+            <td width="70%" height="26" align="left"><span class="style1"><a href="iframe_gallery.html" target="_self"><?=$words['gallery']?></a> &gt;  <A 
+href="album.html?id=<?=fix_encode($_SESSION['username'])?>"><?=$words['my_gallery']?></A>&gt; <a href="photo.html?id=<?=fix_encode($_SESSION['username'])?>&album=<?=fix_encode($_POST['album'])?>"><?=$_POST['album']?></a> &gt; <?=$words['modify_photo'];?> </span></td>
+            <td width="30%" align="right">
+              <table width="10%"  border="0" cellpadding="0" cellspacing="0">
+                <tr align="center" valign="middle">
+                  <? PhotoMenu(); ?>
+                </tr>
+              </table>
+            </td>
+          </tr>
+        </table>
+        <table  width="95%" border="0" cellpadding="0" cellspacing="0">
+          <tr align="center"> 
+            <td colspan="6" class="style2" height="5"></td>
+          </tr>
+          <tr align="center"> 
+            <td width="11" class="style2"><img src="/usr/gallery/img/upload_bar_1.png" width="11" height="26"></td>
+            <td width="140" bgcolor="#475e6a" class="style3"><?=$words['Photo_Preview']?></td>
+            <td width="42" align="left" bgcolor="#94b4c4">&nbsp;</td>
+            <td width="180" bgcolor="#94b4c4" class="style3"><?=$words['subject_rest']?></td>
+            <td width="198" nowrap bgcolor="#94b4c4" class="style3"><?=$words['desp_rest']?></td>
+            <td width="11"><img src="/usr/gallery/img/upload_bar_2.png" width="11" height="26"></td>
+          </tr>
+	  <?for($i=0;$i<count($_POST['photo']);$i++){
+	    $_POST['photo'][$i]=fix_post($_POST['photo'][$i]);?>
+            <input type=hidden name=target_photo[] value="<?=$_POST['photo'][$i]?>">
+            <?
+              $PhotoSubject =AlbumRoot ."{$_SESSION['username']}/{$_POST['album']}/{$_POST['photo'][$i]}.Subject";
+              $PhotoDesp =AlbumRoot ."{$_SESSION['username']}/{$_POST['album']}/{$_POST['photo'][$i]}.Desp";
+            ?>
+          <tr align="center"> 
+            <td colspan="6" class="style2" height="10"></td>
+          </tr>
+          <tr> 
+            <td bgcolor="#7a94a1">&nbsp;</td>
+            <td align="center" valign="middle" bgcolor="#7a94a1">
+              <table width="0%"  border="1" cellpadding="2" cellspacing="0" bordercolor="#666666">
+                <tr> 
+                  <td bgcolor="#FFFFFF">
+                    <div class="shadow11"> 
+                    <div class="shadow21"> 
+                      <div class="shadow31"><?=GetImgSrc( fix_encode($_GET['id']), fix_encode($_GET['album']) ,fix_encode($_POST['photo'][$i]),"100x100","small")?>
+                      </div>
+                    </div>
+                    </div>
+                  </td>
+                </tr>
+              </table>
+            </td>
+            <td align="left" bgcolor="#c4d1d8">&nbsp;</td>
+            <td align="center" bgcolor="#c4d1d8"><span class="style3"><?=$words['subject']?></span><br> 
+              <input name="Subject[]" type="text" size="20" maxlength="20" value="<?=ParseObj($PhotoSubject)?>" onkeyup="checklength(this,20)" > </td>
+            <td align="center" bgcolor="#c4d1d8" id="td<?=$i?>"><span class="style3"><?=$gwords['description']?></span><br> 
+              <textarea name="Desp[]" cols="30"><?=Fix_UTF8(ParseObj($PhotoDesp),100);?></textarea></td>
+            <td width="11" bgcolor="#c4d1d8">&nbsp;</td>
+          </tr>
+	<?}?>
+          <tr> 
+            <td colspan="6" height="8"></td>
+          </tr>
+          <tr> 
+            <td colspan="6" align="center"> <input type=button name="confirm_modify" value="<?=$words['modify_photo']?>" onclick="ComfirmClick()"><input type=button value="<?=$words['cancel']?>" onclick=check_confirm_modify('');> 
+            </td>
+          </tr>
+        </table>
+    </td>
+  </tr>
+  <? require_once("HtmlBottom.html"); ?>
+</table>
+</form>
+
+<script language="javascript">
+
+function check_confirm_modify(ACT){
+	newAlbum.admin.value=ACT;
+	newAlbum.submit();
+	return true;
+}
+
+function ComfirmClick(){
+ 	if(!MLC(document.newAlbum))
+		return false;
+	check_confirm_modify('confirm_modify');
+}
+
+function MLC(form_id){
+var td_index=0;
+var pass=true;
+      with (form_id) {
+	for (i=0; i<elements.length; i++){
+	            if (elements[i].type=="text"){
+		checklength(elements[i],20);
+	            }
+	     if (elements[i].type=="textarea"){
+		if (elements[i].value.length>100){
+			document.getElementById("td"+td_index).style.backgroundColor="Red";
+			elements[i].focus();
+			pass=false;
+		}
+		else{
+			document.getElementById("td"+td_index).style.backgroundColor="#999999";
+		}
+		td_index++;
+	     }
+	}
+      }
+if (!pass)alert("<?=$words['max_desp_size']?>");
+return pass;
+}
+function checklength(key,len){
+	var sharename=key.value;
+	var sharename_length = 0;
+	var count = 0;
+    for(var i=0;i<sharename.length;i++){
+        if(sharename.charCodeAt(i)  > 255){
+           sharename_length += 2;
+		count++;
+		if(sharename_length>len)
+		key.value=sharename.substr(0,key.value.length-1);
+ 	}
+        else
+	{
+            sharename_length ++;
+		count++;
+		if(sharename_length>len)
+		key.value=sharename.substr(0,key.value.length-1);
+	}
+    }
+    if(sharename_length >= len){
+        key.maxLength = count;
+	return false;
+    }else
+	key.maxLength = len;
+	return true;
+}
+</script>

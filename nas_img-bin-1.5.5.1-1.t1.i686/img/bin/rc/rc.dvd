@@ -1,0 +1,87 @@
+#!/bin/sh
+dvd_start() {
+. /img/bin/function/libraid
+local Lmaster_raid=`Lraid_get_master_raid`
+local Lmaster_id=`echo "${Lmaster_raid}" | awk '{print substr($0,5)}'`
+local fRaidIdList=`Lraid_check_raid_exist $Lmaster_id`
+if [ $fRaidIdList == "1" ];
+then
+    return;
+fi
+count=0
+cat /proc/scsi/scsi | grep Type: | while read file;do
+cdcheck=`echo ${file} | grep CD-ROM | wc -l`
+count=$((count+1))
+if [ $cdcheck = 1 ];
+   then
+    echo "start"
+    Lan1=`cat /proc/scsi/scsi | grep Host:|sed -n ${count}p|awk '{print $2}'|awk -F'scsi' '{print $2}'`
+    Vendor=`cat /proc/scsi/scsi | grep Vendor:|sed -n ${count}p|awk -F':' '{print $2}'`
+    Vendor=`echo $Vendor|sed 's/Model//g'`
+    Vendor=`echo $Vendor`
+    Model=`cat /proc/scsi/scsi | grep Vendor:|sed -n ${count}p|awk -F':' '{print $3}'`
+    Model=`echo $Model|sed 's/Rev//g'`
+    Model=`echo $Model`
+    Lan2=`cat /proc/scsi/scsi | grep Host:|sed -n ${count}p|awk '{print $4}'`
+    Lan2=$((Lan2+0))
+    Lan3=`cat /proc/scsi/scsi | grep Host:|sed -n ${count}p|awk '{print $6}'`
+    Lan3=$((Lan3+0))
+    Lan4=`cat /proc/scsi/scsi | grep Host:|sed -n ${count}p|awk '{print $8}'`
+    Lan4=$((Lan4+0))
+    LanID=$Lan1:$Lan2:$Lan3:$Lan4
+    echo "$LanID"
+    devicedata=`find /sys/* -name sr*|grep $LanID`
+    echo "$devicedata"
+    folder_count=`echo "$devicedata" | awk -F'/' '{print NF}'`
+    strExec=`echo $devicedata | awk -F'/' '{tray='$folder_count';{print $tray}}' `
+    strExec=`echo $strExec`
+    echo $strExec
+    checkData="echo $devicedata | sed 's/\/sys//g'|sed 's/\/block//g'|sed 's/\/$strExec//g'"
+    checkDataResult=`eval $checkData`
+    echo $checkDataResult
+    if [ ! -d "/raid/data/USBHDD/CD" ];then
+       mkdir /raid/data/USBHDD/CD
+    fi
+    chown nobody.nogroup /raid/data/USBHDD/CD
+    Prepare_Data=`eval "echo /raid/data/USBHDD/CD/$Vendor $Model"`
+    flag=`ls "$Prepare_Data"|grep "$Vendor $Model"|wc -l`
+    count_VM=$((flag+1))
+    Data=`eval "echo /raid/data/USBHDD/CD/$Vendor $Model[$count_VM]"`
+    Data1=`eval "echo $Vendor $Model[$count_VM]"`
+    mkdir "$Data"
+    chown nobody.nogroup "$Data"
+    echo $checkDataResult >> /tmp/cd-rom
+    mountflag=`df -k | grep "$Vendor $Model[$count_VM]"|wc -l`
+    if [ mountflag==0 ];then
+        mount -t udf,iso9660 -o ro,uid=99,gid=99,utf8 /dev/$strExec "$Data"
+    fi
+    eval "/usr/bin/auto-eject-cdrom /dev/$strExec $checkDataResult -VM '$Data1' &"
+fi
+done
+}
+dvd_stop() {
+     killall auto-eject-cdrom
+     rm -f /tmp/cd-rom
+     if [  -d "/raid/data/USBHDD/CD" ];then
+        ls -l /raid/data/USBHDD/CD |while read file;do
+          mount_before_item=`echo $file| awk -F' ' '{print $8}'`
+          mount_item="echo $file| awk -F'$mount_before_item' '{print \$2}'"
+          mount_item_check=`eval $mount_item`
+          mount_item_check=`echo $mount_item_check`
+          umount "/raid/data/USBHDD/CD/$mount_item_check"
+          rmdir "/raid/data/USBHDD/CD/$mount_item_check"
+     done
+     fi
+}
+case "$1" in
+'start')
+   dvd_start
+   ;;
+'stop')
+   dvd_stop
+   ;;
+*)
+   exit 1
+   ;;
+esac
+                        

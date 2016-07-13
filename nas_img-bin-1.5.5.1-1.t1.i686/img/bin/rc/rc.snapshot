@@ -1,0 +1,202 @@
+#!/bin/sh
+md_num=$2
+share=$3
+action=$4
+zfs_path=$5
+if [ "${action}" == "del_shot" ];
+then
+  snap_date=$6
+fi
+sqlite="/usr/bin/sqlite"
+sys_snap_count=`/img/bin/check_service.sh snapshot`
+var_tmp="/var/tmp"
+raid="raid"${md_num}
+database="/${raid}/sys/snapshot.db"
+logevent="/img/bin/logevent/event"
+crond_file="/etc/cfg/crond.conf"
+tmp_crond="/tmp/crond.conf"
+
+if [ ! -d '/raid/sys' ];then
+  exit
+fi
+
+if [ ${sys_snap_count} == 0 ] || [ ${sys_snap_count} == "" ];
+then
+  echo "You dont have snapshot service!"
+  exit
+fi
+
+del_all_snapshot_crontab(){
+    strExec="cat $crond_file | grep -v '/img/bin/rc/rc.snapshot start \"$md_num\"' > $tmp_crond"
+    eval $strExec
+    cat "$tmp_crond" > $crond_file
+    /usr/bin/killall crond
+    sleep 1
+    /usr/sbin/crond
+    /usr/bin/crontab $crond_file -u root
+    rm -rf $tmp_crond
+}
+
+del_one_snapshot_crontab(){
+    strExec="cat $crond_file | grep -v '#snapshot $share$' > $tmp_crond"
+    eval $strExec
+    cat "$tmp_crond" > $crond_file
+    /usr/bin/killall crond
+    sleep 1
+    /usr/sbin/crond
+    /usr/bin/crontab $crond_file -u root
+    rm -rf $tmp_crond
+}
+
+check_share_folder(){
+  if [ ! -d "/raid/data/snapshot/${share}" ];                                                                    
+  then                                                                                                       
+    echo "mkdir /raid/data/snapshot/${share}"
+    mkdir "/raid/data/snapshot/${share}"
+    chmod 774 "/raid/data/snapshot/${share}"
+    setfacl -m other::rwx "/raid/data/snapshot/${share}"
+  fi  
+}
+
+start(){
+  if [ "${md_num}" == "" ] || [ "${share}" == "" ];
+  then
+    echo "MD number or Share name is empty!"
+    exit 1
+  fi
+
+  check_share_folder
+  
+  strExec="ls -l \"/raid/data/snapshot/${share}\" | wc -l"
+  snap_count=`eval $strExec`
+
+  if [ $snap_count -ge $sys_snap_count ];
+  then
+    if [ "${action}" == "set_schedule" ];then
+      autodel=`${sqlite} ${database} "select autodel from snapshot where zfs_share='${share}'"`
+      if [ ${autodel} == 1 ];then
+        #########################################
+        #	Delete first record
+        #########################################
+        first_date=`ls -l "/raid/data/snapshot/${share}" | awk -F'@' '{print $2}' | sort | head -n 1`
+        echo "${first_date}"
+        /sbin/btrfsctl -D ${share}@${first_date} /$raid/data
+        rm /raid/data/snapshot/${share}/${first_date}
+        ${logevent} 997 427 info "" "/raid/data/snapshot/${share}/${first_date}"
+      else
+        #echo "over sysconf snapshot count"
+        ${logevent} 997 504 warning "" "${sys_snap_count}"
+        echo "-9"
+        exit 1
+      fi
+    else
+      #echo "over sysconf snapshot count"
+      ${logevent} 997 504 warning "" "${sys_snap_count}"
+      echo "-9"
+      exit 1
+    fi  
+  fi
+  snap_date=`date +%Y%m%d-%H%M%S`
+  #######################################################
+  #   Set snapshot
+  #######################################################
+  /sbin/btrfsctl -s /$raid/data/${share}@${snap_date} /$raid/data/${share}
+  ret=$?
+#  if [ ${ret} == 0 ];
+#  then
+    #echo "success"
+    ${logevent} 997 426 "info" "" "/raid/data/snapshot/${share}/${snap_date}"
+    ln -sf /$raid/data/${share}@${snap_date} /raid/data/snapshot/${share}/${snap_date}
+    echo "0"
+    exit 0
+#  else
+#    rmdir "/raid/data/snapshot/${share}/${snap_date}"
+#  fi
+}
+
+boot(){
+  md_list=`cat /proc/mdstat | awk -F: '/^md6[0-9] :/{print substr($1,3)}' | sort -u`
+  if [ "${md_list}" == "" ];then
+    md_list=`cat /proc/mdstat | awk -F: '/^md[0-9] :/{print substr($1,3)}' | sort -u`
+  fi
+  
+  for md in ${md_list}
+  do
+    raid="raid"${md}
+    if [ -d "/${raid}/" ];
+    then
+      raid_db="/${raid}/sys/smb.db"
+      status=`cat ${var_tmp}/${raid}/rss`
+      if [ "${status}" == "Damaged" ];
+      then
+        echo "The RAID [ ${raid} ] is Damaged!"
+        continue
+      fi
+
+      filesystem=`$sqlite $raid_db "select v from conf where k='filesystem'"`
+      if [ "${filesystem}" != "btrfs" ];
+      then
+        continue
+      fi
+    fi
+  done
+}
+
+del_snapshot(){
+  if [ "${action}" == "all_snapshot" ] && [ "${snap_date}" == "" ];then
+    echo "delete all"
+    date_list=`ls /${raid}/data/ | grep ${share}@ | awk -F'@' '{print $2}'`
+  elif [ "${action}" == "del_shot" ] && [ "${snap_date}" != "" ];then
+    date_list="${snap_date}"
+  else
+    ${logevent} 997 643 "error" ""
+    echo "-6"
+    exit 1
+  fi
+  echo "${date_list}" | \
+  while read snap_date
+  do
+    if [ "${snap_date}" == "" ];
+    then
+      echo "No snapshot list"
+      exit 0
+    fi
+    /sbin/btrfsctl -D ${share}@${snap_date} /$raid/data
+    rm "/raid/data/snapshot/${share}/${snap_date}"
+  done
+  if [ "${action}" == "all_snapshot" ];
+  then
+    rmdir "/raid/data/snapshot/${share}"
+    $sqlite $database "delete from snapshot where zfs_share='${share}'"
+    del_one_snapshot_crontab
+  fi
+  exit 0
+}
+
+if [ "$1" == "del_raid" ];then
+    del_all_snapshot_crontab
+    exit
+fi
+
+
+case "$1"
+in
+  start)
+    start
+    ;;
+  boot)
+    boot
+    ;;
+  delete)
+    del_snapshot
+    ;;
+  check_share_folder)
+    check_share_folder
+    ;;
+  *)
+    echo "Usage : "
+    echo "  Delete : $0 delete [MD number] [Share name] [Action] [ZFS path] [date]"
+    echo "   Start : $0 start [MD number] [Share name] [Action]"
+    echo "    Boot : $0 boot"
+    ;;
+esac

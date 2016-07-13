@@ -1,0 +1,39 @@
+<style type="text/css">
+<!--
+.style1 {	font-size: 12px;
+	font-weight: bold;
+	color: #FFFFFF;
+}
+body {
+	margin-left: 0px;
+	margin-top: 0px;
+	margin-right: 0px;
+	margin-bottom: 0px;
+}
+body,td,th {
+	font-family: Tahoma, Arial, "Times New Roman";
+}
+.style2 {color: #cccccc; font-weight: bold; font-size: 12px; }
+.style3 {color: #FFFFFF; font-weight: bold; font-size: 12px; }
+.style4 {color: #000000; font-weight: bold; font-size: 12px; }
+a:link {
+	color: #FFFFFF;
+}
+a:visited {
+	color: #FFFFFF;
+}
+.shadow1, 
+.shadow2, 
+.shadow3 {display:inline-table}
+.shadow1 {float:left;background:url(images/shadow.gif) right bottom no-repeat}
+.shadow2 {background:url(images/corner_bl.gif) left bottom no-repeat}
+.shadow3 {padding:0 6px 6px 0;
+	background:url(images/corner_tr.gif) right top no-repeat
+}
+.shadow11 {float:left;background:url(images/shadow.gif) right bottom no-repeat}
+.shadow21 {background:url(images/corner_bl.gif) left bottom no-repeat}
+.shadow31 {padding:0 6px 6px 0;
+	background:url(images/corner_tr.gif) right top no-repeat
+}
+-->
+</style>

@@ -1,0 +1,558 @@
+#!/bin/sh
+#################################################
+##  Define global vars
+##  Input format post_create $mdnum $datapercentage $raidLable $ismasterraid $filesystem
+##  EX:  ./post_create 2 80 "raid lable name" 0 "filesystem" ""
+#################################################
+PATH=$PATH:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+source /img/bin/function/libmodule
+mdnum=$1
+if [ "$mdnum" = "" ];then
+  mdnum="0"
+fi
+raidnum=$mdnum
+raid_name="raid$raidnum"
+md_name="md$mdnum"
+
+percent1=$2
+
+raidLable=$3
+if [ "$raidLable" = "" ];then
+  raidLable="$raid_name"
+fi
+
+ismasterraid=$4
+if [ "$ismasterraid" != "1" ];then
+  ismasterraid="0"
+fi
+
+fsmode=$5
+if [ "$fsmode" = "" ];then
+  fsmode="xfs"
+fi
+
+assume_clean=$6
+
+encpass=$7
+if [ "$encpass" != "" ];then
+    use_encrypt="1"
+else
+    use_encrypt="0"
+fi
+
+mkext4_option="`/img/bin/check_service.sh mkext4_option`"
+if [ "${mkext4_option}" == "" ];then
+    mkext4_option="-t ext4 -m 0 -b 4096"
+fi
+
+work_disk="/dev/$md_name"
+sqlite_cmd="/usr/bin/sqlite"
+mke2fs="/sbin/mke2fs"
+mke2fs_option="-t ext3 -m 0 -b 4096 -i 4096"
+mkxfs="/sbin/mkfs.xfs"
+mkext4="/sbin/mke2fs"
+mkbtrfs="/sbin/mkfs.btrfs"
+enc_raid="/usr/bin/enc_raid"
+sleep_sec=10
+snapshot=`/img/bin/check_service.sh snapshot`
+esata_count=`/img/bin/check_service.sh esata_count`
+intelligent_nas=`/img/bin/check_service.sh intelligent_nas`
+wick_size=200M        ## each volume size we steal from user hd
+lockfile=/var/tmp/raidlock    ## lock file, for use in "addshare web UI" lock function
+logger=/usr/bin/logger      ## shell syslog
+progress=''        ## global, progress
+timex=''        ## global, mean time grep from /proc/mdstat
+. /img/bin/cproc      ## include cproc
+
+REDIRECT=/var/run/build_fs_progress
+if [ ! -p $REDIRECT ]; then
+    REDIRECT=/dev/null
+fi
+
+#################################################
+##  Define subroutine
+#################################################
+
+## called to set the two global vars for later usage
+set_proc() {
+  progress=$1
+  timex=$2
+}
+
+## called to handle error, include turn off busy led, echo error code, log syslog
+error() {
+  led_busy "${not_busy}"
+  unlock
+  update_status "Error code: $1"
+  if [ ! "$2" = "" ]
+  then
+    log_error "$2"
+  fi
+  exit "$1"
+}
+
+## func interface to use syslog arg is message you want to log
+log_error() {
+        ${logger} -p user.err "$1"
+}
+
+## called to sleep 1 sec and call sync system call
+pause() {
+  sleep 1
+  sync
+}
+
+## if ${lockfile}'s content is 1, it will lock
+lock() {
+  echo 1 > ${lockfile}
+}
+
+## if ${lockfile}'s content is 0, it will unlock
+unlock() {
+  echo 0 > ${lockfile}
+}
+
+## use to steal space from user hd
+wickie() {
+  mkdir -p /$raid_name/sys || error 001
+  mkdir -p /$raid_name/data/tmp || error 002
+  if [ "$fsmode" = "btrfs" ];then
+    /sbin/btrfsctl -S _NAS_Media /$raid_name/data/
+    /sbin/btrfsctl -S NAS_Public /$raid_name/data/
+  else
+    mkdir -p /$raid_name/data/_NAS_Media || error 004
+    mkdir -p /$raid_name/data/NAS_Public || error 027
+  fi
+  mkdir -p /$raid_name/data/USBCopy || error 005
+  mkdir -p /$raid_name/data/USBHDD || error 006
+#  mkdir -p /$raid_name/data/_NAS_Module_Source_ || error 007
+
+  if [ "$esata_count" != "0" ];then
+    mkdir -p /$raid_name/data/eSATAHDD || error 028
+  fi
+
+  mkdir -p /$raid_name/data/_SYS_TMP || error 007
+  mkdir -p /$raid_name/data/ftproot || error 007
+
+  if [ "$snapshot" != "0" ];then
+    mkdir -p /$raid_name/data/snapshot || error 007
+  fi
+
+  mkdir -p /$raid_name/data/module || error 008
+  mkdir -p /$raid_name/data/module/cfg || error 009
+  mkdir -p /$raid_name/data/module/cfg/module.rc || error 010
+  raid_id=${raidLable}
+  if [ $raid_id != "" ];then
+    mkdir -p /$raid_name/data/_NAS_Recycle_${raid_id} || error 011
+  fi  
+  cp -rf /img/inc/module /$raid_name/data/module/index
+  /usr/bin/sqlite /$raid_name/data/module/cfg/module.db 'create table mod (module,gid,predicate,object)' || error 015
+  /usr/bin/sqlite /$raid_name/data/module/cfg/module.db 'create table module (name,version,description,enable,updateurl,icon,mode,homepage,ui)' || error 016
+  
+  chown nobody:users /$raid_name/data/_NAS_Media
+  chown nobody:users /$raid_name/data/USBCopy
+  chown nobody:users /$raid_name/data/USBHDD
+  chown nobody:users /$raid_name/data/NAS_Public
+
+  if [ "$esata_count" != "0" ];then
+    chown nobody:users /$raid_name/data/eSATAHDD
+  fi
+#  chown nobody:users /$raid_name/data/_NAS_Module_Source_
+  if [ "$snapshot" != "0" ];then
+    chown nobody:users /$raid_name/data/snapshot
+  fi
+
+  if [ $raid_id != "" ];then
+    chown nobody:users /$raid_name/data/_NAS_Recycle_${raid_id}
+    create_share _NAS_Recycle_${raid_id} yes
+  fi  
+  
+  create_share _NAS_Media yes
+  create_share USBCopy yes
+  create_share USBHDD usby "Used for external USB HDDs only."
+  create_share NAS_Public yes
+
+  if [ "$esata_count" != "0" ];then
+    create_share eSATAHDD usby "Used for eSATA HDDs only."
+  fi
+#  create_share _NAS_Module_Source_ yes
+
+  if [ "$snapshot" != "0" ];then
+    create_share snapshot no "Used for snapshots only."
+  fi
+
+  sqlite /etc/cfg/conf.db "delete from nsync"
+  cat /etc/cfg/crond.conf | grep -v nsync.sh > /tmp/crond.conf
+  cp /tmp/crond.conf /etc/cfg/crond.conf
+  /usr/bin/killall crond;sleep 1;/usr/sbin/crond
+  /usr/bin/crontab /etc/cfg/crond.conf -u root
+
+  if [ "$intelligent_nas" -eq "1" ];then
+      ln -sf /$raid_name/data/_NAS_Media /$raid_name/data/NAS_Public/_NAS_Media
+  fi
+#  if [ "${ismasterraid}" = "1" ];then
+#    if [ -d /rom/Modules ];then
+#      cp -f /rom/Modules/* /$raid_name/data/_NAS_Module_Source_/
+#    fi
+#  fi
+}
+
+##Leon 2005/07/21 create raid,create special folder share
+create_share() {
+  if [ "${2}" = "yes" ]; then
+    chmod 774 /$raid_name/data/${1}
+    setfacl -m other::rwx /$raid_name/data/${1}
+    setfacl -d -m other::rwx /$raid_name/data/${1}
+    guest=yes
+  elif [ "${2}" = "no" ]; then
+    chmod 700 /$raid_name/data/${1}
+    setfacl -m other::--- /$raid_name/data/${1}
+    setfacl -d -m other::--- /$raid_name/data/${1}
+    guest=no
+  elif [ "${2}" = "usby" ]; then
+    chmod 774 /$raid_name/data/${1}
+    setfacl -m other::rwx /$raid_name/data/${1}
+    guest=yes
+  elif [ "${2}" = "ehdd" ]; then
+    chmod 0755 /$raid_name/data/${1}
+    guest=yes
+  elif [ "${2}" = "usbn" ]; then
+    setfacl -m other::r-x /$raid_name/data/${1}
+    guest=no
+  else
+    setfacl -m other::r-x /$raid_name/data/${1}
+    setfacl -d -m other::r-x /$raid_name/data/${1}
+    guest=yes
+  fi
+
+  comment=""
+  if [ "${3}" != "" ]; then
+    comment=${3}
+  fi
+
+        map_hidden="no"
+        if [ "$guest" = "no" ] ; then
+              map_hidden="yes"
+        fi
+
+#  ln -sf ../${1} /$raid_name/data/ftproot
+}
+
+## use to do post action of RAID creat
+raid_frame() {
+  update_status "Please wait ... formatting RAID ..."
+  echo 100 > /proc/sys/vm/swappiness
+  pause
+  
+  rm -rf /$raid_name
+  mkdir -p /$raid_name
+  #rm -rf /raidsys/$mdnum/*
+  ln -sf /raidsys/$mdnum /$raid_name/sys
+  sleep 1
+  /img/bin/smbdb.sh raidDefault $raid_name "${raidLable}" $fsmode
+  sleep 1
+  
+  if [ "$use_encrypt" = "1" ];then
+    ${enc_raid} $mdnum "$encpass"
+    if [ "$?" != "0" ];then
+      echo "Create Encrypt Raid Failed!!"
+      exit;
+    fi
+    work_disk="/dev/`encr_util -g $mdnum`"
+  else
+    work_disk="/dev/$md_name"
+  fi
+
+  /sbin/blockdev --setra 4096 $work_disk
+  case "$fsmode" in
+    xfs)
+      ${mkxfs} $work_disk -f &
+    ;;
+    ext3)
+      ${mke2fs} ${mke2fs_option} $work_disk &
+    ;;
+    ext4)
+      if [ $REDIRECT == "/dev/null" ]; then
+          ${mkext4} ${mkext4_option} $work_disk &
+      else
+          ${mkext4} ${mkext4_option} $work_disk > $REDIRECT
+      fi
+    ;;
+    btrfs)
+      ${mkbtrfs} $work_disk &
+    ;;
+  esac
+  
+  sleep 3
+  FormatDisk=0
+  ResizeDisk=0
+  CheckDisk=0
+  while [ ${FormatDisk} -eq 0 ] || [ ${ResizeDisk} -eq 0 ] || [ ${CheckDisk} -eq 0 ]
+  do
+    update_status "Please wait ... formatting RAID ..."
+    sleep 1
+    case "$fsmode" in
+      xfs)
+        /bin/ps xw|grep "${mkxfs} $work_disk -f"|grep -v grep
+        FormatDisk=$?
+        /bin/ps xw|grep "xfs_growfs"|grep -v grep
+        ResizeDisk=$?
+        /bin/ps xw|grep "xfs_repair"|grep -v grep
+        CheckDisk=$?
+      ;;
+      ext3)
+        /bin/ps xw|grep "${mke2fs} ${mke2fs_option} $work_disk"|grep -v grep
+        FormatDisk=$?
+        ResizeDisk=1
+        CheckDisk=1
+      ;;
+      ext4)
+        /bin/ps xw|grep "${mkext4} ${mkext4_option} $work_disk"|grep -v grep
+        FormatDisk=$?
+        ResizeDisk=1
+        CheckDisk=1
+      ;;
+      btrfs)
+        /bin/ps xw|grep "${mkbtrfs} $work_disk"|grep -v grep
+        FormatDisk=$?
+        ResizeDisk=1
+        CheckDisk=1
+      ;;
+    esac
+  done
+
+  /img/bin/logevent/event 159 $raidLable >/dev/null 2>&1 &
+  /img/bin/logevent/event 233 $raidLable >/dev/null 2>&1 &
+
+  case "$fsmode" in
+    xfs)
+      mount -t xfs -o attr2,noatime,nodiratime,nobarrier,inode64 $work_disk /$raid_name
+    ;;
+    ext3)
+      mount -t ext3 -o user_xattr,acl,rw,data=writeback,noatime,nodiratime,barrier=0,errors=remount-ro $work_disk /$raid_name
+    ;;
+    ext4)
+      mount -t ext4 -o user_xattr,acl,rw,data=writeback,noatime,nodiratime,barrier=0,errors=remount-ro $work_disk /$raid_name
+    ;;
+    btrfs)
+      mount -t btrfs -o rw,noatime,nodiratime $work_disk /$raid_name
+    ;;
+  esac
+  
+  if [ $? -eq 0 ]; then
+    echo 60 > /proc/sys/vm/swappiness
+    pause
+    ln -sf /raidsys/$mdnum /$raid_name/sys
+    mkdir -p /$raid_name/data
+    ln -sf . /$raid_name/data/data
+    ln -sf ../sys /$raid_name/data/sys
+##
+ # In this function, if root_on_emmc exists, then it sets symbolic link
+ # of modules to data RAID.
+ ##
+    set_module_to_dataraid
+    pause
+    if [ "$ismasterraid" = "1" ];then
+      /img/bin/set_masterraid.sh $raidnum
+    fi
+  else
+    mdadm --stop /dev/$md_name
+    rm -rf /raidsys/$mdnum/*
+    if [ $mdnum -ge 60 ];then
+      sysnum=`expr $mdnum + 10`
+    else
+      sysnum=`expr $mdnum + 50`
+    fi
+    
+    umount /dev/md$sysnum
+    mdadm -S /dev/md$sysnum
+    rm -rf /tmp/$raid_name
+    echo 60 > /proc/sys/vm/swappiness
+    error 009 "Hardisk format error"
+  fi
+}
+
+## roaming config files, called by batch_config_roaming
+config_roaming() {
+  if [ -d /$raid_name/sys ]
+  then
+    conf=$1
+    det=${conf}.default
+    sysconf=/$raid_name/sys/"`basename ${conf}`"
+    if [ -f ${conf} ] && [ ! -e ${det} ]
+    then
+      cp -pR ${conf} ${det} &&
+      cp -pR ${conf} ${sysconf} &&
+      rm -rf ${conf} &&
+      ln -s ${sysconf} ${conf}
+    else
+      if [ -f ${conf} ] && [ -f ${det} ]
+      then
+        cp -pR ${det} ${sysconf} &&
+        rm -rf ${conf} &&
+        ln -s ${sysconf} ${conf}
+      else
+        if [ -L ${conf} ] && [ -e ${det} ]
+        then
+          cp -pR ${det} ${sysconf} &&
+          rm -rf ${conf} &&
+          ln -s ${sysconf} ${conf}
+        fi
+      fi
+    fi
+  fi
+}
+
+## read /etc/cfg/roaming and roaming them all
+batch_config_roaming() {
+  cfg_file=/etc/cfg/roaming
+  fs=$(cat ${cfg_file})
+  for f in ${fs}
+  do
+    if [ ! "${f}" = "" ]
+    then
+      config_roaming "${f}"
+    fi
+  done
+
+}
+
+## prepare for later action
+beforehand() {
+  lock
+  led_busy "${busy}"
+  if [ "$ismasterraid" = "1" ];then
+    /img/bin/service stop
+    old_master_mdnum=`df -P /raid/ | tail -1 | awk '{print $1}' | awk -F"md" '{print $2}'`
+  fi
+}
+
+## call to get disk UUID
+get_uuid() {
+        UUID=`mdadm -D /dev/${1} 2>/dev/null | awk 'BEGIN{OFS=";";FS=" : "}{if($1~/UUID/ && UUID==""){UUID=$2}if($1~/Raid Level/){TYPE=$2}}END{if(TYPE!="" && UUID!="")print TYPE,UUID}'`
+        echo ${UUID}
+}
+
+## post action
+postact() {
+  led_busy "${not_busy}"
+  if [ $mdnum -ge 60 ];then
+    sysnum=`expr $mdnum + 10`
+  else
+    sysnum=`expr $mdnum + 50`
+  fi
+
+  ## Fetch current time
+  TIME_STAMP=`date +%Y%m%d_%H%M%S`
+  ## Initial dump folder
+  DUMP_FOLDER="/syslog/sbdump"
+  [ ! -d "${DUMP_FOLDER}" ] && mkdir -p ${DUMP_FOLDER}
+
+  activedisk=`mdadm -D /dev/md${sysnum} |awk -F'active sync' '/active sync/{disklist=sprintf("%s %s",disklist,substr($2,9,5))}END{print disklist}'`
+  for savedisk in $activedisk
+  do
+    /usr/bin/save_super /dev/$savedisk ${DUMP_FOLDER}/CR_${savedisk}_${TIME_STAMP}
+  done
+  
+  activedisk=`mdadm -D /dev/${md_name} |awk -F'active sync' '/active sync/{disklist=sprintf("%s %s",disklist,substr($2,9,5))}END{print disklist}'`
+  for savedisk in $activedisk
+  do
+    /usr/bin/save_super /dev/$savedisk ${DUMP_FOLDER}/CR_${savedisk}_${TIME_STAMP}
+  done
+  uuid=`get_uuid ${md_name}`
+  echo "${uuid}" > /$raid_name/sys/uuid
+  
+  nesnum=`expr $mdnum + $mdnum + 30`
+  if [ `cat /proc/mdstat | grep "^md$nesnum " | wc -l` -ne 0 ]; then
+    activedisk=`mdadm -D /dev/md${nesnum} |awk -F'active sync' '/active sync/{disklist=sprintf("%s %s",disklist,substr($2,9,5))}END{print disklist}'`
+    for savedisk in $activedisk
+    do
+      /usr/bin/save_super /dev/$savedisk ${DUMP_FOLDER}/CR_${savedisk}_${TIME_STAMP}
+    done
+    uuid=`get_uuid md$nesnum`
+    echo "${uuid}" > /$raid_name/sys/uuid_a
+  fi
+  
+  nesnum=`expr $mdnum + $mdnum + 31`
+  if [ `cat /proc/mdstat | grep "^md$nesnum " | wc -l` -ne 0 ]; then
+    activedisk=`mdadm -D /dev/md${nesnum} |awk -F'active sync' '/active sync/{disklist=sprintf("%s %s",disklist,substr($2,9,5))}END{print disklist}'`
+    for savedisk in $activedisk
+    do
+      /usr/bin/save_super /dev/$savedisk ${DUMP_FOLDER}/CR_${savedisk}_${TIME_STAMP}
+    done
+    uuid=`get_uuid md$nesnum`
+    echo "${uuid}" > /$raid_name/sys/uuid_b
+  fi
+
+  unlock
+  echo "post create running" > /tmp/post_create
+  if [ "$ismasterraid" = "1" ] && [ -x /opt/VisoGuard/shell/module.rc ]; then
+    /opt/VisoGuard/shell/module.rc add $mdnum "$old_master_mdnum"
+  fi
+
+  if [ "$ismasterraid" = "1" ] && [ ! -f /tmp/ha_role ] ;then
+    /usr/sbin/apachectl start
+    /img/bin/service start
+  fi
+    
+  quota_enable=`/usr/bin/sqlite /etc/cfg/conf.db "select v from conf where k='quota'"`
+  if [ "${quota_enable}" == "1" ] && [ "${fsmode}" != "btrfs" ];then
+    /img/bin/rc/rc.user_quota mount_quota
+  fi
+  echo "post create finish" > /tmp/post_create
+
+}
+
+#################################################
+##  While loop
+#################################################
+
+# set TV display default value
+sqlite "/etc/cfg/conf.db" "update conf set v='NTSC' where k='tv_Display_standard'"
+sqlite "/etc/cfg/conf.db" "update conf set v='16:9' where k='tv_Display_ratio'"
+sqlite "/etc/cfg/conf.db" "update conf set v='Composite' where k='tv_Output_port'"
+sqlite "/etc/cfg/conf.db" "update conf set v='480p' where k='tv_Display_resolution'"
+
+update_status "Building RAID ... "
+echo "LCM_RAID Building RAID .." > /proc/thecus_io
+beforehand
+
+#################################################
+##  Main code
+#################################################
+if [ "$fsmode" = "hv" ];then
+  rm -rf /$raid_name
+  rm -rf /raidsys/$mdnum/*
+  /img/bin/smbdb.sh raidDefault $raid_name "${raidLable}" $fsmode
+  sleep 1
+  touch /raidsys/$mdnum/HugeVolume
+  mdadm -D /dev/md$mdnum > /raidsys/$mdnum/mdstatus
+  echo "${raidLable}" > /raidsys/$mdnum/raid_id
+  /img/bin/raid_build $raidnum &
+  unlock
+  exit 0
+fi
+
+raid_frame
+wickie
+pause
+batch_config_roaming
+pause
+# Modify JBOD status error bug #Leon 2005/5/23 
+###############################################
+
+if [ -f /tmp/opt_full.rom ] && [ -d /raid/sys ]; then
+  cp /tmp/opt_full.rom /raid/sys
+  sync
+fi
+/img/bin/raid_build $raidnum &
+postact
+file_path="/var/tmp/www/init_info"
+if [ -f "$file_path" ];then
+  /img/bin/init_user > /dev/null 2>&1
+fi
+exit 0
+
+#################################################
+##  The end
+#################################################

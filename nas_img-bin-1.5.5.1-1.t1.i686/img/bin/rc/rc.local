@@ -1,0 +1,273 @@
+#!/bin/sh 
+PIC_MSG=/img/bin/pic.sh
+MODELNAME=`awk -F' ' '/^MODELNAME/{printf($2)}' /proc/thecus_io`
+sed -i '/^HOSTNAME/d' /etc/sysconfig/network
+
+hostname_handler(){
+    echo "NETWORKING=yes" > /etc/sysconfig/network
+    echo "NTPSERVERARGS=iburst" >> /etc/sysconfig/network
+    echo "HOSTNAME=`cat /etc/HOSTNAME |cut -d . -f1`" >> /etc/sysconfig/network
+    cat /etc/HOSTNAME |cut -d . -f1 > /proc/sys/kernel/hostname
+}
+
+#set LANG for PHP because escapeshellarg/escapeshellcmd can't deal with chinese folder
+export LANG=en_US.UTF-8
+
+mount -o bind /dev/shm /var/tmp &
+PID=$!
+wait $PID
+
+#kill mnid, udhcpc and udpr, down eth0
+/img/bin/clean_up start
+
+#clear unused initramfs
+if [ -d "/var/run/initramfs" ];then
+    rm -rf /var/run/initramfs
+    echo 3 > /proc/sys/vm/drop_caches
+fi
+
+chmod 666 /dev/rtc0
+echo 1024 > /sys/class/rtc/rtc0/max_user_freq
+
+echo 2 > /proc/sys/net/ipv4/conf/all/arp_announce
+echo 1 > /proc/sys/net/ipv4/conf/all/arp_ignore
+
+if [ -e "/dev/rtc1" ];then
+    ln -sf /dev/rtc1 /dev/rtc
+fi
+
+/sbin/ldconfig
+/sbin/hwclock --hctosys --localtime
+
+${PIC_MSG} LCM_MSG Loading Driver 17
+modprobe usblp
+
+${PIC_MSG} LCM_MSG Check Default 50
+
+if [ -f "/etc/ResetDefault" ];then
+	#check link and busybox link
+	rm -f /usr/bin/sqlite
+	ln -sf /usr/bin/sqlite3 /usr/bin/sqlite
+
+	rm -f /sbin/udhcpc
+	ln -sf /sbin/busybox /sbin/udhcpc
+
+	rm -f /bin/ps
+	ln -sf /sbin/busybox /bin/ps
+
+	rm -f /usr/bin/passwd
+	ln -sf /sbin/busybox /usr/bin/passwd
+
+#For issue 4618, When resetting to default, we should remove not only local user but also samba user.
+        rm -f /etc/samba/passdb.tdb
+
+	rm -f /usr/sbin/stond
+	ln -sf /usr/sbin/sshd /usr/sbin/stond
+
+	rm -f /sbin/klogd
+	ln -sf /sbin/busybox /sbin/klogd
+
+	rm -f /usr/sbin/adduser #useradd
+	ln -sf /sbin/busybox /usr/sbin/adduser
+
+	rm -f /usr/sbin/addgroup
+	ln -sf /sbin/busybox /usr/sbin/addgroup
+
+	# Stop the original sshd.service
+	systemctl stop sshd.service
+	systemctl disable sshd.service
+
+	systemctl stop httpd.service
+	systemctl disable httpd.service
+
+	systemctl stop NetworkManager.service
+        systemctl disable NetworkManager.service
+
+	cp -rfd /img/bin/default_cfg/default/* /
+	cp -rfd /img/bin/default_cfg/${MODELNAME}/* /
+	admin_pwd=`/usr/bin/sqlite /etc/cfg/conf.db "select v from conf where k='admin_pwd'"`
+	/usr/bin/passwd "root" "${admin_pwd}"
+	rm -f /etc/ResetDefault
+	sync
+        #httpd reset
+        /usr/sbin/httpd.tool reset
+
+        hostname_handler
+
+        /img/bin/rc/rc.router reset
+fi
+
+#disabled ifplugd. execute ifplugd by our script "rc.net"
+/sbin/chkconfig ifplugd off
+
+#check ifplugd.action, if it newer in defaut_cfg/default/etc/ifplugd/ifplugd.action,
+# copy new file to /etc/ifplugd/ifplugd.action
+IFPLUGD_DIFF=`diff "/etc/ifplugd/ifplugd.action" "/img/bin/default_cfg/default/etc/ifplugd/ifplugd.action"`
+if [ ! "$IFPLUGD_DIFF" == "" ]; then
+    cp -f "/img/bin/default_cfg/default/etc/ifplugd/ifplugd.action" "/etc/ifplugd/ifplugd.action"
+fi
+
+#disable the auto raid rebuild function(Sun pm1:00)
+if [ -f "/etc/sysconfig/raid-check" ];then
+    sed -i 's/ENABLED=yes/ENABLED=no/g' /etc/sysconfig/raid-check
+fi
+
+#APM86491 NAS Optimization
+if [ -f "/lib/firmware/ipp_run.bin" ];then
+    echo 1 > /sys/bus/of_platform/drivers/ipp/fwload
+fi
+
+#add symbol link for encryption raid
+ln -s /sbin/busybox /usr/bin/uuencode
+
+#check path
+if [ ! -d "/opt/bin" ];then
+    mkdir -p /opt/bin
+fi
+
+if [ ! -e "/opt/bin/sqlite" ];then
+    ln -sf /usr/bin/sqlite3 /opt/bin/sqlite
+fi
+
+#config management upload from UI
+if [ -f "/etc/conf.tar.gz" ]; then
+    tar xzf /etc/conf.tar.gz -C /
+
+    #avoid the remote realtime/schedule task to be auto-run unexpectedly
+    sqlite /etc/cfg/backup.db "update opts set value='0' where key='schedule_enable' and tid in (select tid from task where act_type='remote')"
+    sqlite /etc/cfg/backup.db "update task set back_type='schedule', status='7' where act_type='remote'"
+    rm -f /etc/conf.tar.gz
+    sync
+    hostname_handler
+    touch /tmp/ha_norestore
+fi
+
+${PIC_MSG} LCM_MSG Start Network 83
+
+if [ ! -d "/syslog" ];then
+	mkdir /syslog
+fi
+
+#pid=`ps|grep "[/]opt/mni/node ./daemon.js" | awk '{print $1}'`
+#if [ "${pid}" != "" ];then
+#	kill -9 ${pid}
+#fi
+kill `cat /tmp/mnid.pid`
+
+hostname_handler
+
+#Set max_user_watches with tray number * 10000
+satacount=`cat /proc/thecus_io | awk '/^MAX_TRAY:/{print $2}'`
+max_user_watches=$((${satacount} * 10000))
+echo ${max_user_watches} > /proc/sys/fs/inotify/max_user_watches
+
+save_log="/usr/bin/savelog /etc/cfg/logfile "
+${save_log} "system_start" "start"
+
+/img/bin/setfan.sh load
+/img/bin/check_env.sh -a # check environment setting
+
+for((i=1;i<=2;i++))
+do
+	nic_filed="nic${i}_ipv4_enable"
+	niccount=`sqlite /etc/cfg/conf.db "select count(*) from conf where k='${nic_filed}'"`
+	if [ "${niccount}" == "0" ];then
+	   sqlite /etc/cfg/conf.db "insert into conf values('${nic_filed}','1')"
+	fi
+done
+
+
+#config nic
+MAC=$(ifconfig eth0 | grep HWaddr | sed -e 's/^.*HWaddr //' | cut -d" " -f1)
+echo $MAC > /var/cache/mac
+MAC2=$(ifconfig eth1 | grep HWaddr | sed -e 's/^.*HWaddr //' | cut -d" " -f1)
+echo $MAC2 > /var/cache/mac2
+/img/bin/rc/rc.cwireless boot
+/img/bin/rc/rc.net boot_step1
+/img/bin/rc/rc.net boot_step2
+/img/bin/ntp_cfg &
+
+${PIC_MSG} LCM_MSG Assemble RAID 116
+echo "clear queue" > /proc/thecus_eventc
+bash -x /img/bin/raid_start > /tmp/raid_start_log 2>&1
+
+killall node
+/opt/metad/shell/module.rc boot
+/opt/nas_nasd/shell/module.rc boot
+
+${PIC_MSG} LCM_MSG RAID Monitor 149
+/img/bin/raid_m2 >/dev/null 2>&1 &
+echo 0 > /tmp/raidlock
+
+eSATA_FN=`awk -F' ' '/^eSATA_FN/{printf($2)}' /proc/thecus_io`
+if [ $eSATA_FN -eq 1 ]; then
+	/img/bin/mount_eSATA.sh
+fi
+
+########################################################
+#       Check shutdown normality
+########################################################
+if [ -f "/etc/boot.flag" ];then
+	/img/bin/logevent/event 997 505 "warning" "email"
+	${save_log} "system_down" "abnormal"
+else
+	touch /etc/boot.flag
+fi
+
+#######################################################
+#      Hardware Self Test
+#######################################################
+/img/bin/chkhwinfo.sh
+
+/img/bin/check_db.sh
+/img/bin/mon_sdcard.sh > /dev/null 2>&1 &
+/img/bin/charge_bat.sh > /dev/null 2>&1 &
+
+/usr/sbin/crond
+/usr/bin/crontab /etc/cfg/crond.conf -u root
+
+# for temperature shutdown ui admin first login use
+warning=`/bin/ls -l /etc/ | grep "warning" | wc -l`
+if [ ${warning} -ge 1 ]; then
+	/bin/mv /etc/warning /tmp/warning
+fi
+
+if [ ! -d "/var/run/usb/" ];then
+	mkdir -p /var/run/usb/
+fi
+
+/img/bin/rc/rc.treemenu init
+/img/bin/update_check.sh boot
+
+${PIC_MSG} LCM_MSG Start "WEB service" 182
+
+/img/bin/rc/rc.net "start_ifplug"
+/usr/sbin/apachectl start
+
+
+##############################
+#These code is for mail monitor => filesystem_check
+##############################
+fsck_enable=`cat /etc/fsck_flag`
+if [ "${fsck_enable}" == "2" ];then
+        /opt/SysReminder/task/filesystem_check.sh check 1
+fi
+if [ "${fsck_enable}" != "1" ];then
+        /img/bin/service boot &
+fi
+##############################
+
+
+/img/bin/logevent/event 102 &
+/img/bin/logevent/event 231 &
+/img/bin/rc/rc.ddns boot
+
+/img/bin/check_fan_lan.sh >/dev/null 2>&1 &
+killall btn_dispatcher
+kill -9 `ps | grep "[c]at /proc/thecus_event$" | awk '{print $1}'`
+/img/bin/btn_dispatcher > /dev/null 2>&1 &
+
+## Add disk_check.sh on crontab
+/img/bin/disk_check.sh boot &
+/img/bin/hdspin.sh &
+/img/bin/boot_ok &

@@ -1,0 +1,292 @@
+#!/bin/sh
+#
+# /etc/rc.d/rc.samba
+#
+# Start/stop/restart the Samba SMB file/print server.
+#
+# To make Samba start automatically at boot, make this
+# file executable:  chmod 755 /etc/rc.d/rc.samba
+#
+if [ ! -d '/raid/sys' ];then
+  exit
+fi
+testAD=$2
+smbhome=/usr
+crond_conf="/etc/cfg/crond.conf"
+tmp_crond_conf="/tmp/tmp_crond_conf"
+del_recyclebin="/img/bin/del_recyclebin.sh"
+raid_db="/raid/sys/smb.db"
+conf_db="/etc/cfg/conf.db"
+ads_enable=`/usr/bin/sqlite $conf_db "select v from conf where k='winad_enable'"`
+check_nsswitch_conf(){
+	# configuration will enable gets ad user's passwd by getent
+	local check=`cat /etc/nsswitch.conf|grep winbind`
+	if [ "${check}" == "" ];then
+		sed -i "/^passwd\|^group/s/$/\ winbind\ ldap/g" /etc/nsswitch.conf
+	fi
+}
+
+# wins server could resolve domain name
+check_nsswitch_wins(){
+    wins=`/usr/bin/sqlite $conf_db "select v from conf where k='winad_wins'"`
+    if [ "${wins}" != "" ];then
+        local check=`cat /etc/nsswitch.conf|grep wins`
+        if [ "${check}" == "" ];then
+            sed -i "/^hosts/s/$/\ wins/g" /etc/nsswitch.conf
+        fi
+    fi
+}
+
+## Check and add/remove crontab jod about recycle bin function
+check_recycle_crond(){
+    smb_dataago=`/usr/bin/sqlite $conf_db "SELECT v FROM conf WHERE k='smb_dataago'"`
+    advance_smb_recycle=`/usr/bin/sqlite $conf_db "SELECT v FROM conf WHERE k='advance_smb_recycle'"`
+
+    ## Remove crontab job
+    if [ "$advance_smb_recycle" == "0" ] || \
+       [ "$advance_smb_recycle" == "1" -a "$smb_dataago" == "0" ];then
+        on_crontab=`/bin/cat ${crond_conf} | /usr/bin/awk '{print $6}' | grep "${del_recyclebin}" | /usr/bin/wc -l`
+        if [ "${on_crontab}" -gt 0 ];then
+            /bin/cat ${crond_conf} | grep -v "${del_recyclebin}" > ${tmp_crond_conf}
+            mv  ${tmp_crond_conf} ${crond_conf}
+            cat ${crond_conf} | crontab - -u root
+        fi
+    fi
+
+    ## Add crontab job
+    if [ "$advance_smb_recycle" == "1" ] && [ "$smb_dataago" != "0" ];then
+        on_crontab=`/bin/cat ${crond_conf} | /usr/bin/awk '{print $6}' | grep "${del_recyclebin}" | /usr/bin/wc -l`
+        if [ "${on_crontab}" -eq 0 ];then
+            echo "0 6 * * * ${del_recyclebin} > /dev/null 2>&1" >> ${crond_conf}
+            cat ${crond_conf} | crontab - -u root
+        fi
+    fi
+}
+
+samba_start() {
+  check_nsswitch_wins
+
+  md_list=`cat /proc/mdstat | awk -F: '/^md6[0-9] :/{print substr($1,3)}' | sort -u`
+  if [ "${md_list}" == "" ];then
+     md_list=`cat /proc/mdstat | awk -F: '/^md[0-9] :/{print substr($1,3)}' | sort -u`
+  fi
+  for md in $md_list
+  do
+     if [ -d "/raid$md/" ];
+       then
+          raid_id=`/usr/bin/sqlite /raidsys/$md/smb.db "select v from conf where k='raid_name'"`
+          cd /raid$md/data
+          check_path=`ls | grep _NAS_Recycle_`
+          for check_list in ${check_path[@]}
+          do
+           if [ "$check_list" != "_NAS_Recycle_${raid_id}" ];then
+               for md1 in $md_list
+               do
+                  /usr/bin/sqlite /raidsys/$md1/smb.db "select share from smb_userfd"| while read file;do
+                    if [ "$check_list" == "$file" ];then
+                         echo "1" > /tmp/samba_Recycle_check
+                         break;
+                    fi     
+                  done  
+               done
+               if [ -f /tmp/samba_Recycle_check ];then
+                  check_Recycle=`cat /tmp/samba_Recycle_check`
+                else
+                  check_Recycle=""
+               fi
+               if [ "$check_Recycle" != "1" ];then
+                   mv "/raid$md/data/$check_list" "/raid$md/data/_NAS_Recycle_${raid_id}"
+               fi
+               rm -rf /tmp/samba_Recycle_check
+           fi
+          done
+          if [ "$check_path" == "" ] && [ ! -d /raid$md/data/_NAS_Recycle_${raid_id} ];then
+             mkdir -p /raid$md/data/_NAS_Recycle_${raid_id}
+             chown nobody:users /raid$md/data/_NAS_Recycle_${raid_id}
+             chmod 777 /raid$md/data/_NAS_Recycle_${raid_id}
+          fi
+     fi
+  done
+
+  ## Process crontab jobs about recycle bin
+  check_recycle_crond
+
+  if [ "`readlink '/etc/samba/smb.conf'`" != '/var/run/smb.conf' ];then
+    ln -fs /var/run/smb.conf /etc/samba/smb.conf
+  fi
+  
+  if [ -f /tmp/ha_role ] && [ "`cat /tmp/ha_role`" = "active" ];then
+      if [ "${ads_enable}" == 1 ];then
+          ad_server=`/usr/bin/sqlite $conf_db "select v from conf where k='winad_ip'"`
+          ad_admin=`/usr/bin/sqlite $conf_db "select v from conf where k='winad_admid'"`
+          ad_adminpwd=`/usr/bin/sqlite $conf_db "select v from conf where k='winad_admpwd'"|sed -r s/\\\\\(\'\|\\\\\)/\\1/g`
+          ad_realm=`/usr/bin/sqlite $conf_db "select v from conf where k='winad_realm'"`
+          if [ "$ad_server" != "" ]; then
+              /usr/bin/net ads leave -U "${ad_admin}%${ad_adminpwd}"
+              /usr/bin/net join -S "${ad_server}.${ad_realm}" -U "${ad_admin}%${ad_adminpwd}"
+          fi
+      fi
+  fi
+  
+  if [ -x ${smbhome}/sbin/smbd -a -x ${smbhome}/sbin/nmbd ]; then
+    if [ -f '/raid/sys/smb.db' ];then
+      if [ "${testAD}" != 'testad' ];then
+        /img/bin/smbdb.sh chkAD
+      fi
+      /img/bin/smbdb.sh chkSMB
+      /img/bin/smbdb.sh assembleConf /var/run/smb.conf
+      
+      echo "Starting Samba:  ${smbhome}/sbin/smbd"
+      ${smbhome}/sbin/smbd -D
+      echo "                 ${smbhome}/sbin/nmbd"
+      ${smbhome}/sbin/nmbd -D
+    	if [ "${ads_enable}" == 1 ];then
+            check_nsswitch_conf
+    	    echo "                 ${smbhome}/sbin/winbindd"
+    	    ${smbhome}/sbin/winbindd -D
+    	fi
+    fi
+  fi
+}
+
+samba_stop() {
+  if [ -f /tmp/ha_role ] && [ "`cat /tmp/ha_role`" = "active" ];then
+    if [ "${ads_enable}" == 1 ];then
+      ad_server=`/usr/bin/sqlite $conf_db "select v from conf where k='winad_ip'"`
+      ad_admin=`/usr/bin/sqlite $conf_db "select v from conf where k='winad_admid'"`
+      ad_adminpwd=`/usr/bin/sqlite $conf_db "select v from conf where k='winad_admpwd'"|sed -r s/\\\\\(\'\|\\\\\)/\\1/g`
+      if [ "$ad_server" != "" ]; then
+        ha_indicator_ip=`/usr/bin/sqlite $conf_db "select v from conf where k='ha_indicator_ip'"|awk -F',' '{print $2}'`
+        ping -c 1 -q ${ha_indicator_ip} > /dev/null 2>&1
+        if [ "$?" = "0" ];then
+            /usr/bin/net ads leave -U "${ad_admin}%${ad_adminpwd}"
+        fi
+      fi
+    fi
+  fi
+  killall smbd nmbd winbindd
+}
+
+samba_restart() {
+  samba_stop
+  sleep 2
+  samba_start
+}
+
+samba_reload() {
+  check_nsswitch_wins
+  ## Process crontab jobs about recycle bin
+  check_recycle_crond
+
+  if [ "`readlink '/etc/samba/smb.conf'`" != '/var/run/smb.conf' ];then
+    ln -fs /var/run/smb.conf /etc/samba/smb.conf
+  fi
+
+  /img/bin/smbdb.sh chkSMB
+  /img/bin/smbdb.sh assembleConf /var/run/smb.conf
+  killall -HUP smbd
+  killall -HUP nmbd
+  if [ "${ads_enable}" == 1 ];then
+    kill -HUP `cat /var/locks/winbindd.pid`
+    ${smbhome}/sbin/winbindd
+  fi 
+}
+
+samba_boot() {
+  md_list=`cat /proc/mdstat | awk -F: '/^md6[0-9] :/{print substr($1,3)}' | sort -u`
+  if [ "${md_list}" == "" ];then
+         md_list=`cat /proc/mdstat | awk -F: '/^md[0-9] :/{print substr($1,3)}' | sort -u`
+  fi
+  check_db=`/usr/bin/sqlite $raid_db ".schema smb_specfd"|grep readonly`
+  if [ "$check_db" == "" ];
+    then
+     /usr/bin/sqlite $raid_db "alter table smb_specfd add 'readonly'"
+  fi
+  check_db=`/usr/bin/sqlite $raid_db ".schema smb_specfd"|grep speclevel`
+  if [ "$check_db" == "" ];then
+    /usr/bin/sqlite $raid_db "alter table smb_specfd add 'speclevel'"
+  fi
+  
+  for md in $md_list
+  do
+     raid_dbtmp="/raid$md/sys/smb.db"
+     check_db=`/usr/bin/sqlite $raid_dbtmp ".schema smb_userfd"|grep readonly`
+     if [ "$check_db" == "" ];
+      then
+      /usr/bin/sqlite $raid_dbtmp "alter table smb_userfd add 'readonly'"
+     fi
+     check_db=`/usr/bin/sqlite $raid_dbtmp ".schema smb_userfd"|grep speclevel`
+     if [ "$check_db" == "" ];then
+       /usr/bin/sqlite $raid_dbtmp "alter table smb_userfd add 'speclevel'"
+     fi
+  done 
+
+  if [ "`readlink '/etc/samba/smb.conf'`" != '/var/run/smb.conf' ];then
+    ln -fs /var/run/smb.conf /etc/samba/smb.conf
+  fi
+  if [ -x ${smbhome}/sbin/smbd -a -x ${smbhome}/sbin/nmbd ]; then
+    if [ -f '/raid/sys/smb.db' ];then
+      if [ "${testAD}" != 'testad' ];then
+        /img/bin/smbdb.sh chkAD
+      fi
+      /img/bin/smbdb.sh chkSMB
+      /img/bin/smbdb.sh assembleConf /var/run/smb.conf
+    fi
+  fi
+
+  samba_start
+  if [ ! -f /tmp/ha_role ];then
+      if [ "${ads_enable}" == 1 ];then
+        ad_server=`/usr/bin/sqlite $conf_db "select v from conf where k='winad_ip'"`
+        ad_admin=`/usr/bin/sqlite $conf_db "select v from conf where k='winad_admid'"`
+        ad_adminpwd=`/usr/bin/sqlite $conf_db "select v from conf where k='winad_admpwd'"|sed -r s/\\\\\(\'\|\\\\\)/\\1/g`
+        ad_realm=`/usr/bin/sqlite $conf_db "select v from conf where k='winad_realm'"`
+        if [ "$ad_server" != "" ]; then
+          /usr/bin/net ads leave -U "${ad_admin}%${ad_adminpwd}"
+          /usr/bin/net join -S "${ad_server}.${ad_realm}" -U "${ad_admin}%${ad_adminpwd}"
+          
+          samba_restart testad
+        fi
+      fi                     
+  fi
+  getent services > /dev/null 2>&1
+}
+
+logout_ad(){
+    if [ "${ads_enable}" == 1 ];then
+        ad_server=`/usr/bin/sqlite $conf_db "select v from conf where k='winad_ip'"`
+        ad_admin=`/usr/bin/sqlite $conf_db "select v from conf where k='winad_admid'"`
+        ad_adminpwd=`/usr/bin/sqlite $conf_db "select v from conf where k='winad_admpwd'"|sed -r s/\\\\\(\'\|\\\\\)/\\1/g`
+        ad_realm=`/usr/bin/sqlite $conf_db "select v from conf where k='winad_realm'"`
+        if [ "$ad_server" != "" ]; then
+            /usr/bin/net ads leave -U "${ad_admin}%${ad_adminpwd}"
+        fi
+    fi
+}
+
+
+case "$1" in
+'boot')
+  samba_boot
+  ;;
+'start')
+  samba_start
+  ;;
+'stop')
+  samba_stop
+  ;;
+'restart')
+  samba_restart
+  ;;
+'reload')
+  samba_reload
+  ;;
+'logout_ad')
+  logout_ad
+  ;;
+*)
+  # Default is "start", for backwards compatibility with previous
+  # Slackware versions.  This may change to a 'usage' error someday.
+  samba_start
+esac
+

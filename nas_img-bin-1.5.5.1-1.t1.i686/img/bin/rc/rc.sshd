@@ -1,0 +1,368 @@
+#!/bin/sh
+#==================================================
+#        FILE:  ssh service
+#       USAGE:  start
+#               stop
+#               set 'enable' 'port' 'sftp'
+#               boot
+#               get_value
+# DESCRIPTION:  Enable/Disable SSH service
+#       NOTES:  none
+#      AUTHOR:  enian
+#     VERSION:  1.0.0
+#     CREATED:  2011/8/19
+#    REVISION:  2011/8/19
+#==================================================
+#==================================================
+#  Variable Defined
+#==================================================
+Action="$1"                                 #Action
+SSHEn="$2"                                  #SSH enable/disable
+PortNum="$3"                                #Port Number
+SftpEn="$4"                                 #Sftp enable/disable
+TmpSSHFolder="/tmp/sshd"                    #sshd tmp folder
+SSHConfig="${TmpSSHFolder}/sshd_config"     #ssh config file path
+ResultFile="${TmpSSHFolder}/result"         #ssh execute result file
+SSHCommand="/usr/sbin/stond"                #sshd binary
+SSHOpt="-f ${SSHConfig}"                    #ssh command option
+ConfDb="/etc/cfg/conf.db"                   #conf.db
+Sqlite="/usr/bin/sqlite"                   #sqlite command
+Event="/img/bin/logevent/event 997"         #event command
+PidFile="/var/run/stond.pid"                #sshd pid file
+CheckPortCmd="/img/bin/check_port.sh"       #check port command
+ActionField="stond_enable"                  #conf.db sshd field name
+PortField="sshd_port"                       #conf.db sshd field name
+SftpField="sftp_enable"                     #conf.db sshd field name
+AccesslogField="sshd_log"                     #conf.db sshd field name
+SaveLog="/usr/bin/savelog /etc/cfg/logfile" #savelog command
+HlogEvent="ssh"                             #hide event name
+MotdFile="/etc/motd"                        #enter sshd console wording file
+
+#==================================================
+#   Include File
+#==================================================
+. /img/bin/function/libpid_act
+
+#################################################
+#         NAME:  get_one_conf_data
+#  DESCRIPTION:  get one field vaule
+#      PARAM 1:  db field name
+#      PARAM 2:  default value
+#       RETURN:  field value
+#       AUTHOR:  enian
+#      CREATED:  19,08,2011
+#################################################
+get_one_conf_data(){
+    local fField="$1"
+    local fDefVal="$2"
+    local fVal            #field value
+    local fCount=`${Sqlite} ${ConfDb} "select count(v) from conf where k='${fField}'"` #match field count
+
+    if [ "${fCount}" == "0" ];then
+        fVal="${fDefVal}"
+    else
+        fVal=`${Sqlite} ${ConfDb} "select v from conf where k='${fField}'"`
+    fi 
+    echo "${fVal}"
+}
+
+#################################################
+#         NAME:  get_conf_db
+#  DESCRIPTION:  get All SSh setting vaule
+#      PARAM 1:  None
+#       RETURN:  None
+#       AUTHOR:  enian
+#      CREATED:  19,08,2011
+#################################################
+get_conf_db(){
+    SSHEn=`get_one_conf_data "${ActionField}" "0"`
+    PortNum=`get_one_conf_data "${PortField}" "22"`
+    SftpEn=`get_one_conf_data "${SftpField}" "0"`
+    accesslogEn=`get_one_conf_data "${AccesslogField}" "0"`
+}
+
+#################################################
+#         NAME:  insert_conf_db
+#  DESCRIPTION:  insert vaule to conf.db
+#      PARAM 1:  Field name
+#      PARAM 2:  Value
+#       RETURN:  None
+#       AUTHOR:  enian
+#      CREATED:  19,08,2011
+#################################################
+insert_conf_db(){
+    local fFieldName="$1"
+    local fFieldValue="$2"
+    local fCount=`${Sqlite} ${ConfDb} "select count(v) from conf where k='${fFieldName}'"` #match field count
+    if [ "${fCount}" == "1" ];then 
+        ${Sqlite} ${ConfDb} "update conf set v='${fFieldValue}' where k='${fFieldName}'"
+    else
+        ${Sqlite} ${ConfDb} "insert into conf values('${fFieldName}','${fFieldValue}')"
+    fi        
+}
+
+#################################################
+#         NAME:  sshd_asseble
+#  DESCRIPTION:  assemble sshd config file
+#      PARAM 1:  Port name
+#      PARAM 2:  Enable/Dsiable Sftp
+#       RETURN:  None
+#       AUTHOR:  enian
+#      CREATED:  19,08,2011
+#################################################
+sshd_assemble(){
+    local fPortNum="$1"
+    local fSftpEn="$2"
+    local fAccesslog="$3"
+    local fCommonOpt="Protocol 2\nPasswordAuthentication yes\nPermitEmptyPasswords no\nAllowUsers root\n"  #sshd file common option
+    local fPidFile="PidFile ${PidFile}"       #Pid file option
+    local fMotd="PrintMotd yes"               #SSHD Warning message option
+    local fPortOpt="Port ${fPortNum}"         #Port option
+    local fSftpOpt=""                         #Sftp option
+    local fMsg="Note:\n    Please do not delete or modify any files or folders or it may result in system operation abnormal.\n" #SSHD Warning message
+
+    if [ "${fSftpEn}" == "1" ];then
+        fSftpOpt="Subsystem       sftp    /usr/libexec/openssh/sftp-server"
+    fi
+    if [ "${fAccesslog}" == "1" ];then
+        fLogOpt="LogLevel DEBUG3"
+    fi
+    echo -e "${fPortOpt}\n${fCommonOpt}\n${fPidFile}\n${fSftpOpt}\n${fLogOpt}\n" > ${SSHConfig}
+    echo -e "${fMsg}" > ${MotdFile}    
+}
+
+#################################################
+#         NAME:  get_value
+#  DESCRIPTION:  get SSHD All setting value API (to UI)
+#      PARAM 1:  None
+#       RETURN:  SSHD setting Vaule
+#       AUTHOR:  enian
+#      CREATED:  19,08,2011
+#################################################
+get_value(){
+    get_conf_db
+    echo "${SSHEn}|${PortNum}|${SftpEn}|${accesslogEn}"
+}
+
+#################################################
+#         NAME:  set_result
+#  DESCRIPTION:  set sshd execute result
+#      PARAM 1:  Words Key Value
+#      PARAM 2:  Icon Value (INFO/WARNING/ERROR)
+#       RETURN:  None
+#       AUTHOR:  enian
+#      CREATED:  19,08,2011
+#################################################
+set_result(){
+    fKeyValue="$1"
+    fIcon=$2
+    echo "${fKeyValue}|${fIcon}" > ${ResultFile}
+}
+
+#################################################
+#         NAME:  stop
+#  DESCRIPTION:  stop SSHD service
+#      PARAM 1:  None
+#       RETURN:  None
+#       AUTHOR:  enian
+#      CREATED:  19,08,2011
+#################################################
+stop(){
+    if [ -e "${PidFile}" ];then
+	Lpid_del_process "stond" "${PidFile}"
+        ${Event} 470 info email
+        #${SaveLog} "${HlogEvent}" "stop"
+    fi 
+}
+
+#################################################
+#         NAME:  start
+#  DESCRIPTION:  start SSHD service
+#      PARAM 1:  Port Number
+#      PARAM 2:  Sftp Enable/Disable
+#      PARAM 3:  Does generate event
+#       RETURN:  Execute Result
+#       AUTHOR:  enian
+#      CREATED:  19,08,2011
+#################################################
+start(){
+    local fPortNum="$1"
+    local fSftpEn="$2"
+    local fLogEn="$3"
+    local fHasEvent="$4"
+    local fRet             # execute result
+    stop
+    sleep 1 
+
+    chmod 600 /etc/ssh/ssh_host_dsa_key
+    chmod 600 /etc/ssh/ssh_host_rsa_key
+
+    sshd_assemble "${fPortNum}" "${fSftpEn}" "${fLogEn}"
+    ${SSHCommand} ${SSHOpt}
+    sleep 1 
+    fRet=`ps www | grep stond | grep -v grep`
+    if [ "$fRet" != "" ];then
+        ${Event} 469 info email
+        #${SaveLog} "${HlogEvent}" "start"
+        fRet=0
+    else
+        if [ "$fHasEvent" != "no" ];then
+            ${Event} 696 error email
+        fi
+        fRet=1
+    fi
+    return $fRet
+}
+
+#################################################
+#         NAME:  check_port
+#  DESCRIPTION:  Check port status
+#      PARAM 1:  Port Number
+#      PARAM 2:  Does generate event
+#       RETURN:  Words Key Value
+#       AUTHOR:  enian
+#      CREATED:  19,08,2011
+#################################################
+check_port(){
+    local fPortExist       #Check Port Error Code
+    local fKey=""          #Words Key Value
+    local fHasEvent="$2"
+    local fPortNum="$1"
+
+    ${CheckPortCmd} ${fPortNum} t "all" ssh > /dev/null 2>&1 
+    fPortExist=$?
+    
+    if [ "$fPortExist" != "0" ];then
+        case "$fPortExist" in
+        2)
+            fKey="ssh_port_type_error"
+            ;;
+        3)
+            fKey="ssh_port_out_range"
+            ;;
+        4)
+            fKey="ssh_port_out_range"
+            ;;
+        5)
+            fKey="ssh_port_reserved"
+            ;;
+        *)
+            if [ "$fHasEvent" != "no" ];then
+                ${Event} 695 error email
+            fi
+            fKey="ssh_port_conflict"
+            ;;
+        esac
+    fi
+    echo "${fKey}"
+}
+
+#################################################
+#         NAME:  set_act
+#  DESCRIPTION:  Set SSH Enable/Disable
+#      PARAM 1:  None
+#       RETURN:  Words Key Value
+#       AUTHOR:  enian
+#      CREATED:  19,08,2011
+#################################################
+set_act(){
+    local fRet=""  #Result
+    local fDbVal   #Database Value
+    local fAdmPas  #Admin Password
+
+    if [ "${SSHEn}" == "1" ];then
+        fDbVal=`get_one_conf_data "${PortField}" "22"`
+        if [ "$fDbVal" != "${PortNum}" ];then
+            fRet=`check_port "${PortNum}" "no"`
+        fi
+        if [ "${fRet}" == "" ];then
+            accesslogEn=`get_one_conf_data "${AccesslogField}" "0"`
+            start "${PortNum}" "${SftpEn}" "${accesslogEn}" "no"
+            fRet=$?
+            if [ "$fRet" == "0" ];then
+                insert_conf_db "${ActionField}" "${SSHEn}"
+                insert_conf_db "${PortField}" "${PortNum}"
+                insert_conf_db "${SftpField}" "${SftpEn}"
+                set_result "ssh_start,ssh_start_desc" "info"
+            else
+                set_result "ssh_start_fail" "error" 
+            fi
+        else
+            set_result "${fRet}" "error"
+        fi
+    else
+        stop
+        insert_conf_db "${ActionField}" "${SSHEn}"
+        set_result "ssh_stop" "info"
+    fi
+
+}
+
+#################################################
+#         NAME:  boot
+#  DESCRIPTION:  SSH Boot
+#      PARAM 1:  None
+#       RETURN:  None
+#       AUTHOR:  enian
+#      CREATED:  19,08,2011
+#################################################
+boot(){
+    local fRet       #Result
+    echo "sshd boot"
+
+    get_conf_db
+    if [ "${SSHEn}" == "1" ];then
+        if [ ! -e "${PidFile}" ];then
+            fRet=`check_port "${PortNum}" ""`
+            if [ "${fRet}" == "" ];then
+               start "${PortNum}" "${SftpEn}" "${accesslogEn}"
+            fi
+        fi
+    else
+        stop
+    fi
+}
+
+#################################################
+#         NAME:  get_result
+#  DESCRIPTION:  get execute SSH result
+#      PARAM 1:  None
+#       RETURN:  execute result
+#       AUTHOR:  enian
+#      CREATED:  19,08,2011
+#################################################
+get_result(){
+    cat ${ResultFile}
+}
+
+#==================================================
+#  Main Code
+#==================================================
+if [ ! -d "${TmpSSHFolder}" ];then
+    mkdir -p "${TmpSSHFolder}"
+fi
+case "$Action" in
+    start)
+        get_conf_db
+        start "${PortNum}" "${SftpEn}" "${accesslogEn}"
+        ;;
+    stop)
+        stop
+        ;;
+    set)
+        set_act
+        ;;
+    boot)
+        boot
+        ;;
+    get_value)
+        get_value
+        ;;
+    get_result)
+        get_result
+        ;;
+    *)
+        echo "Usage: $0 { start | stop | set 'enable' 'port' 'sftp'| boot | get_value | get_result}"
+        ;;
+esac
+exit 0

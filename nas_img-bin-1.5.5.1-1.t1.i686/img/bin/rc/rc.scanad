@@ -1,0 +1,77 @@
+#!/bin/sh
+sql_excuter="/usr/bin/sqlite /etc/cfg/conf.db "
+winad_enable=`${sql_excuter} "select v from conf where k='winad_enable'"`
+ldap_enable=`${sql_excuter} "select v from conf where k='ldap_enabled'"`
+crond_conf="/etc/cfg/crond.conf"
+tmp_crond_conf="/tmp/tmp_crond_conf"
+rc_scanad="/img/bin/rc/rc.scanad"
+
+if [ -f /tmp/ha_role ] && [ "`cat /tmp/ha_role`" = "standby" ];then
+  exit
+fi
+
+scanad_boot(){
+  if [ "$winad_enable" = "1" ] || [ "${ldap_enable}" = "1" ];
+  then
+    on_crontab=`/bin/cat ${crond_conf} | /usr/bin/awk '{print $6}' | grep "${rc_scanad}" | /usr/bin/wc -l`
+    if [ "${on_crontab}" -eq 0 ];
+    then
+       echo "* */12 * * * ${rc_scanad} crond > /dev/null 2>&1" >> ${crond_conf}
+       cat ${crond_conf} | crontab - -u root
+    fi
+  else
+    on_crontab=`/bin/cat ${crond_conf} | /usr/bin/awk '{print $6}' | grep "${rc_scanad}" | /usr/bin/wc -l`
+    if [ "${on_crontab}" -gt 0 ];
+    then
+      /bin/cat ${crond_conf} | grep -v "${rc_scanad}" > ${tmp_crond_conf}
+      mv  ${tmp_crond_conf} ${crond_conf}
+      cat ${crond_conf} | crontab - -u root
+    fi
+  fi
+}
+
+scanad_crond(){
+  if [ "$winad_enable" = "1" ];
+  then
+    winad_admid=`${sql_excuter} "select v from conf where k='winad_admid'"`
+    winad_admpwd=`${sql_excuter} "select v from conf where k='winad_admpwd'"`
+    winad_ip=`${sql_excuter} "select v from conf where k='winad_ip'"`
+    winad_realm=`${sql_excuter} "select v from conf where k='winad_realm'"`
+    connect=`/usr/bin/net time -S ${winad_ip}.${winad_realm} > /tmp/connect`
+    connect=`cat /tmp/connect |wc -l `
+    if [ "${connect}" -ne "0" ];
+    then
+        #/img/bin/logevent/event 997 311 error email "${winad_ip}.${winad_realm}" &
+        ntp_cfg_mode=`${sql_excuter} "select v from conf where k='ntp_cfg_mode'"`
+        if [ "$ntp_cfg_mode" == "no" ]; then
+            /usr/bin/net time set
+        fi
+    fi
+  fi
+  
+  if [ "${ldap_enable}" = "1" ];
+  then
+      ldap_ip=`${sql_excuter} "select v from conf where k='ldap_ip'"`
+      ldap_domain=`${sql_excuter} "select v from conf where k='ldap_dmname'"`
+      ldap_id=`${sql_excuter} "select v from conf where k='ldap_id'"`
+      ldap_passwd=`${sql_excuter} "select v from conf where k='ldap_passwd'"`
+      /usr/bin/ldapsearch -h ${ldap_ip} -D "cn=${ldap_id},${ldap_domain}" -w ${ldap_passwd}
+      #if [ "$?" = "255" ];
+      #then
+      #    /img/bin/logevent/event 997 697 error email &
+      #fi
+  fi
+}
+
+case "$1" in
+'boot')
+  scanad_boot
+;;
+'crond')
+  scanad_crond
+;;
+*)
+  echo $"Usage: rc.scanad { boot | crond }"
+  exit 1
+esac
+exit 0

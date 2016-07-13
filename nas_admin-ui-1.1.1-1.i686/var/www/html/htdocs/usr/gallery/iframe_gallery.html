@@ -1,0 +1,234 @@
+<?
+	session_start();//$_SESSION['username']="kido";
+  require_once('../../../function/conf/localconfig.php');
+  require_once(INCLUDE_ROOT.'session.php');
+	require_once(WEBCONFIG);
+	require_once(INCLUDE_ROOT.'function.php');
+	require_once(USER_ROOT . "gallery/functions.html");
+	check_auth($_SESSION);
+	//printf("1 iframe_gallery.html <br>");
+	require_once(USER_ROOT . "gallery/GlobalVars.html");
+	require_once(USER_ROOT . "gallery/HtmlHeader.html");
+	//require_once("../setlang/lang.html");
+  	//if ( ($_SESSION['username']) && ($_SESSION['username']!="admin")){
+		if ( ($_SESSION['username'])){
+		if (!is_dir(AlbumRoot . $_SESSION['username'])){
+			@mkdir(AlbumRoot . $_SESSION['username'],0755);
+			GiveRight($_SESSION['username'],AlbumRoot . $_SESSION['username']);
+		}
+	}
+	//printf("1 <br>");
+	$words=$session->PageCode("gallery");
+	$gwords=$session->PageCode("global");
+	$obj = ScanDirs("","");
+	//printf("2 <br>");
+	$AlbumNum = 0;
+	$obj_num = count($obj);
+	$PageSize = 10 ;
+	$ColNum = 5;
+	$NextPageSize = 10 ;
+	$PageNum = $obj_num / $PageSize;
+	if (($obj_num % $PageSize)!=0)
+		$PageNum=floor($PageNum) + 1;
+	if($PageNum==0)
+		$PageNum=1;
+	$PageIndex=1;	
+	if($_GET['Page'])
+	    $PageIndex=$_GET['Page'];
+	if( $PageIndex > $PageNum)
+	    $PageIndex=$PageNum;
+								
+		$From=($PageIndex-1)*$PageSize;
+		$To=$PageIndex*$PageSize-1;
+		if ($To>$obj_num-1)
+		$To=$obj_num-1;
+	//printf("3 <br>");
+	body(); 
+?>
+<?function cover($index){?>
+	<tr>
+		<td><img src="/usr/gallery/img/photo_frame_01.png" width="10" height="9"></td>
+		<td><img src="/usr/gallery/img/photo_frame_02.png" width="100" height="9"></td>
+		<td><img src="/usr/gallery/img/photo_frame_03.png" width="9" height="9"></td>
+	</tr>
+	<tr>
+		<td background="/usr/gallery/img/photo_frame_04.png"></td>
+		<td align="center" bgcolor="#FFFFFF"><?php
+			$id = Fix_encode($GLOBALS['obj'][$index][1]);  
+			echo '<a href="album.html?id='.$id.'">';
+			echo GetGalleryCover(AlbumRoot . $GLOBALS['obj'][$index][1] . "/" .ParseObj(AlbumRoot . $GLOBALS['obj'][$index][1] . "/TheCus.cover"),$GLOBALS['obj'][$index][1],ParseObj(AlbumRoot . $GLOBALS['obj'][$index][1] . "/TheCus.cover"));
+			echo '</a>';
+		?></td>
+		<td background="/usr/gallery/img/photo_frame_06.png"></td>
+	</tr>
+	<tr>
+		<td><img src="/usr/gallery/img/photo_frame_07.png" width="10" height="9"></td>
+		<td><img src="/usr/gallery/img/photo_frame_08.png" width="100" height="9"></td>
+		<td><img src="/usr/gallery/img/photo_frame_09.png" width="9" height="9"></td>
+	</tr>
+<?}?>
+<?
+	function col_1($row_count){
+		global $ColNum;
+      		echo "<tr>"."\r\n";
+		for($i=0;$i<$ColNum;$i++){
+       			echo '<td width="137">&nbsp;</td>'."\r\n";
+        		echo '<td width="33">&nbsp;</td>'."\r\n";
+		}
+      		echo '</tr>'."\r\n";
+	}
+
+	function col_2($row_count){
+		global $ColNum;
+      		echo "<tr>\r\n";
+		for($i=0;$i<$ColNum;$i++){
+			echo "<td height=\"121\" align=\"center\" valign=\"bottom\">\r\n";
+			echo "<table width=\"0%\"  border=\"0\" cellpadding=\"0\" cellspacing=\"0\">\r\n";
+			$index=($row_count * $ColNum + $i + ($GLOBALS['PageIndex']-1)*$GLOBALS['PageSize']);
+			if (($index >=$GLOBALS['From']) && ($index<=$GLOBALS['To']))
+				cover($row_count * $ColNum + $i + ($GLOBALS['PageIndex']-1)*$GLOBALS['PageSize']) ;
+			echo "</table>\r\n";
+			echo "</td>\r\n";
+			echo "<td>&nbsp;</td>\r\n";
+		}
+      		echo "</tr>\r\n";
+	}
+
+	function col_3($row_count){
+		global $ColNum;
+      		echo "<tr>\r\n";
+		for($i=0;$i<$ColNum;$i++){
+      			echo '<td height="27" align="center">'."\r\n";
+			echo "\t".'<table width="137"  border="0" cellspacing="0" cellpadding="0">'."\r\n";
+			echo "\t<tr>\r\n";
+	       	   	$index=($row_count * $ColNum + $i + ($GLOBALS['PageIndex']-1)*$GLOBALS['PageSize']);
+			if (($index >=$GLOBALS['From']) && ($index<=$GLOBALS['To'])){
+		   	   $index=($row_count * $ColNum + $i + ($GLOBALS['PageIndex']-1)*$GLOBALS['PageSize']);
+		   	   $id = Fix_encode($GLOBALS['obj'][$index][1]);
+			   echo "\t".'<td height="27" colspan="3" align="center" background="/usr/gallery/img/name_form.png">' . mb_abbreviation($GLOBALS['obj'][$index][1],12,1) . '</td>'."\r\n";
+			}
+			else {
+			   echo "\t".'<td height="27" colspan="3" align="center"><strong>&nbsp;</strong></td>'."\r\n";
+			}
+			echo "\t</tr>\r\n";
+           		echo "\t</table>\r\n";
+			echo "</td>\r\n";
+			echo "<td>&nbsp;</td>\r\n";
+		 }
+      		echo "</tr>\r\n";
+	}
+	function Manage($row_count){
+		global $ColNum;
+		echo "<tr>\r\n";
+   		for($i=0;$i<$ColNum;$i++){
+       			echo '<td align="center" valign="bottom" width="137">&nbsp;</td>'."\r\n";
+        		echo '<td width="33">&nbsp;</td>'."\r\n";
+		}
+		echo "</tr>\r\n";
+	}
+?>
+	<?function Paging(){
+	  global $words;
+	?>
+	<tr align="center"> 
+	<td colspan="10">
+		<table width="20"  border="0" cellspacing="0" cellpadding="0">
+		<tr> 
+		<td align="right">
+				<?$From = floor(( $GLOBALS['PageIndex'] - 1 )/$GLOBALS['NextPageSize']) * $GLOBALS['NextPageSize'] +1 ;?>
+				<?if (( $From -  $GLOBALS['NextPageSize'] ) > 0){?>
+				<a href="iframe_gallery.html?Page=<?echo $From - $GLOBALS['NextPageSize'];?>" onMouseOver="MM_swapImage('pgup_1','','../images/button_pgup_2.gif',1)" onMouseOut="MM_swapImgRestore()"><img src="../images/button_pgup_1.gif" name="pgup_1" width="25" height="25" border="0" id="pgup_1" title="<?=$words['PreviousPage']?>"></a>
+				<?}?>
+		</td>
+		<td width="20%" align="center">
+                  <?
+                    if($GLOBALS[obj_num]==0) echo "&nbsp;";
+                    else {
+                      for($i=$From ,$j=1;$i <= $GLOBALS['PageNum'] && $j<= $GLOBALS['NextPageSize'] ; $i++,$j++){
+                        if($i!=$GLOBALS[PageIndex]){
+                          echo '<u><a style=text-decoration:none href=iframe_gallery.html?Page='.$i. '>'. $i .'</a></u>&nbsp;' ;	
+                        } else{
+                          echo "{$GLOBALS[PageIndex]}";
+                        }
+                      }
+                    }
+                  ?>
+		</td>
+		<td align="left">
+			<?if (( $From + $GLOBALS['NextPageSize'] - 1 ) < $GLOBALS['PageNum']) $ActiveNext=true; else  $ActiveNext=false;?>
+			<?if( $ActiveNext){?>
+				<a href="iframe_gallery.html?Page=<?echo $From + $GLOBALS['NextPageSize'];?>" onMouseOver="MM_swapImage('pgdn_1','','../images/button_pgdn_2.gif',1)" onMouseOut="MM_swapImgRestore()"><img src="../images/button_pgdn_1.gif" name="pgdn_1" width="25" height="25" border="0" id="pgdn_1" title="<?=$words['NextPage']?>"></a>
+			<?}?>
+		</td>
+		</tr>
+		</table>
+	</td>
+        </tr>
+	<?}?>
+
+
+<?function body(){
+global $words;
+?>
+<style type="text/css">
+<!--
+body {
+	margin-left: 0px;
+	margin-top: 0px;
+	margin-right: 0px;
+	margin-bottom: 0px;
+	color:#ffffff;
+}
+body,td,th {
+	font-family: Arial, Helvetica, sans-serif;
+}
+.style4 {font-size: 10px}
+-->
+</style>
+<body bgcolor="#686868" text="#000000" leftmargin="0" topmargin="0" marginwidth="0" marginheight="0">
+<table width="719px" border="0" cellspacing="0" cellpadding="0" align="center" class="outerpage">
+  <? require_once("HtmlBanner.html"); ?>
+  <tr>
+    <td align="center" valign="top">
+      <table width="95%" border="0" cellpadding="0" cellspacing="0" align="center">
+        <tr>
+          <td width="80%" height="26" align="left">
+            <span class="style1"><?=$words['gallery']?>
+              <?//if( ($_SESSION['username']) &&  ($_SESSION['username']!="admin") )echo "&gt;<a href=album.html?id=" . fix_encode($_SESSION['username']) . ">{$_SESSION['username']}" . str_replace("\\'","'",$words['owner']) . "</a>"
+              ?>
+              <?if( ($_SESSION['username']))echo "&gt;<a href=album.html?id=" . fix_encode($_SESSION['username']) . ">{$_SESSION['username']}" . str_replace("\\'","'",$words['owner']) . "</a>"?>
+            </span>
+          </td>
+          <td width="20%" align="right">
+            <table width="80%"  border="0" cellpadding="0" cellspacing="0">
+              <tr align="center" valign="middle">
+                <?if (strstr($_SERVER["HTTP_USER_AGENT"], "NT 5.1") || strstr($_SERVER["HTTP_USER_AGENT"], "NT 6.0") || strstr($_SERVER["HTTP_USER_AGENT"], "NT 6.1")) {
+                  echo '<td align="center" valign="middle"><a href="XPublish/"><img src="/usr/gallery/img/xpublish.png" border="0" title="'.$words['publish_wizard'].'"></a></td>';
+                }?>
+                <? require_once("HtmlMenu.html"); ?>
+              </tr>
+            </table>
+          </td>
+        </tr>
+      </table>
+      <table width="90%"  border="0" cellpadding="0" cellspacing="0">
+        <?
+		$row=2;
+		for ($row_count=1;$row_count<=$row;$row_count++){
+			col_1($row_count-1);
+			col_2($row_count-1);
+			col_3($row_count-1);
+			Manage($row_count-1);
+		}
+		col_1("");
+		col_1("");
+		Paging();
+ 	?>
+      </table>
+    </td>
+  </tr>
+  <? require_once("HtmlBottom.html"); ?>
+</table>
+</body>
+</html>
+<?}?>

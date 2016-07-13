@@ -1,0 +1,242 @@
+#!/bin/sh 
+if [ -n "`command -v node`" ];then
+	/img/bin/btn_copy.js
+	exit
+fi
+
+PIC_MSG=/img/bin/pic.sh
+${PIC_MSG} LCM_USB 255 0
+ATMEGA=`/img/bin/check_service.sh atmega168`
+USB_FRONT_1=`/img/bin/check_service.sh usb_front_1`
+PATCH_PREFIX=`/img/bin/check_service.sh patch_prefix`
+char_handle="/usr/bin/specstr_handle"
+copy_flag2="/tmp/usb_copy_flag"
+resultfile="/var/tmp/usbcopy_result.tmp"
+
+. /img/bin/function/libsdcard
+sd_list=`check_sd_card_dev`
+
+${PIC_MSG} LCM_USB 102 0
+  
+for delay in 0 1 2 3 4 5 6 7
+do
+  front_1=`/bin/ls /var/run/usb/${USB_FRONT_1}`
+  
+  if [ "$front_1" != "" ]; then
+    break
+  fi
+  sleep 1
+done
+
+USB_Patch(){
+  ${PIC_MSG} LCM_USB 103 0
+  echo "BTN_OP 4" > /proc/thecus_io
+  ${PIC_MSG} LCM_MSG "Patch Mode:" "Patching..."
+  /bin/sh /tmp/patch.sh
+}
+
+if [ "${front_1}" = "" ]; then
+  USBS=`cat /proc/scsi/scsi|awk  '/Intf:USB/{FS=" ";printf("%s:%s\n",$2,$3)}'|awk -F: '{printf("%s\n",$4)}' | wc -l`
+  USBPORT=`cat /proc/scsi/scsi|awk  '/Intf:USB/{FS=" ";printf("%s:%s\n",$2,$3)}'|awk -F: '{printf("%s\n",$4)}'`
+
+  if [ ${USBS} -eq 0 ]; then
+    ${PIC_MSG} LCM_USB 105 0
+    /img/bin/logevent/event 322
+    exit
+  fi
+  for usb in $USBPORT
+  do
+    USB=`cat /proc/partitions | grep -e "${usb}$" | wc -l`
+    if [ ${USB} -eq 1 ];then
+      /bin/mount -o iocharset=utf8,umask=0,fmask=001,uid=99,gid=99 /dev/${usb}1 /mnt
+      if [ -f /mnt/THECUS.$PATCH_PREFIX.FAC ];then
+        if [ -f /mnt/THECUS.$PATCH_PREFIX.FAC.md5 ];then
+          if [ -f /mnt/THECUS.$PATCH_PREFIX.PATCH ];then
+            cp /mnt/THECUS.$PATCH_PREFIX.PATCH /tmp/patch.sh
+            USB_Patch
+          fi
+          /bin/umount /mnt
+          exit
+        fi
+      fi
+      /bin/umount /mnt
+    fi
+  done
+  ${PIC_MSG} LCM_USB 104 0
+  /img/bin/logevent/event 322
+  exit
+fi
+
+ejecting(){
+  local devid="$1"
+  /bin/sync
+  /bin/sync
+  /bin/sync
+  mount_point=`mount |egrep "^/dev/${devid}[0-9]* |^/dev/${devid} " | cut -d" " -f1`
+  for point in ${mount_point}
+  do
+    cmdstr=`${char_handle} "awk" "/usr/bin/ntfs-3g ${point}"`
+    awkstr="ps www | awk '/${cmdstr} /{print \$1}'"
+    ntfs3g_pid=`eval "${awkstr}"`
+    if [ "$ntfs3g_pid" != "" ]; then
+      kill -9 $ntfs3g_pid
+    fi
+
+    /bin/umount ${point}
+    /usr/bin/eject ${point}
+  done
+  if [ "${instant}" != "" ];then
+    /bin/rmdir /raid/data/USBHDD/${instant}/*
+    /bin/rmdir /raid/data/USBHDD/${instant}
+  fi
+  if [ "${j}" != "" ];then
+    /bin/rm -fr /var/run/usb/${USB_FRONT_1}/${j}
+  fi
+}
+
+copy(){
+  local devid="$1"
+  if [ -f /raid/data/USBHDD/${instant}/1/THECUS.$PATCH_PREFIX.FAC ];then
+    if [ -f /raid/data/USBHDD/${instant}/1/THECUS.$PATCH_PREFIX.FAC.md5 ];then
+      if [ -f /raid/data/USBHDD/${instant}/1/THECUS.$PATCH_PREFIX.PATCH ];then
+        cp /raid/data/USBHDD/${instant}/1/THECUS.$PATCH_PREFIX.PATCH /tmp/patch.sh
+        USB_Patch
+        ejecting "$devid"
+        rm -f /var/lock/btn_copy.lock
+      fi
+      exit
+    fi
+  fi
+  dir=`/bin/date '+%Y-%m-%d-%H-%M-%S'`
+  is_sd=`echo " ${sd_list} " | grep " ${devid} "`
+
+  if [ "${is_sd}" != "" ];then
+      piczza_enable=`/usr/bin/sqlite /raid/data/module/cfg/module.db "select enable from module where name='Piczza'"`
+      target_instant="sd"
+  else
+      target_instant="${instant}"
+  fi
+
+  ${PIC_MSG} LCM_USB 102 0
+  if [ "${is_sd}" == "" ];then
+      echo "U_LED 2" > /proc/thecus_io
+  else
+      echo "SD_LED 2" > /proc/thecus_io
+  fi
+  
+  if ([ "${piczza_enable}" != "Yes" ] && [ "${is_sd}" != "" ]) || [ "${is_sd}" == "" ]; then
+    /bin/mkdir /raid/data/USBCopy/"${dir}"
+    /bin/mkdir /raid/data/USBCopy/"${dir}"/${target_instant}
+    echo 1 > ${copy_flag2} 
+    chkcopy="1"
+    (/bin/cp -dpR /raid/data/USBHDD/${instant}/* /raid/data/USBCopy/"${dir}"/${target_instant} 2>&1;echo "$?" >${resultfile};echo "0" > ${copy_flag2}; ) &
+    while [ "${chkcopy}" == "1" ]
+    do
+         ##echo 51 we still live
+        if [ "${ATMEGA}" == "1" ];then
+            ${PIC_MSG} LCM_USB 102 0
+        fi
+        sleep 5 
+        chkcopy=`cat ${copy_flag2}`
+    done
+    finish=`cat ${resultfile}`
+    rm -f ${resultfile}
+  else
+    message=`/raid/data/module/Piczza/shell/sdcopy.sh "piczza_copy" "${devid}"`
+    if [ "${message}" != "" ]; then
+      finish=255
+    else
+      finish=0
+    fi
+  fi
+  if [ "${finish}" != "0" ];then 
+      copyret="1"
+  fi
+
+  if [ "${finish}" = "0" ]; then
+    if [ "${ATMEGA}" != "1" ];then
+        ${PIC_MSG} LCM_USB 103 0
+    fi
+    /img/bin/logevent/event 128
+    ejecting "$devid"
+    if [ "${is_sd}" == "" ];then
+        echo "U_LED 0" > /proc/thecus_io
+    else
+        echo "SD_LED 0" > /proc/thecus_io
+    fi
+  else
+    if [ "${ATMEGA}" != "1" ];then
+        ${PIC_MSG} LCM_USB 104 0
+    fi
+    /img/bin/logevent/event 322
+    ejecting "$devid"
+    if [ "${is_sd}" == "" ];then
+        echo "U_LED 0" > /proc/thecus_io
+        echo "UF_LED 2" > /proc/thecus_io
+    else
+        echo "SD_LED 0" > /proc/thecus_io
+        echo "SDF_LED 1" > /proc/thecus_io
+    fi
+    echo "Buzzer 1" > /proc/thecus_io
+    sleep 5
+    echo "UF_LED 0" > /proc/thecus_io
+    echo "SD_LED 0" > /proc/thecus_io
+    echo "SDF_LED 0" > /proc/thecus_io
+    echo "Buzzer 0" > /proc/thecus_io
+  fi
+}
+
+#############################
+#  main function            #
+#############################
+running=`/bin/ps |grep btn_copy |grep -v "grep" |wc -l`
+total_device=""
+if [ $running -le 3 ]; then
+  /usr/bin/lockfile /var/lock/btn_copy.lock
+  umask 000
+
+  device=`/bin/ls /var/run/usb/${USB_FRONT_1}`
+
+  total_count=`echo "${device}" | awk '{print $0}' |wc -l` 
+  index=1
+  copyret="0"
+  for j in ${device}
+  do
+    now_index=$index
+    instant=`mount |grep "$j" | cut -d"/" -f7 | cut -d" " -f1 | sed -n '1p'`
+    if [ "${instant}" != "" ];then
+      trayid="${instant:3}"
+      devid=`awk '/ Tray:'${trayid}' /{print $3}' /proc/scsi/scsi | awk -F':' '{print $2}'`
+      if [ "${devid}" != "" ];then
+        has_exist=`echo "$total_device" | grep " ${devid} "`
+        if [ "${has_exist}" == "" ];then
+          copy "$devid"
+          total_device="${total_device} ${devid} "
+        fi
+      fi
+    fi
+    if [ "${ATMEGA}" == "1" ] && [ "${now_index}" == "${total_count}" ];then
+      if [ "${copyret}" == "0" ];then
+        ${PIC_MSG} LCM_USB 103 0
+      else
+        ${PIC_MSG} LCM_USB 104 0
+      fi
+    fi
+    index=$(($now_index+1))
+  done
+
+  for did in ${total_device}
+  do
+    if [ "${did}" != "" ];then
+      is_sd=`echo " ${sd_list} " | grep " ${did} "`
+      if [ "${is_sd}" == "" ];then
+        SCSI_ID=`/usr/bin/lsscsi | grep "${did}$" | cut -d"]" -f1 | cut -d"[" -f2 | sed 's/:/ /g'`
+        if [ "${SCSI_ID}" != "" ]; then
+          echo "scsi remove-single-device ${SCSI_ID}" > /proc/scsi/scsi
+        fi
+      fi
+    fi
+  done
+  rm -f /var/lock/btn_copy.lock
+fi
+

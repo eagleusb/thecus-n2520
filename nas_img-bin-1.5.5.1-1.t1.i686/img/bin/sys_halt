@@ -1,0 +1,107 @@
+#!/bin/sh
+echo 1 > /tmp/shutdown_flag
+ACT=$1
+PIC_MSG=/img/bin/pic.sh
+
+. /img/bin/function/vardef.conf
+. /img/bin/function/libcommon
+
+shutdown_para=""
+if [ "`/sbin/reboot --help 2>&1 | grep BusyBox`" == "" ];then
+    shutdown_para="-n -d --no-wall"
+fi
+
+if [ -f /tmp/ha_role ] && [ `cat /tmp/ha_role` = 'standby' ];then
+    if [ "$ACT" = "schedule" ];then
+        exit
+    elif [ "$ACT" = "schedule_ha" ];then
+        ACT=schedule
+    fi
+fi
+
+if [ "`/img/bin/check_service.sh warning_led`" = "1" ];then
+  echo 0 0 SLED 0 1 > /var/tmp/oled/pipecmd 
+fi
+
+if [ "${ACT}" != "batteryoff" ];then
+  raid_deny=`/img/bin/raid_deny.sh $ACT`
+  if [ "${raid_deny}" != "" ];then
+    ${PIC_MSG} LCM_MSG "RAID busy," "can't shutdown"
+    /img/bin/logevent/event 997 501 warning email "${raid_deny}"
+    BEEP 3
+    exit
+  fi
+fi
+
+BEEP 2
+
+save_log="/usr/bin/savelog /etc/cfg/logfile "
+${save_log} "system_down" "start"
+/usr/bin/lockfile /var/lock/upgrade.lock
+host_name=`hostname`
+
+/img/bin/lcm_animate.sh "System" "Shut Down" "sys_halt" &
+
+PWR_LED=`/img/bin/check_service.sh power_led`
+if [ "${PWR_LED}" = "usb" ];then
+  echo "UF_LED 2" > /proc/thecus_io
+elif [ "${PWR_LED}" = "power" ];then
+  echo "PWR_LED 2" > /proc/thecus_io
+fi
+
+MAX_TRAY=`awk '/^MAX_TRAY/{print $2}' /proc/thecus_io`
+i=0
+while [ $i != $MAX_TRAY ]
+do
+  i=`expr $i + 1`
+  echo "S_LED ${i} 0" > /proc/thecus_io
+done
+
+echo "OSD_MODE 0" > /proc/thecus_io
+echo "Buzzer 0" > /proc/thecus_io
+Time=`date "+%R %Y/%m/%d"`
+if [ "$ACT" = "schedule" ];then
+        if [ -f /tmp/ha_role ] && [ `cat /tmp/ha_role` = 'active' ];then
+          sh /img/bin/ha/script/nas_act.sh schedule sync
+        fi
+        /img/bin/logevent/event 141 "$Time"
+        /img/bin/logevent/event 230 "$Time"
+else
+	/img/bin/logevent/event 997 103 "info" "email" "${host_name}"
+fi
+
+echo "Busy 2" > /proc/thecus_io
+
+/img/bin/ctrl_thecus_io.sh "`/img/bin/check_service.sh sys_halt_led`"
+critical_prog_wait
+
+/img/bin/chk_power.sh
+/img/bin/rc/rc.wol
+killall -9 ifplugd
+sleep 5
+
+/img/bin/rc/rc.samba logout_ad
+/img/bin/check_shutdown.sh "shutdown" > /dev/null 2>&1 &
+SYS_ACTION="SHUTDOWN" /img/bin/service stop
+if [ -f /tmp/ha_role ];then
+    /img/bin/ha/script/stop_ha.sh
+fi
+sync
+sync
+sync
+rm -f /etc/boot.flag
+echo 1 > /tmp/sysdown
+touch `printf $SYS_ETH_DOWN_FLAG eth0`
+/sbin/ifconfig eth0 0.0.0.0 down
+#disable warning led
+if [ "`/img/bin/check_service.sh warning_led`" = "1" ];then
+  echo 0 0 SLED 1 0 > /var/tmp/oled/pipecmd
+  echo 0 0 SLED 1 1 > /var/tmp/oled/pipecmd
+fi
+
+rm -f /var/lock/upgrade.lock
+sync
+
+/img/bin/stop_raid.sh
+/sbin/poweroff -f ${shutdown_para}
+

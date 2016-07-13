@@ -1,0 +1,89 @@
+#!/bin/sh
+SQLITE=/usr/bin/sqlite
+CONF=/etc/cfg/conf.db
+GPIO_NUM="`/img/bin/check_service.sh gpiocount`"
+GPIO_STATUS_DIR=/var/tmp/gpio
+
+
+function get_GPIO_direction(){
+	tmp=`${SQLITE} ${CONF} "select v from conf where k='gpio$1'"`
+	echo ${tmp}
+}
+
+function read_gpio(){
+	echo 0 0 GPIO 0 $1 > /var/tmp/oled/pipecmd
+	sleep 1
+	ret=`cat ${GPIO_STATUS_DIR}/gpio$1 | awk '/^R/{print $2}'`
+	if [ "${ret}" != "" ];then
+		echo "GPIO$1 read = ${ret}"
+	else
+		echo "GPIO read error!"
+	fi
+}
+
+function write_gpio(){
+	echo 0 0 GPIO 1 $1 $2 > /var/tmp/oled/pipecmd
+	echo "Write GPIO $1 = $2"
+}
+
+function init_gpio(){
+	#Set GPIO direction for initial
+	pin=1
+	while [ ${pin} -le ${GPIO_NUM} ]
+	do
+		if [ -f ${GPIO_STATUS_DIR}/gpio${pin} ];then
+			rm ${GPIO_STATUS_DIR}/gpio${pin}
+		fi
+		dir=`get_GPIO_direction ${pin}`
+		if [ "${dir}" != "" ] && [ "${dir}" == "0" ];then
+			echo 0 0 GPIO 0 ${pin} > /var/tmp/oled/pipecmd
+		else
+			echo 0 0 GPIO 1 ${pin} 0 > /var/tmp/oled/pipecmd
+		fi
+		pin=$(($pin + 1))
+	done
+}
+
+if [ "${GPIO_NUM}" == "0" ] || [ "${GPIO_NUM}" == "" ];then
+	echo "GPIO service not available!"
+        exit 1
+fi
+
+if [ ! -d "${GPIO_STATUS_DIR}" ];then
+	mkdir ${GPIO_STATUS_DIR}
+fi
+
+
+case "$1" in
+'boot')
+	init_gpio
+;;
+
+'read')
+	if [ "$2" == "" ];then
+		echo $"input error!! Usage: rc.gpio read [1~8]" 
+		exit 1
+	fi
+	read_gpio $2
+;;
+   
+'write')
+	if [ "$2" == "" ];then
+		echo $"Input error!! Usage: rc.gpio write [1~8] [0/1]" 
+		exit 1
+	elif [ $2 -le 0 ] || [ $2 -gt 8 ];then
+		echo $"Input error!! Usage: rc.gpio write [1~8] [0/1]" 
+		exit 1
+	elif [ "$3" != "0" ] && [ "$3" != "1" ];then
+		echo $"Input error!! Usage: rc.gpio write [1~8] [0/1]" 
+		exit 1
+	fi
+	write_gpio $2 $3
+;;
+
+*)
+	echo $"Usage: rc.gpio { boot | read | write }"
+        exit 1
+esac
+exit 0
+

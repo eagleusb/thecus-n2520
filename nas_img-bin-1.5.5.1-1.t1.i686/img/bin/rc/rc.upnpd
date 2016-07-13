@@ -1,0 +1,166 @@
+#!/bin/sh
+#################################################
+##	Vars defined
+#################################################
+
+pwd="/var/www/upnpweb/"	## upnpd's home
+mac=""					## for mac address
+ip=""					## just ip address
+sqlite="/usr/bin/sqlite"
+confdb="/etc/cfg/conf.db"
+
+sqlcmd="select v from conf where k='ha_enable'"
+ha_enable=`${sqlite} ${confdb} "${sqlcmd}"`
+
+#################################################
+##	Declare subroutine
+#################################################
+
+## to parse ifconfig stdout
+parse_ifconfig() {
+  if [ "$ha_enable" = "1" ];then
+    wan_ip=`/img/bin/function/get_interface_info.sh get_ip eth0:0`
+  else
+    wan_ip=`/img/bin/function/get_interface_info.sh get_ip eth0`
+  fi
+  wan_mac=`/img/bin/function/get_interface_info.sh get_mac eth0`
+  echo "$wan_mac $wan_ip"
+}
+
+## call to retrieve system name ( hostname )
+system_name() {
+  if [ "$ha_enable" = "1" ];then
+    sqlcmd="select v from conf where k='ha_virtual_name'"
+  else
+    sqlcmd="select v from conf where k='nic1_hostname'"
+  fi
+  hostname=`${sqlite} ${confdb} "${sqlcmd}"`
+  echo "${hostname}"
+}
+
+## get now 
+get_version() {
+	cat /etc/version | cut -d- -f1
+}
+
+get_modelname() {
+	cat /etc/manifest.txt | awk '/type/{FS="\t";printf("%s",$2)}'
+}
+
+## retrieve system desc from sqlite
+system_desc() {
+	sqlcmd="select v from conf where k='httpd_upnp_desp'"
+	desc=`${sqlite} ${confdb} "${sqlcmd}"`
+	echo "${desc}"
+}
+
+## for shell script characteristic, i need this to set some global vars
+set_mac_ip() {
+	mac="$1"
+	ip="$2"
+}
+
+## generate XML serialNumber tag value
+serialNumber() {
+	echo ${mac} | tr -d ':'
+}
+
+## generate XML UDN tag value 
+UDN() {
+	echo ${mac} | awk 'gsub(/:/,"04100-0")'
+}
+
+## generate XML UPC tag value
+UPC() {
+	echo ${mac} | tr -d ':'
+}
+
+## echo XML presentationURL tag value
+presentationURL() { 
+	sqlcmd="select v from conf where k='httpd_nic1_upnp'"
+	desc_httpd_nic1_httpd=`${sqlite} ${confdb} "${sqlcmd}"`
+	if [ "${desc_httpd_nic1_httpd}" == "1" ]; then
+    sqlcmd="select v from conf where k='httpd_port'"
+	  desc_httpd_port=`${sqlite} ${confdb} "${sqlcmd}"`
+	  if [ "${desc_httpd_port}" != "80" ]; then
+	    echo "http://${ip}:${desc_httpd_port}"
+	  else
+	    echo "http://${ip}/"
+	  fi
+	else
+	  sqlcmd="select v from conf where k='httpd_ssl'"
+	  desc_httpd_ssl=`${sqlite} ${confdb} "${sqlcmd}"`
+	  if [ "${desc_httpd_ssl}" != "443" ]; then
+	    echo "https://${ip}:${desc_httpd_ssl}"
+	  else
+	    echo "https://${ip}/"
+	  fi
+  fi
+}
+
+## retrieve sqlite upnp setting
+get_upnp_setting() {
+	sqlcmd="select v from conf where k='httpd_nic1_upnp'"
+	${sqlite} ${confdb} "${sqlcmd}"
+}
+
+## call to generate xml in the web dir for use of upnpd
+gen_xml() {
+	if [ ! -d ${pwd} ]; then
+		mkdir ${pwd}
+	fi
+	cd ${pwd} &&
+	template=`cat /img/bin/template.xml`
+	set_mac_ip `parse_ifconfig`
+	printf "${template}" "`system_name`" "`system_desc`" "`get_modelname`" "`get_version`" "`serialNumber`" "`UDN`" "`UPC`" "`presentationURL`" > ${pwd}desc.xml
+}
+
+## simplify to start upnpd process
+start_upnp() {
+	gen_xml
+	cp /usr/bin/upnpd ${pwd}
+	cd ${pwd} &&
+	sh -c "./upnpd -desc ./desc.xml -webdir ${pwd} < /dev/null >/dev/null 2>&1 & "
+	echo "UPnP works now!!"
+}
+
+## simplify to stop upnpd process
+stop_upnp() {
+	killall upnpd >/dev/null 2>&1
+	killall upnpd >/dev/null 2>&1
+	echo "UPnP stops."
+}
+
+## simplify to restart upnpd process
+restart_upnp() {
+	stop_upnp >/dev/null
+	start_upnp >/dev/null
+	echo "UPnP restarted."
+}
+
+#################################################
+##	Main code
+#################################################
+
+able=`get_upnp_setting`
+if [ ${able} -ne 1 ]
+then
+	stop_upnp
+	exit
+fi
+
+case "$1"
+in
+	start)
+		start_upnp
+		;;
+	stop)			
+		stop_upnp
+		;;
+	restart)
+		restart_upnp
+		;;
+	*)			
+		echo "Usage: $0 {start|stop|restart}"
+		;;
+esac

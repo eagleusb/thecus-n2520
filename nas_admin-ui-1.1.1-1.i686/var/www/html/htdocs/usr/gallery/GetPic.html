@@ -1,0 +1,205 @@
+<?
+  require_once("GlobalVars.html");
+  $targetPic ="/usr/gallery/img/gallery_personal.jpg";
+  $id = Fix_encode($_GET['id']);
+  $_GET['album']=fix_post($_GET['album']);
+  $album = Fix_encode($_GET['album']) ;
+  $_GET['PicName'] = fix_post($_GET['PicName']);
+  $PicName = Fix_encode($_GET['PicName']);
+  $tmp = AlbumRoot . $id . '/' . $album . '/' . $PicName;
+  $tmp=rawurldecode($tmp);
+  $tmp1=rawurldecode(AlbumRoot . $id . '/' . $album . '/');
+  if($_GET['PicName'] && $_GET['id'] && $_GET['album']){
+	if (File_Format_confirm($_GET['PicName'])){
+		if ((file_exists($tmp)) && (filesize($tmp)<=MaxFileSize)){
+			$Exist = 1 ;
+				//*****************************************************//
+				//check The Thumb Folder is Already Set Or not	       //
+				//If not Create The Thumb Folder		       //
+				//*****************************************************//
+			       if(!is_dir(escapeshellarg("{$tmp1}100x100")))
+					@mkdir($tmp1 . "100x100",0755);
+			       if(!is_dir(escapeshellarg("{$tmp1}300x300")))
+					@mkdir($tmp1 . "300x300",0755);
+				$targetPic=$tmp;
+
+			
+			if ( (!file_exists(rawurldecode("{$tmp1}100x100/$PicName" ))) || @(filesize(rawurldecode("{$tmp1}100x100/$PicName"))>MaxFileSize))
+			{
+				if(!isset($pixel)){
+					@GetPicSize(rawurldecode(AlbumRoot ."$id/$album/$PicName" ));
+				}
+					if(($pixel[x]<=100) && ($pixel[y]<=100)){
+
+						shell_exec("cp -f " . rawurldecode(escapeshellarg($tmp)) . " " . rawurldecode(escapeshellarg("{$tmp1}100x100/$PicName" )));
+						@GiveRight($_GET['id'],"'" . rawurldecode("{$tmp1}100x100/$PicName" ) . "'");
+					}
+					else{
+						if($pixel[x]>$pixel[y]){
+							$pp=$pixel[x]/100;
+							$y=$pixel[y]/$pp;
+							$x=100;
+						}
+						else{
+							$pp=$pixel[y]/100;
+							$x=$pixel[x]/$pp;
+							$y=100;
+						}
+						if(!file_exists("/var/spool/convert/{$album}_{$PicName}.100")){
+							$handle = fopen("/var/spool/convert/{$album}_{$PicName}.100", "w");
+							fwrite($handle, "/usr/bin/convert ".rawurldecode(escapeshellarg($tmp))." " .  rawurldecode(escapeshellarg("{$tmp1}100x100/$PicName")) . " " . round($x) . " " . round($y) );
+							fclose($handle);
+						}
+						if(!file_exists("/var/lock/convert.lock")){
+							shell_exec("/img/bin/convert.sh > /dev/null 2>&1 &");
+						}
+					}
+			}
+
+			if ( (!file_exists(rawurldecode("{$tmp1}300x300/$PicName"))) || (@filesize(rawurldecode("{$tmp1}100x100/$PicName"))>MaxFileSize))
+			{
+				if(!isset($pixel)){					
+					@GetPicSize(rawurldecode(AlbumRoot ."$id/$album/$PicName" ));
+				}
+					if(($pixel[x]<=300) && ($pixel[y]<=300)){
+						shell_exec("cp -f " . rawurldecode(escapeshellarg($tmp)) . " " . rawurldecode(escapeshellarg("{$tmp1}300x300/$PicName")));
+						@GiveRight($_GET['id'],"'" . rawurldecode("{$tmp1}300x300/$PicName") . "'");
+					}
+					else{
+						if($pixel[x]>$pixel[y]){
+							$pp=$pixel[x]/300;
+							$y=$pixel[y]/$pp;
+							$x=300;
+						}
+						else{
+							$pp=$pixel[y]/300;
+							$x=$pixel[x]/$pp;
+							$y=300;
+						}
+						if(!file_exists("/var/spool/convert/{$album}_{$PicName}.300")){
+							$handle = fopen("/var/spool/convert/{$album}_{$PicName}.300", "w");
+							fwrite($handle, "/usr/bin/convert ".rawurldecode(escapeshellarg($tmp))." " .  rawurldecode(escapeshellarg("{$tmp1}300x300/$PicName")) . " " . round($x) . " " . round($y) );
+							fclose($handle);
+						}
+						if(!file_exists("/var/lock/convert.lock")){
+							shell_exec("/img/bin/convert.sh > /dev/null 2>&1 &");
+						}
+					}
+			}
+
+		}
+	}
+  }
+	//******************************************************//
+	//If Pic Is Exist then Draw out Pic Follow the case	   //
+	//Else Out The Default Pic					   //
+	//******************************************************//
+	if ($Exist==1){	
+		Switch($_GET['mode'])
+		{
+			case 'small':
+				$tmp=rawurldecode("{$tmp1}100x100/{$PicName}");
+				if(file_exists($tmp))
+				$targetPic=$tmp;
+				break;
+			break;
+			case 'medium':
+				$tmp=rawurldecode("{$tmp1}300x300/{$PicName}");
+				if(file_exists($tmp))
+				$targetPic=$tmp;
+				break;
+			break;
+			case 'original':
+				$tmp=$targetPic;
+				break;
+			default:
+				$tmp=rawurldecode("{$tmp1}100x100/{$PicName}");
+				if(file_exists($tmp))
+				$targetPic=$tmp;
+				break;
+		}
+	}
+
+			$target=Fix_post($targetPic);
+			Draw($targetPic);
+			exit;
+//============================fix post \
+ function Fix_post($arg)
+ {
+   $arg=eregi_replace("\\\\\\\\","\t",$arg);
+   $arg=eregi_replace("\\\\","",$arg);
+   return eregi_replace("\t","\\",$arg);
+  // $arg=str_replace("\\\\","\t",$arg);
+  // $arg=str_replace("\\","",$arg);
+  // return str_replace("\t","\\",$arg);
+ }
+//======================get pic size
+  function GetPicSize($object)
+  {
+   global $pixel;
+	$oo=ereg_replace("\.\.\/","",$object);
+	$oo=ereg_replace("^[']","",$object);
+	$oo=ereg_replace("(['])$","",$oo);
+	$pix=getimagesize($oo);
+	 $pixel=array(x=>$pix[0],y=>$pix[1]);
+   //$Size=shell_exec('/usr/bin/identify -format %wx%h ' . $object);
+  }
+ function GiveRight($id,$path)
+ {
+   //$group="smbusers";
+   $group="users";
+   exec("chown $id:$group $path");
+  }
+//=====================Draw Picture
+ function Draw($Pic)
+ {
+   // check path must begin with /raid
+   //$Pic=realpath($Pic);//by polson
+   if(0!=strncmp($Pic,"/raid/",6)) exit;
+   if(@$fp=fopen($Pic,"rb"))
+   {
+      $filename = $Pic;
+      $basename = split("/",$filename);
+      $basename = $basename[count($basename)-1];
+
+      # dot bug with IE
+      $basename = (strstr($_SERVER['HTTP_USER_AGENT'], "MSIE"))? str_replace("+"," ",urlencode($basename)):'=?utf8?b?'.base64_encode($basename).'?=';
+
+      header("Cache-control: private");
+      header("Pragma: public");
+      header('MIME-Version: 1.0');
+      header("Content-length: " . sprintf("%u", filesize($filename)));
+      header("Content-Disposition: filename=\"".$basename."\"");
+
+	$tmp=split("\.",$Pic);
+	$ContentType=strtolower ($tmp[1]);
+	header('Content-type: image/' . $ContentType);
+     @fpassthru($fp);
+     @fclose($fp);
+     exit;
+   }
+   else
+   {
+	header('Content-type: image/gif');
+     @$fp=fopen("./image/album_mod.gif","rb");
+     @fpassthru($fp);
+     @fclose($fp);
+     exit;
+   }
+ }
+
+ function Fix_encode($file)
+ {
+   return eregi_replace("\+","%20",urlencode($file));
+ }
+
+//========================½T»{ÀÉ®×«¬ºA
+ function File_Format_confirm($file_name)
+ { 
+    if(eregi("(\.+jpg|\.+gif|\.+bmp|\.+png|\.+jpeg)$",$file_name))
+	return true;
+    else
+	return false;
+ }
+?>
+

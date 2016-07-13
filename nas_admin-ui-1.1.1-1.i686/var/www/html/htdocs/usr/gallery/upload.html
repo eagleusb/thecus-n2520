@@ -1,0 +1,59 @@
+<?
+$ERROR_MESSAGE = array();//scott++
+$_POST['album']=fix_post($_POST['album']);
+if((!$_SESSION['username']) OR (!$_POST['album']))exit;
+$Count=count($_FILES[Client_file][name]);
+require_once("GlobalVars.html");
+for($i=0;$i<$Count;$i++){
+	if($_FILES[Client_file]['name'][$i]){
+		if(File_Format_confirm($_FILES[Client_file]['name'][$i])){
+			if ($_FILES[Client_file]['size'][$i]<MaxFileSize){
+				if($_FILES[Client_file]['size'][$i]=="0"){
+					$ERROR_MESSAGE[$i] = $_FILES[Client_file]['name'][$i]." ".$words['file_empty'];//scott++
+					continue;
+				}
+				$tmpFile=escapeshellcmd($_FILES[Client_file]['tmp_name'][$i]);
+				$filename=fix_post($_FILES[Client_file]['name'][$i]);
+				$file_count="0";
+				/*
+				while(file_exists(AlbumRoot . "{$_SESSION['username']}/{$_POST['album']}/{$filename}")){
+					$filename=($filename+1) . $filename;
+				}
+				*/
+				if(file_exists(AlbumRoot . "{$_SESSION['username']}/{$_POST['album']}/{$filename}")){
+					$ERROR_MESSAGE[$i] = $_FILES[Client_file]['name'][$i]." ".$words['file_duplicate'];//scott++
+					continue;
+				}
+				$saveFile=escapeshellcmd(AlbumRoot . "{$_SESSION['username']}/{$_POST['album']}/{$filename}");	
+        //$saveFile=mysql_escape_string(AlbumRoot . "{$_SESSION['username']}/{$_POST['album']}/{$filename}");
+				$PhotoSubject =AlbumRoot ."{$_SESSION['username']}/{$_POST['album']}/{$filename}.Subject";
+				$PhotoDesp =AlbumRoot ."{$_SESSION['username']}/{$_POST['album']}/{$filename}.Desp";
+				SetObject($PhotoSubject,fix_post($_POST['Subject'][$i]));
+				SetObject($PhotoDesp,fix_post($_POST['Desp'][$i]));
+				rename($tmpFile,Fix_post($saveFile));
+				GiveRight($_SESSION['username'],"'{$PhotoSubject}'");
+				GiveRight($_SESSION['username'],"'{$PhotoDesp}'");
+				GiveRight($_SESSION['username'],"'{$saveFile}'");
+			}else{
+            			$ERROR_MESSAGE[$i] = $_FILES[Client_file]['name'][$i]." ".$words['Js_Size_err'];//scott++ 
+        		}
+			@unlink($HTTP_POST_FILES[upload_file]['tmp_name'][$i]);
+       		}else{
+            		$ERROR_MESSAGE[$i] =$_FILES[Client_file]['name'][$i]." ".$words['Js_Type_err'];//scott++
+        	}
+     	}
+}
+  
+/* add by scott ++*/  
+  $SCOTT_TEST="";
+  for($jj=0;$jj<8;$jj++)
+  {
+    if ($ERROR_MESSAGE[$jj] != "")
+        $SCOTT_TEST =$SCOTT_TEST.$ERROR_MESSAGE[$jj]."\\n";
+  }
+	if(strlen($SCOTT_TEST)>0)
+    js_alert($SCOTT_TEST);
+
+/* end of add --*/  
+?>
+

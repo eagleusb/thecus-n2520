@@ -1,0 +1,326 @@
+#!/bin/sh
+##################################################
+##   upnp router configurtion
+##################################################
+upnpc_path="/usr/bin/upnpc"
+route_path="/sbin/route"
+getip_path="/sbin/ifconfig"
+sql="/usr/bin/sqlite"
+conf_db="/etc/cfg/conf.db"
+wan_ip=`${getip_path} eth0|awk 'NR==2{print $2}'|awk -F':' '{print $2}'`
+gateway="`${route_path} -n | awk '$1~/0.0.0.0/ {print $2}'`"
+port_file="/tmp/upnp_port"
+port_file2="/tmp/upnp_port2"
+info="/tmp/information"
+router="/tmp/router_ports"
+router2="/tmp/router_ports2"
+delete="/tmp/del_ports"
+setting_file="/tmp/setting_file"
+upnp_check_file="/tmp/copy_port2"
+link_url="/tmp/link_url"
+upnp_router=`${upnpc_path} -l |grep "desc:"|awk -F'desc: ' '{print $2}'| grep "${gateway}" | uniq`
+[ -n "$upnp_router" ] && upnpc_path="${upnpc_path} -u ${upnp_router}"
+
+
+rs=`$sql $conf_db "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='router'"`
+if [ "$rs" = "0" ];then
+    ${sql} ${conf_db} "create table router(port,range_port,protocol,des)"
+fi
+
+scan_router(){
+    ${upnpc_path} -l > ${info}
+    router_ip=`cat ${info}|grep "IGD : http://${gateway}:"`
+    if [ $? == "0" ];then  ##OK  
+         p=0
+         cat ${info}|grep ">" > ${router}         
+         cat ${router} | grep -v "${wan_ip}:" > ${router2}
+         cat ${router2} | \
+         while read routers
+         do              
+             p=$(($p+1))
+             echo ${p} > "/tmp/p"
+         done
+         ${sql} ${conf_db} "select * from router" > "/tmp/copy_port"
+         [ -z "$upnp_router" ] && upnp_router=`cat ${info}|grep "desc:"|awk -F'desc: ' '{print $2}'| grep "${gateway}"`
+         echo ${upnp_router} > ${link_url}
+         upnp_router="2"   
+    else                  ##fail
+         rm -rf "/tmp/copy_port"
+         rm -rf ${link_url}                
+         rm -rf ${router}
+         rm -rf "/tmp/p"                   
+         upnp_router="1"
+    fi
+
+    echo "${upnp_router}" > /tmp/setport_msg2
+}
+
+set_port(){
+    del_port "$2"
+    save "$1"
+}
+
+save(){
+    string="${1}"
+    ${upnpc_path} -r ${string} > /tmp/setport_msg
+    status=`cat /tmp/setport_msg|grep "fail"`
+    status2=`cat /tmp/setport_msg|grep "UPnP device found. Is it an IGD ?"`
+    if [ "${status}" != "" ];then
+       if [ "${status2}" != "" ];then
+          echo 1 > /tmp/setport_msg2
+       else
+          echo 3 > /tmp/setport_msg2
+       fi
+                             
+    else
+          echo 2 > /tmp/setport_msg2
+    fi   
+}
+
+boot(){
+    stop
+    start
+}
+
+start(){
+    scan_router
+    if [ "`cat /tmp/setport_msg2`" == "1" ];then
+        echo "can't find the gateway router."
+        exit
+    fi
+
+    str=""
+    ${sql} ${conf_db} "select port,range_port,protocol from router" > ${port_file2}
+    check=`cat ${port_file2}`
+    if [ "${check}" == "" ];then
+         check="1";
+    fi
+    
+    if [ "${check}" != "1" ];then
+        str=""
+        cat ${port_file2} | \
+        while read port_info 
+        do
+             ports=`echo ${port_info}|awk -F'|' '{print $1}'`
+             ports_range=`echo ${port_info}|awk -F'|' '{print $2}'`
+             protocol=`echo ${port_info}|awk -F'|' '{print $3}'`
+         
+             if [ "${ports_range}" != "" ];then
+                  for (( i="${ports}"; i<="${ports_range}"; i=i+1 ))
+                  do
+                        if [ "${protocol}" == "TCP/UDP" ];then
+                           str="${str}${i} TCP ${i} UDP "
+                        else
+                           str="${str}${i} ${protocol} "
+                        fi
+                  done              
+             else
+                  if [ "${protocol}" == "TCP/UDP" ];then
+                     str="${str}${ports} TCP ${ports} UDP "
+                  else
+                     str="${str}${ports} ${protocol} "
+                  fi  
+             fi
+             echo "${str}" > "${setting_file}"
+        done
+        string=`cat ${setting_file}`
+        ${upnpc_path} -r ${string}
+        rm -rf ${setting_file}
+    fi
+    echo "${check}"
+}
+
+del_port(){
+    string="${1}"
+    ${upnpc_path} -d ${string} > /tmp/setport_msg
+    status=`cat /tmp/setport_msg|grep "fail"`
+    if [ "${status}" != "" ];then
+          echo 3 > /tmp/setport_msg2                   
+    else
+          echo 2 > /tmp/setport_msg2
+    fi
+}
+
+stop(){  
+    ${upnpc_path} -l|grep "\->${wan_ip}:"|awk -F'->' '{print $1}'|awk -F' ' '{print $2 " " $3}' > ${port_file}
+    del_str=""
+    cat ${port_file} | \
+    while read port
+    do 
+        protocol=`echo ${port}|awk -F' ' '{print $1}'` 
+        ex_port=`echo ${port}|awk -F' ' '{print $2}'`
+        del_str="$del_str$ex_port $protocol " 
+        echo "${del_str}" > "${delete}"
+    done
+    del_port=`cat ${delete}` 
+    ${upnpc_path} -d ${del_port}
+    rm -rf ${delete}
+}
+
+set_default(){
+    ${sql} ${conf_db} "delete from router"
+    ${sql} ${conf_db} "insert into router (port,range_port,protocol,des) values ('8888','8888','TCP','For WebService.')"
+    ${sql} ${conf_db} "insert into router (port,range_port,protocol,des) values ('9800','9800','TCP','For WebDAV and T-OnTheGo.')"
+    ${sql} ${conf_db} "insert into router (port,range_port,protocol,des) values ('1080','1080','TCP','For WebDisk.')"
+    ${sql} ${conf_db} "insert into router (port,range_port,protocol,des) values ('1080','1080','UDP','For WebDisk.')"
+    ${sql} ${conf_db} "insert into router (port,range_port,protocol,des) values ('4433','4433','TCP','For WebDisk.')"
+    ${sql} ${conf_db} "insert into router (port,range_port,protocol,des) values ('4433','4433','UDP','For WebDisk.')"
+    ${sql} ${conf_db} "insert into router (port,range_port,protocol,des) values ('9091','9091','TCP','For Transmission UI.')"
+    ${sql} ${conf_db} "insert into router (port,range_port,protocol,des) values ('9000','9000','TCP','For Twonkymedia UI.')"
+
+    ftp_port=`${sql} ${conf_db} "select v from conf where k='ftp_port'"`
+    ftp_port_range_begin=`${sql} ${conf_db} "select v from conf where k='ftp_port_range_begin'"` 
+    ftp_port_range_end=`${sql} ${conf_db} "select v from conf where k='ftp_port_range_end'"`
+
+    if [ "${ftp_port}" != "" ];then
+        ${sql} ${conf_db} "insert into router (port,range_port,protocol,des) values ('${ftp_port}','${ftp_port}','TCP','For FTP.')"
+    fi
+
+    if [ "${ftp_port_range_begin}" != "" ] && [ "${ftp_port_range_end}" != "" ];then
+        ${sql} ${conf_db} "insert into router (port,range_port,protocol,des) values ('${ftp_port_range_begin}','${ftp_port_range_end}','TCP','For FTP Passive Port.')"
+    fi
+}
+
+
+
+check_loop(){
+    Check_OK="OK"
+    Check_Fail="Fail"
+    Check_Fail2="Incomplete"
+    check_num=0
+    for (( i=$sport; i<=$eport; i++ ))
+    do
+        if [ "$proto" == "TCP/UDP" ]; then
+            result1=`cat /tmp/router_upnp | grep "\<$i\>" | grep "TCP"`
+            result2=`cat /tmp/router_upnp | grep "\<$i\>" | grep "UDP"`
+            
+            if [ -z "$result1" ]; then
+                check_num=`expr $check_num + 1`
+                echo "$i|$i|TCP|$description|$Check_Fail" >> $upnp_check_file
+            fi
+            
+            if [ -z "$result2" ]; then
+                check_num=`expr $check_num + 1`
+                echo "$i|$i|UDP|$description|$Check_Fail" >> $upnp_check_file
+            fi
+        else
+           result=`cat /tmp/router_upnp | grep "\<$i\>" | grep "$proto"`
+            if [ -z "$result" ]; then
+                check_num=`expr $check_num + 1`
+                echo "$i|$i|$proto|$description|$Check_Fail" >> $upnp_check_file
+            fi
+        fi
+    done
+    if [ "$check_num" == "0" ]; then
+        echo "$sport|$eport|$proto|$description|$Check_OK" >> $upnp_check_file
+                
+    else
+        if [ "$sport" != "$eport" ]; then
+        echo "$sport|$eport|$proto|$description|$Check_Fail2" >> $upnp_check_file
+        fi
+    fi
+}
+
+
+
+
+check_upnp(){
+    scan_router
+    if [ "`cat /tmp/setport_msg2`" == "1" ];then
+        echo "can't find the gateway router."
+        exit
+    fi
+
+    rm -fr $upnp_check_file        
+        ${sql} ${conf_db} "select port,range_port,protocol,des from router" > ${port_file2}
+        check=`cat ${port_file2}`
+        if [ "${check}" != "" ];then
+            upnpc -l | grep "$wan_ip:" | sed 's/->/ /g' | cut -d: -f1 | awk '{print $2" "$3" "$4}' > /tmp/router_upnp
+            cat ${port_file2} | \
+            while read upnp 
+            do
+                sport=`echo $upnp | awk -F'|' '{print $1}'`
+                eport=`echo $upnp | awk -F'|' '{print $2}'`
+                proto=`echo $upnp | awk -F'|' '{print $3}'`
+                description=`echo $upnp | awk -F'|' '{print $4}'`
+                
+                check_loop
+            done
+        fi
+}
+add_crond(){
+        #$0 is /img/bin/rc/rc.router
+        local crond_conf=/etc/cfg/crond.conf
+        local rc_router=`echo $0 | sed "s:/:.:g"`
+
+        on_crontab=`cat ${crond_conf} | awk '{print $6}' | grep "${rc_router}"`
+        if [ -z "${on_crontab}" ]; then
+                echo "*/10 * * * * $0 crond > /dev/null 2>&1" >> ${crond_conf}
+                cat ${crond_conf} | crontab - -u root
+        fi
+}
+del_crond(){
+        #$0 is /img/bin/rc/rc.router
+        local crond_conf=/etc/cfg/crond.conf
+        local rc_router=`echo $0 | sed "s:/:.:g"`
+        local conf_tmp=`cat ${crond_conf}`
+        if [ "`echo "$conf_tmp" | grep ${rc_router}`" ];then
+                echo "$conf_tmp" | grep -v ${rc_router} > ${crond_conf}
+                cat ${crond_conf} | crontab - -u root
+        fi
+}
+router_crond(){
+       #after start is success, call a deamon to checking if upnp port added.
+       [ ! -f /tmp/setport_msg2 ] && scan_router
+
+       if [ ! "`cat /tmp/setport_msg2`" == "1" ];then
+           if [ -f "${port_file2}" ];then
+               local upnp_port=`${upnpc_path} -l|grep "\->${wan_ip}:" | wc -l`
+               local upnp_db=`eval  "$(awk -F"|" '{print "seq "$1" "$2}' $port_file2)" | wc -l`
+               [ ! ${upnp_port} == ${upnp_db} ] && start && return
+           fi
+       fi
+}
+
+
+
+case "$1"
+in
+  check)
+        check_upnp
+        ;;
+  scan)                   
+       check_upnp
+       #scan_router
+       ;;
+  setup)
+       set_port "$2" "$3"
+       check_upnp
+       ;;
+  delete)
+       del_port "$2"
+       ;;
+  boot)
+       add_crond
+       boot 
+       ;;   
+  stop)
+       stop
+       ;;
+  start)
+       start
+       check_upnp
+       ;; 
+  reset)
+       set_default
+       ;;
+  crond)
+       router_crond
+       ;;
+  remove)
+       del_crond
+       ;;
+  *) 
+       echo "Usage: $0 { scan | setup | delete | boot | stop | start | check | crond | remove}"
+       ;;
+esac

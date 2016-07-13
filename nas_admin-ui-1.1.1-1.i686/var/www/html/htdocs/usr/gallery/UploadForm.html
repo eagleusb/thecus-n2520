@@ -1,0 +1,169 @@
+<?
+require_once("HtmlHeader.html");
+require_once("functions.html");
+
+function UploadMenu(){
+	echo '<tr align="center" valign="middle">'."\r\n";
+	if (strstr($_SERVER["HTTP_USER_AGENT"], "NT 5.1")) {
+		echo '<td align="center" valign="middle"><a href="XPublish/"><img src="/usr/gallery/img/xpublish.png" border="0"  title="'.$words['publish_wizard'].'"></a></td>';
+	}
+	PhotoMenu();
+	echo '</tr>';
+}
+?>
+<style type="text/css">
+<!--
+body {
+	margin-left: 0px;
+	margin-top: 0px;
+	margin-right: 0px;
+	margin-bottom: 0px;
+}
+body,td,th {
+	font-family: Arial, Helvetica, sans-serif;
+	color:#ffffff;
+}
+.style2 {color: #666666; font-weight: bold; font-size: 10px; }
+.style3 {color: #FFFFFF; font-weight: bold; font-size: 12px; }
+.style4 {color: #000000; font-weight: bold; font-size: 12px; }
+-->
+</style>
+<body bgcolor="#686868" text="#000000" leftmargin="0" topmargin="0" marginwidth="0" marginheight="0">
+<form method=post enctype="multipart/form-data" name=Upload>
+<?$_POST['album']=fix_post($_POST['album']);?>
+<input type=hidden name="album" value="<?=$_POST['album']?>">
+<input type="hidden" name="admin" value="">
+<table width="719px" border="0" cellspacing="0" cellpadding="0" align="center" class="outerpage">
+  <? require_once("HtmlBanner.html"); ?>
+  <tr>
+    <td align="center" valign="top">
+      <table width="95%"  border="0" cellpadding="0" cellspacing="0">
+        <tr>
+          <td width="70%" height="26" align="left"><span class="style1"><a href="iframe_gallery.html"><?=$words['gallery']?></a> &gt; <a href="album.html?id=<?=fix_encode($_SESSION['username']);?>" target="_self"><?=$words['my_gallery']?></a> &gt; <a href="photo.html?id=<?=fix_encode($_SESSION['username'])?>&album=<?=fix_encode($_POST['album'])?>"><?=$_POST['album']?></a> &gt; <?=$words['upload_photo']?></span></td>
+          <td width="30%" align="right">
+            <table width="10%"  border="0" cellpadding="0" cellspacing="0">
+              <? UploadMenu(); ?>
+            </table>
+          </td>
+        </tr>
+      </table>
+      <br>
+      <table width="90%" border="0" cellpadding="0" cellspacing="0">
+        <tr align="center">
+          <td width="11" class="style2"><img src="/usr/gallery/img/upload_bar_1.png" width="11" height="26"></td>
+          <td width="230" bgcolor="#475e6a" class="style3"><?=$words['upload_photo']?></td>
+          <td width="210" bgcolor="#94b4c4" class="style3"><?=$words['subject_rest']?></td>
+          <td  nowrap bgcolor="#94b4c4" class="style3"><?=$words['desp_rest']?></td>
+          <td width="11"><img src="/usr/gallery/img/upload_bar_2.png" width="11" height="26"></td>
+         </tr>
+	 <?for($i=0;$i<10;$i++){?>
+         <tr align="center">
+           <td colspan="5" class="style2">&nbsp;</td>
+         </tr>
+         <tr>
+           <td width="11"><img src="/usr/gallery/img/upload_bar_3.png" width="11" height="26"></td>
+           <td align="left" bgcolor="#7a94a1">
+             <input name="Client_file[]" type="file" class=file_content size=24 onkeydown="execute(event);return false" onkeypress="if(event.shiftKey)return(false);" oncontextmenu="return(false);">
+           </td>  
+           <td align="center" bgcolor="#c4d1d8">
+             <input name="Subject[]" type="text" size="20" maxlength="20" onkeyup="checklength(this,20)">
+           </td>
+           <td align="center" bgcolor="#c4d1d8">
+             <input type="text" name="Desp[]" size="25" maxlength="100">
+           </td>
+           <td width="11"><img src="/usr/gallery/img/upload_bar_4.png" width="11" height="26"></td>
+          </tr>
+          <?}?>
+          <tr>
+            <td colspan="5" class="style2">&nbsp;</td>
+          </tr>
+          <tr>
+            <td colspan="5" align="center">
+              <input type="button" name="confirm_upload" value="<?=$words['upload_photo']?>" onclick="manage('confirm_upload')";>
+              <input type=button onclick=manage('') name="cancel" value="<?=$gwords['back']?>">
+            </td>
+          </tr>
+       </table>
+    </td>
+  </tr>
+  <? require_once("HtmlBottom.html"); ?>
+</table>
+</form>
+</body>
+</html>
+<script language=javascript> 
+function execute(event){
+  if(event.keyCode=='35'){
+    var obj= event.target||event.srcElement;
+    var len = obj.value.length;
+    if(event.target){
+      obj.selectionStart = len;
+    }else{
+      var rng =obj.createTextRange();
+      rng.moveStart('character',len);
+      rng.collapse(true);rng.select();
+    }
+  }else if(event.keyCode=='36'){
+    var obj= event.target||event.srcElement;
+    if(event.target){
+      obj.selectionStart = 0;
+    }else{
+      var rng =obj.createTextRange();
+      rng.moveStart('character',0);
+      rng.collapse(true);rng.select();
+    }    
+  }else 
+    return false;  
+}
+
+function manage(ACT){
+	if (ACT == "confirm_upload"){
+		if(!confirm("<?=$words["upload_confirm"]?>")){
+    		return false;
+    }
+  }
+	with (document.Upload) {
+		confirm_upload.disabled=true;
+		cancel.disabled=true;
+		for (i=0; i<elements.length; i++){
+			if (elements[i].type=="text" && elements[i].name=="Subject[]"){
+				checklength(elements[i],20);
+			}
+		}
+	}
+	Upload.admin.value=ACT;
+	Upload.submit();
+}
+
+function checklength(key,len){
+	var sharename=key.value;
+	var sharename_length = 0;
+	var count = 0;
+	for(var i=0;i<sharename.length;i++){
+        	if(sharename.charCodeAt(i)  > 255){
+			sharename_length += 2;
+			count++;
+			if(sharename_length>len)
+			key.value=sharename.substr(0,key.value.length-1);
+		}else{
+			sharename_length ++;
+			count++;
+			if(sharename_length>len)
+			key.value=sharename.substr(0,key.value.length-1);
+		}
+	}
+	if(sharename_length >= len){
+		key.maxLength = count;
+		return false;
+	}else
+		key.maxLength = len;
+	return true;
+}
+
+function not_modify(e){
+	var key = e.which||e.keyCode;
+	if(key!=""){
+		return false;
+	}
+}
+</script>

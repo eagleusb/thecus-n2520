@@ -1,0 +1,66 @@
+<?
+	session_start();
+	require_once('../../../function/conf/localconfig.php');
+	require_once(WEBCONFIG);
+	require_once(INCLUDE_ROOT.'function.php');
+	require_once(USER_ROOT . "gallery/functions.html");
+
+	check_auth($_SESSION);
+	get_sysconf();
+
+	$contant=eregi_replace("^contant=","",$_SERVER['QUERY_STRING']);
+	$contant=eregi_replace("\.\./","",$_GET['contant']);
+	$contants=split("\?",$contant);
+	if(!file_exists("/var/www/html/htdocs" . $contants[0])){
+	    $contant="";
+	}
+		 if (trim($contant)=="")
+	        $contant="iframe_gallery.html";
+		$contant=urlencode($contant);
+		$contant=ereg_replace("%2F","/",$contant);
+		$contant=ereg_replace("%3F","?",$contant);
+		$contant=ereg_replace("%3D","=",$contant);
+		$contant=ereg_replace("%26","&",$contant);
+		
+?>
+<html>
+<head>
+<base target="_self">
+<meta http-equiv="Content-Type" content="text/html; charset=utf8">
+<title><?=$webconfig['manufactur']?> <?=$webconfig['product_no']?><?=$webconfig['pro']?></title>
+<!--[if lt IE 7]>
+<script defer type="text/javascript" src="/javascript/iepngfix_tilebg.js"></script>
+<style type="text/css">
+<!--
+ img, div { behavior: url("/javascript/iepngfix.htc") }
+-->
+</style>
+<![endif]-->
+<link rel="stylesheet" href="/usr/gallery/css/css.css" type="text/css">
+</head>
+<!--<FRAMESET rows="59,*" border="0" cellpadding="0" cellspacing="0" width="719px" align="center">-->
+<FRAMESET rows="*" border="0" cellpadding="0" cellspacing="0" width="719px" align="center">
+  <!--<FRAME noresize="noresize" name="top_frame" src="/gallery/iframe_topbanner.htm" scrolling="no">-->
+  <FRAME noresize="noresize" name="contant" src="<?=$contant?>">
+</FRAMESET>
+<!--
+<body>
+<div align="center">
+  <center>
+    <table width="719px" border="0" cellspacing="0" cellpadding="0" class="outerpage" align="center">
+      <tr>
+        <td>
+		<iframe name="top_frame" src="/gallery/iframe_topbanner.htm" align="center" scrolling="no" height="59" width="100%" frameborder="0"></iframe>
+	</td>
+      </tr>
+      <tr>
+        <td>
+        	<iframe name="contant" src="<?=$contant?>" scrolling="no" align="center" height="100%" width="100%" frameborder="0"></iframe>
+        </td>
+      </tr>
+    </table>
+  </center>
+</div>
+</body>
+--!>
+</html>

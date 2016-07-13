@@ -1,0 +1,105 @@
+.thumb-wrap{
+	float:left;
+	border:1px solid #fff;
+	height:60px;
+	width:60px;
+	margin:5px;
+	overflow:hidden;
+	cursor: default;
+}
+
+.thumb{
+	height:40px;
+}
+
+.thumb-wrap p{
+	text-align:center;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	overflow: hidden;
+}
+
+.x-view-over{
+	filter:alpha(opacity=80);
+	opacity: 0.8;
+	-moz-opacity:0.8;
+}
+
+.x-view-selected{
+	background-color:#d0e4f3;
+	border-color:#0c82d4;
+}
+
+
+.swf-icon{
+	background: url(/theme/images/icons/application-swf.png) center center no-repeat !important;
+}
+
+.image-icon{
+	background: url(/theme/images/icons/image.png) center center no-repeat !important;
+}
+
+.html-icon{
+	background: url(/theme/images/icons/text-html.png) center center no-repeat !important;
+}
+
+.word-icon{
+	background: url(/theme/images/icons/application-msword.png) center center no-repeat !important;
+}
+
+.php-icon{
+	background: url(/theme/images/icons/application-x-php.png) center center no-repeat !important;
+}
+
+.java-icon{
+	background: url(/theme/images/icons/text-x-java.png) center center no-repeat !important;
+}
+
+
+.ppt-icon{
+	background: url(/theme/images/icons/application-vnd.ms-powerpoint.png) center center no-repeat !important;
+}
+
+.txt-icon{
+	background: url(/theme/images/icons/text-x-generic.png) center center no-repeat !important;
+}
+
+.unknow-icon{
+	background: url(/theme/images/icons/unknown.png) center center no-repeat !important;
+}
+
+.zip-icon{
+	background: url(/theme/images/icons/application-x-compress.png) center center no-repeat !important;
+}
+
+.css-icon{
+	background: url(/theme/images/icons/text-css.png) center center no-repeat !important;
+}
+
+.js-icon{
+	background: url(/theme/images/icons/text-x-script.png) center center no-repeat !important;
+}
+
+.folder-icon{
+	background: url(/theme/images/icons/gnome-fs-directory.png) center center no-repeat !important;
+}
+.file-icon{
+	background: url(/theme/images/icons/gnome-fs-file.png) center center no-repeat !important;
+}
+
+.up-icon{
+	background: url(/theme/images/icons/folder_up.png) center center no-repeat !important;
+}
+
+.go-icon{
+	background: url(/theme/images/icons/folder_go.png) center center no-repeat !important;
+}
+
+.expand-icon{
+	background: url(/theme/images/icons/bullet_arrow_down.png) 3px center no-repeat !important;
+}
+
+.collapse-icon{
+	background: url(/theme/images/icons/bullet_arrow_up.png) 3px center no-repeat !important;
+}
+

@@ -1,0 +1,389 @@
+<?php
+ header("Content-type: text/html;charset=utf-8");
+ require_once('../../../function/conf/localconfig.php');
+ require_once(INCLUDE_ROOT.'session.php');
+                 
+ require_once("GlobalVars.html");
+
+function AlbumMenu(){
+	global $words,$session,$gwords;
+	$words['menu']=$session->PageCode("gallery_menu");
+	$gwords=$session->PageCode("global");
+	echo '<tr align="center" valign="middle">'."\r\n";
+	echo '<td align="center" valign="middle"><a href="album.html?id=' . fix_encode($_REQUEST['id']) . '"><img src="/usr/gallery/img/button_back.png" title="' . $words['menu']['back'] . '" border="0"></a></td>'."\r\n";
+	require_once("HtmlMenu.html");
+	echo '</tr>';
+}
+
+function PhotoMenu(){
+	global $words,$session,$gwords;	
+	$words['menu']=$session->PageCode("gallery_menu");
+  $gwords=$session->PageCode("global");	
+	echo '<td align="center" valign="middle"><a href="photo.html?album=' . fix_encode($_REQUEST['album']) . '&id=' . fix_encode($_SESSION['username']) . '" target="_top"><img src="/usr/gallery/img/button_back.png" title="' . $words['menu']['back'] . '" border="0"></a></td>'."\r\n";
+	require_once("HtmlMenu.html");
+}
+
+function check_auth($session){
+  if(!isset($session["username"]) || $session["username"]=="admin"){
+//    header('Location: /unauth.htm');
+//    exit;
+  }
+}
+//======================-???s?X°?D
+ function Fix_encode($file)
+ {
+   return eregi_replace("\+","%20",urlencode($file));
+ }
+
+ function Fix_post($arg)
+ {
+   $arg=str_replace("\\\\","\t",$arg);
+   $arg=str_replace("\\","",$arg);
+   return str_replace("\t","\\",$arg);
+ }
+//======================-??2V?X?yX
+  function Fix_UTF8($OriString,$length)
+  {
+      $Olen=strlen($OriString);
+      $len=0;
+	if($length>=$Olen)
+		return htmlspecialchars($OriString);
+      for ($i=0;($i<$length) && ($i<$Olen);$i++){
+		$Ch=ord(substr($OriString,$len,1));
+		if($Ch<192){
+		$len++;
+       	}
+		else if(($Ch>=192) && ($Ch<224)){
+		$len+=2;$i++;
+       	}
+		else if(($Ch>=224) && ($Ch<240)){
+		$len+=3;$i++;
+       	}
+		else{
+		$len+=4;$i++;
+		}
+	}
+	if($len<$Olen)
+		return htmlspecialchars(substr($OriString,0,$len)) . "...";
+	else
+		return htmlspecialchars(substr($OriString,0,$len)) ;
+  }
+
+//======================?§??-
+ function GiveRight($id,$path)
+ {
+   //$group="smbusers";
+   $group="smbusers";
+   exec("chown $id:$group $path");
+  }
+//======================js alert
+  function js_alert($msg)
+  {
+    echo "<script language='javascript'>alert('{$msg}');</script>";
+  }
+//======================
+function ScanDirs($id,$album)
+ {
+        if(!file_exists(AlbumRoot)){
+        	//$strExec="mkdir -p ".escapeshellarg(AlbumRoot);
+        	//shell_exec($strExec);
+        	echo "<script>alert('System under maintenance')</script>";
+ 		Force_End();
+		exit;	
+       }
+	
+   $root=AlbumRoot;
+   if($id)$root.=$id . "/";
+   if($album)$root.=$album . "/";
+   chdir($root);
+   $dir=dir(".");
+   $dir->rewind();
+   while($file=$dir->read())
+    {
+	if (!$album){
+      		if(is_dir($file) && ($file!=".") && ($file!="..")){
+		$obj[]=array(filectime($file),$file);
+		}
+     	}
+	else{
+		if(is_file($file)){
+			if(File_Format_confirm($file)){
+				if( filesize($file) <= MaxFileSize )
+				$obj[]=array(filectime($file),$file);
+			}
+		}
+	}
+	
+    }
+  $dir->close();
+	if (count($obj)>0)
+	rsort($obj);
+  return $obj;
+ }
+//======================?T?{‥???O§_|s|b
+ function User_exist($id)
+ {
+     chdir(AlbumRoot);
+     $dir=dir(".");
+     $dir->rewind();
+    while($file=$dir->read())
+    {
+	if(is_dir($file) && ($file!=".") && ($file!=".."))
+	{
+	   if ($id==$file)
+	   return true;
+	}
+    }
+      return false;
+ }
+//======================?T?{??¯?O§_|s|b
+ function Album_exist($id,$album)
+ {
+     chdir(AlbumRoot . $id );
+     $dir=dir(".");
+     $dir->rewind();
+    while($file=$dir->read())
+    {
+	if(is_dir($file) && ($file!=".") && ($file!=".."))
+	{
+      	  if ($file==$album)
+	  return true;
+	}
+    }
+         return false;
+ }
+//=======================album??|^-o-?
+  function direct_out($Pattern)
+  {
+    echo '<meta http-equiv="Content-Type" content="text/html; charset=utf-8">';
+    echo "<meta http-equiv=\"Refresh\" content=\"0;URL=$Pattern\">";
+  }
+//========================?T?{IR??oA
+ function File_Format_confirm($file_name)
+ { 
+    if(eregi("(\.+jpg|\.+gif|\.+bmp|\.+png|\.+jpeg)$",$file_name))
+	return true;
+    else
+	return false;
+ }
+//=========================§?ver
+  function GetCover($coverTmp,$album)
+  {
+    $coverName = $coverTmp . "/TheCus.cover";
+    $passName = $coverTmp . "/.album_security";
+    
+    $AddChk="onclick=\"return ChkPwd(0,'".Fix_encode($_GET['id'])."','".Fix_encode($album)."');\"";
+    if (file_exists($passName)){
+                $passName=Fix_special_char($passName);
+                $PWD=trim(shell_exec("/usr/bin/des -D -k album $passName"));
+		if ($PWD != ""){
+			$AddChk="onclick=\"return ChkPwd('".Fix_encode($coverTmp)."','".Fix_encode($_GET['id'])."','".Fix_encode($album)."');\"";
+		}
+    }
+
+    if(file_exists($coverName))
+    {
+	$img = ParseObj($coverName);
+	if(file_exists($coverTmp . "/" . $img)){
+		if(!file_exists($coverTmp . "/100x100/" . $img)){unset($pix);
+			$pix=GetPicSize("{$coverTmp}/{$img}" ,"100x100");
+			return "<img src=\"GetPic.html?PicName=" . Fix_encode($img) . "&id=" . Fix_encode($_GET['id']) . "&album=" . Fix_encode($album). "\" border=0 width={$pix[x]} height={$pix[y]} ".$AddChk.">";
+		}
+	return "<img src=\"GetPic.html?PicName=" . Fix_encode($img) . "&id=" . Fix_encode($_GET['id']) . "&album=" . Fix_encode($album). "\" border=0 ".$AddChk.">";
+	}
+    }
+    return "<img src=\"/usr/gallery/img/gallery_personal.jpg\" border=0 ".$AddChk." >";
+  }
+//=========================§?ver
+  function GetGalleryCover($coverTmp,$id,$album)
+  {
+    $coverName = $coverTmp . "/TheCus.cover";
+    if(file_exists($coverName))
+    {
+	$img = ParseObj($coverName);
+	if(file_exists($coverTmp . "/" . $img)){
+		if(!file_exists($coverTmp . "/100x100/" . $img)){unset($pix);
+			$pix=GetPicSize("{$coverTmp}/{$img}" ,"100x100");
+			return "<img src=\"GetPic.html?PicName=" . Fix_encode($img) . "&id=" . Fix_encode($id) . "&album=" . Fix_encode($album). "\" border=0 width={$pix[x]} height={$pix[y]}>";
+		}
+	return "<img src=\"GetPic.html?PicName=" . Fix_encode($img) . "&id=" . Fix_encode($id) . "&album=" . Fix_encode($album). "\" border=0>";
+	}
+    }
+    return "<img src=\"/usr/gallery/img/gallery_personal.jpg\" border=0>";
+  }
+//=========================§?-z
+  function GetDesp($coverTmp,$album)
+  {
+    $coverName = $coverTmp . "/TheCus.cover.desp";
+    if ( file_exists($coverName) )
+    {
+	$Desp = ParseObj($coverName);
+	if (trim($Desp)!="")
+		return Fix_UTF8(ParseObj($coverName),100);
+	else 
+		return "";
+    }
+    return "";
+  }
+//=========================SetObject
+  function SetObject($object,$Pattern)
+  {
+        if (@$fp=fopen($object,"wb"))
+	@fwrite($fp,substr($Pattern,0,785));
+	@fclose($fp);
+  }
+//=========================
+ function ParseObj($file)
+ {
+	if (@($fp = fopen($file,"r")))
+		while($tmp = fgets($fp,785)){
+		$Buffer  =$Buffer .  $tmp;
+		}
+	@fclose($fp);
+	return $Buffer;
+ }
+//================================
+  function GetPassword($passTmp,$album){
+	$passName = $passTmp . "/.album_security";
+	if (file_exists($passName)){
+		$passName = Fix_special_char($passName);
+		$PWD=trim(shell_exec("/usr/bin/des -D -k album $passName"));
+		return $PWD;
+	}
+	return "";
+  }
+
+  function SetPassword($object,$Pattern)
+  {
+        if (@$fp=fopen($object,"wb"))
+	@fwrite($fp,$Pattern);
+	@fclose($fp);
+	$object=Fix_special_char($object);
+	shell_exec('/usr/bin/des -E -k album '.$object.' '.$object.'.tmp');
+	shell_exec('/bin/mv '.$object.'.tmp '.$object.'');
+  }
+//================================§?
+    function GetImgSrc($id,$album,$pic,$type,$mode)
+   {
+	switch($type){
+		case '50x50':
+			unset($pix);
+			$pix=GetPicSize(rawurldecode( escapeshellarg (AlbumRoot . "{$id}/{$album}/{$pic}") ) ,"50x50");
+			$pic_name=rawurldecode($pic);
+			return '<img src="' . "GetPic.html?PicName={$pic}&id={$id}&album={$album}&mode={$mode}" . "\" width={$pix[x]} height={$pix[y]} alt=\"{$pic_name}\" border=0> ";
+		break;
+		case '100x100':
+			if (!file_exists(rawurldecode(  AlbumRoot . "{$id}/{$album}/100x100/{$pic}" ) ) ){
+			unset($pix);
+			$pix=GetPicSize(rawurldecode( escapeshellarg (AlbumRoot . "{$id}/{$album}/{$pic}") ) ,"100x100");
+			return '<img src="' . "GetPic.html?PicName={$pic}&id={$id}&album={$album}&mode={$mode}" . "\" width={$pix[x]} height={$pix[y]} border=0> ";
+			}
+		return '<img src="' . "GetPic.html?PicName={$pic}&id={$id}&album={$album}&mode={$mode}" . "\" border=0>";
+		break;
+		case '300x300':
+			if (!file_exists(rawurldecode(  AlbumRoot . "{$id}/{$album}/300x300/{$pic}" ) ) ){
+			unset($pix);
+			$pix=GetPicSize(rawurldecode( escapeshellarg (AlbumRoot . "{$id}/{$album}/{$pic}") ) ,"300x300");
+			return '<img src="' . "GetPic.html?PicName={$pic}&id={$id}&album={$album}&mode={$mode}" . "\" width={$pix[x]} height={$pix[y]} border=0>";
+			}			
+		return '<img src="' . "GetPic.html?PicName={$pic}&id={$id}&album={$album}&mode={$mode}" . "\" border=0>";
+		break;
+		case 'slide': // is 300x300
+		return "GetPic.html?PicName={$pic}&id={$id}&album={$album}&mode={$mode}";
+		break;
+		default:
+		break;
+	}
+	return $url;
+   }
+//=============================== 
+function GetPicSize($object,$type)
+  {
+$oo=ereg_replace("^[']","",$object);
+$oo=ereg_replace("(['])$","",$oo);
+$pix=getimagesize($oo);
+       $pixel=array(x=>$pix[0],y=>$pix[1]);
+	switch ($type){
+		case '300x300':
+			if($pixel[x]>300 || $pixel[y]>300){
+				if($pixel[x]>$pixel[y]){
+					$pp=$pixel[x]/300;
+					$pixel[y]=$pixel[y]/$pp;
+					$pixel[x]=300;
+				}
+				else{
+					$pp=$pixel[y]/300;
+					$pixel[x]=$pixel[x]/$pp;
+					$pixel[y]=300;
+				}
+			}	
+			return $pixel;
+			break;
+		case '100x100':
+			if($pixel[x]>100 || $pixel[y]>100){
+				if($pixel[x]>$pixel[y]){
+					$pp=$pixel[x]/100;
+					$pixel[y]=$pixel[y]/$pp;
+					$pixel[x]=100;
+				}
+				else{
+					$pp=$pixel[y]/100;
+					$pixel[x]=$pixel[x]/$pp;
+					$pixel[y]=100;
+				}
+			}
+			return $pixel;
+			break;
+		case '50x50':
+			if($pixel[x]>50 || $pixel[y]>50){
+				if($pixel[x]>$pixel[y]){
+					$pp=$pixel[x]/50;
+					$pixel[y]=$pixel[y]/$pp;
+					$pixel[x]=50;
+				}
+				else{
+					$pp=$pixel[y]/50;
+					$pixel[x]=$pixel[x]/$pp;
+					$pixel[y]=50;
+				}
+			}
+			return $pixel;
+			break;
+		default:
+			if($pixel[x]>100 || $pixel[y]>100){
+				if($pixel[x]>$pixel[y]){
+					$pp=$pixel[x]/100;
+					$pixel[y]=$pixel[y]/$pp;
+					$pixel[x]=100;
+				}
+				else{
+					$pp=$pixel[y]/100;
+					$pixel[x]=$pixel[x]/$pp;
+					$pixel[y]=100;
+				}
+			}	
+			return $pixel;			
+			break;
+	}
+  }
+//===================================
+  function Fix_special_char($file)
+  {
+   $file=escapeshellcmd($file);
+   $file=eregi_replace("\~","~",$file);
+   $file=eregi_replace("\#","#",$file);
+   $file=eregi_replace(" ","\ ",$file);
+   $file=eregi_replace("@","\@",$file);
+   $file=eregi_replace("!","\!",$file);
+   return $file;
+  }
+?>
+<?function Force_End(){?>
+<body>
+<script>top.location.href='/adm/logout.php';</script>
+<?
+  //direct_out("/usr/gallery/iframe_logout.html")
+?>
+</body>
+</html>
+<?}?>

@@ -1,0 +1,5 @@
+#!/bin/sh
+#/img/bin/mni.sh stage "Booting OK"
+kill -9 `ps | grep [b]tn_dispatcher | awk '{print $1}'`
+
+[ -f /img/bin/rc/rc.local ] && eval /img/bin/rc/rc.local $TO_TRASH

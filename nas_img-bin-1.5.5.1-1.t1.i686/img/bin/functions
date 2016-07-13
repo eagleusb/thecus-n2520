@@ -1,0 +1,482 @@
+#!/bin/sh
+##################################################################
+#
+#  First, define some variables globally needed
+#
+##################################################################
+MODEL="`awk '/MODELNAME/{print $2}' /proc/thecus_io`"
+
+mdadm="/sbin/mdadm"
+sgdisk="/usr/sbin/sgdisk"
+mkswap="/sbin/mkswap"
+# it is recommended to use 64KB block size for N2310 to optimize performance.
+[ "$MODEL" = "N2310" ]\
+	&& mkext4_option="-m 0 -b 65536 -i 65536" \
+	|| mkext4_option="-m 0 -b 4096 -i 4096"
+mkext4="/sbin/mkfs.ext4"
+part_num=5
+pstart[1]=41945088
+pend[1]=46139375
+pstart[2]=47187968
+#pend[2]=remainder
+pstart[3]=46139392
+pend[3]=47187951
+pstart[4]=2048
+pend[4]=20973559
+pstart[5]=20973568
+pend[5]=41945071
+rootfs_partnum=4	#rootfs partition number
+reserve_partnum=5
+swap_partnum=1
+sys_partnum=3
+data_partnum=2
+rootfs_mdnum=70
+swap_mdnum=10
+data_mdnum=0
+sys_mdnum=50
+NEWROOT="/sysroot"
+sqlite="/usr/bin/sqlite3"
+#mni="/img/bin/mni.sh"
+setfacl="/usr/bin/setfacl"
+flag_path="/flag_mnt"
+
+##################################################################
+#
+#  Second, declare sub routines needed
+#
+##################################################################
+#error() {
+#	local _level="stage"
+#	if [ "$1" != "" ]; then
+#		case "$1" in
+#			001)
+#				$mni ${_level} "[Error] There is no disk plugged."
+#				;;
+#			002)
+#				$mni ${_level} "[Error] Create partition $2 failed."
+#				;;
+#			003)
+#				$mni ${_level} "[Error] Create runtime system RAID failed."
+#				;;
+#			004)
+#				$mni ${_level} "[Error] Make file system for runtime system failed."
+#				;;
+#			005)
+#				$mni ${_level} "[Error] Mount runtime system failed."
+#				;;
+#			006)
+#				$mni ${_level} "[Error] Mount rpm packages partition failed"
+#				;;
+#			007)
+#				$mni ${_level} "[Error] rpm install failed."
+#				;;
+#			008)
+#				$mni ${_level} "[Error] Set runtime system configure failed."
+#				;;
+#			009)
+#				$mni ${_level} "[Error] Assemble runtime system RAID failed."
+#				;;
+#			010)
+#				$mni ${_level} "[Error] Runtime system RAID is inactive."
+#				;;
+#			011)
+#				$mni ${_level} "[Error] Create swap RAID failed."
+#				;;
+#			012)
+#				$mni ${_level} "[Error] Make swap failed."
+#				;;
+#			013)
+#				$mni ${_level} "[Error] Assemble swap RAID failed."
+#				;;
+#			014)
+#				$mni ${_level} "[Error] Swap RAID is inactive."
+#				;;
+#			015)
+#				$mni ${_level} "[Error] Create sys RAID failed."
+#				;;
+#			016)
+#				$mni ${_level} "[Error] Make file system for sys RAID failed."
+#				;;
+#			017)
+#				$mni ${_level} "[Error] Check sys file system failed."
+#				;;
+#			018)
+#				$mni ${_level} "[Error] Mount sys RAID failed."
+#				;;
+#			019)
+#				$mni ${_level} "[Error] Create smb.db failed."
+#				;;
+#			020)
+#				$mni ${_level} "[Error] Assemble sys RAID failed."
+#				;;
+#			021)
+#				$mni ${_level} "[Error] Sys RAID is inactive."
+#				;;
+#			022)
+#				$mni ${_level} "[Error] Create data RAID failed."
+#				;;
+#			023)
+#				$mni ${_level} "[Error] Make file system for data RAID failed."
+#				;;
+#			024)
+#				$mni ${_level} "[Error] Check data file system failed."
+#				;;
+#			025)
+#				$mni ${_level} "[Error] Mount data RAID failed."
+#				;;
+#			026)
+#				$mni ${_level} "[Error] Create system folder failed."
+#				;;
+#			027)
+#				$mni ${_level} "[Error] Assemble data RAID failed."
+#				;;
+#			028)
+#				$mni ${_level} "[Error] Data RAID is inactive."
+#				;;
+#			029)
+#				$mni ${_level} "[Error] Switch_root to runtime system failed."
+#				;;
+#			030)
+#				$mni ${_level} "[Error] DHCP get IP failed."
+#				;;
+#			031)
+#				$mni ${_level} "[Error] Rebuild $2 RAID failed."
+#				;;
+#			032)
+#				$mni ${_level} "[Error] Remove Disk $2 failed."
+#				;;
+#			*)
+#				$mni ${_level} "[Error] Unknown Error occurred." 
+#				;;
+#		esac
+#	fi
+#}
+
+udevsettle() {
+	if [ -e "/sbin/mdev" ];then
+		mdev -s
+	else
+		local UDEVVERSION=$(udevadm --version)
+		if [ $UDEVVERSION -ge 143 ]; then
+			udevadm settle --exit-if-exists=/lib/dracut/hooks/initqueue/work $settle_exit_if_exists
+		else
+			udevadm settle --timeout=30
+		fi
+	fi
+}
+
+# check if the partition is match our layout
+# partition_match dev_name part_num
+# e.g. partition_match sda 1
+# return value:
+# 	0: the partition is not match
+#	1: the partition is match
+partition_match() {
+	local _start
+	local _end
+	local _is_match=1
+	local _device="$1"
+	local _part="$2"
+
+	_start=`${sgdisk} -p /dev/${_device} | grep "^   ${_part}" | grep FD00 | awk '{print $2}'`
+	_end=`${sgdisk} -p /dev/${_device} | grep "^   ${_part}" | grep FD00 | awk '{print $3}'`
+	if [ ${_part} -eq ${data_partnum} ]; then	# data partition, end size is not a fixed value
+		if [ "${_start}" != "${pstart[${_part}]}" ]; then
+			_is_match=0
+		else
+			_is_match=1
+		fi
+	else
+		if [ "${_start}" != "${pstart[${_part}]}" ] || [ "${_end}" != "${pend[${_part}]}" ]; then
+			_is_match=0
+		else
+			_is_match=1
+		fi
+	fi
+
+	return ${_is_match}
+}
+
+# check if there is any partition info on disk
+# e.g. partition_exist sda
+# return value:
+#	0: there isn't any partition on disk
+#	1: there is any partition on disk
+partition_exist() {
+	local _device=$1
+	local _ret=0
+
+	fdisk -l /dev/${_device} | grep "^/dev/${_device}[0-9]" >/dev/null 2>&1
+	_ret=$?	
+	if [ ${_ret} -eq 0 ]; then
+		return 1
+	else
+		return 0
+	fi
+}
+
+# check if the md is active
+# md_active md
+# e.g. md_active md0
+# return value:
+#	0: is not actvie
+#	1: is active
+md_active() {
+	local _md="$1"
+	local _ret=0
+
+	local exist=`cat /proc/mdstat | grep "${_md} "`
+	local building=`cat /proc/mdstat|sed -n "/^${_md} /p"|grep "recovery\|resync\|reshape" |cut -d"]" -f2|cut -d"=" -f1`
+	local inactive=`cat /proc/mdstat | grep "${_md} " | grep "inactive"`
+	if [ "${exist}" = "" ]; then	# md doesn't exist
+		_ret=0
+	else
+		if [ -n "$building" ]; then
+			_ret=1
+		else
+			if [ "${inactive}" = "" ]; then # active
+				_ret=1
+			else
+				_ret=0
+			fi
+		fi
+	fi
+	return ${_ret}
+}
+
+# call to get disk UUID
+# get_uuid dev_name part_num
+# e.g. get_uuid sda 1
+# echo value:
+#	normal value: raid5;f720d008:fb8f8a79:31efe514:34a0b44c
+#	unnormal value: ""
+get_uuid() {
+	local UUID=`${mdadm} --examine /dev/${1}${2} 2>/dev/null | awk 'BEGIN{OFS=";";FS=" : "}{if($1~/UUID/ && UUID==""){UUID=$2}if($1~/Raid Level/){TYPE=$2}}END{if(TYPE!="" && UUID!="")print TYPE,UUID}'`
+	echo ${UUID}
+}
+
+# stop md and remove the mount
+# stop_raid md
+# e.g. stop_raid md0
+stop_raid() {
+	local _md="$1"
+
+	case "${_md}" in
+		"md${swap_mdnum}")
+			swapoff /dev/${_md}
+			$mdadm -S /dev/${_md}
+			;;
+		*)
+			umount -f /dev/${_md}
+			$mdadm -S /dev/${_md}
+			;;
+	esac
+}
+
+get_hours() {
+  local HOURS=0
+#  Mon Oct 18 18:32:59 CST 2010
+  local YEAR=`echo -n $1 | tail -c 4`
+  YEAR=`expr $YEAR - 1970`
+  local WEEK=`echo $1 | awk '{print $1}'`
+  local MONTH=`echo $1 | awk '{print $2}'`
+  local DAY=`echo $1 | awk '{print $3}'`
+  local HOUR=`echo $1 | awk '{print $3}'`
+
+  HOURS=`expr $HOURS + 24 \* $DAY - 24`
+  case "$MONTH"
+  in
+  Jan)
+    HOURS=`expr $HOURS + 24 \* 30 \* 0`
+    ;;
+  Feb)
+    HOURS=`expr $HOURS + 24 \* 30 \* 1`
+    ;;
+  Mar)
+    HOURS=`expr $HOURS + 24 \* 30 \* 2`
+    ;;
+  Apr)
+    HOURS=`expr $HOURS + 24 \* 30 \* 3`
+    ;;
+  May)
+    HOURS=`expr $HOURS + 24 \* 30 \* 4`
+    ;;
+  Jun)
+    HOURS=`expr $HOURS + 24 \* 30 \* 5`
+    ;;
+  Jul)
+    HOURS=`expr $HOURS + 24 \* 30 \* 6`
+    ;;
+  Aug)
+    HOURS=`expr $HOURS + 24 \* 30 \* 7`
+    ;;
+  Sep)
+    HOURS=`expr $HOURS + 24 \* 30 \* 8`
+    ;;
+  Oct)
+    HOURS=`expr $HOURS + 24 \* 30 \* 9`
+    ;;
+  Nov)
+    HOURS=`expr $HOURS + 24 \* 30 \* 10`
+    ;;
+  Dec)
+    HOURS=`expr $HOURS + 24 \* 30 \* 11`
+    ;;
+  esac
+
+  HOURS=`expr $HOURS + 24 \* 30 \* 12 \* $YEAR`
+
+  echo ${HOURS}
+}
+
+get_disk_update_time() {
+  local DATE=`${mdadm} --examine ${1} 2>/dev/null | grep 'Update Time' | awk -F' : ' '{print $2}'`
+  local hours=`get_hours "$DATE"`
+  echo ${hours}
+}
+
+get_disk_eventid() {
+  local EVENTID=`${mdadm} --examine ${1} 2>/dev/null | grep Events | awk '{print $3}'`
+  echo ${EVENTID}
+}
+
+check_force_assemble() {
+  _force_assemble=1
+  local lastest_update_time=0
+  local min_event_id=0
+  local current_update_time
+  local current_event_id
+
+  for i in $1
+  do
+    if [ $lastest_update_time -eq 0 ];then
+      lastest_update_time=`get_disk_update_time ${i}`
+      min_event_id=`get_disk_eventid ${i}`
+    fi
+    current_update_time=`get_disk_update_time ${i}`
+    current_event_id=`get_disk_eventid ${i}`
+    if [ $lastest_update_time -gt $current_update_time ];then
+      if [ `expr $lastest_update_time - $current_update_time` -ge 12 ];then
+        _force_assemble=0
+        break
+      fi
+      lastest_update_time= $current_update_time
+    elif [ $current_update_time -gt $lastest_update_time ];then
+      if [ `expr $current_update_time - $lastest_update_time` -ge 12 ];then
+        _force_assemble=0
+        break
+      fi
+    fi
+    if [ $min_event_id -gt $current_event_id ];then
+      if [ `expr $lastest_update_time - $current_event_id` -ge 50 ];then
+        _force_assemble=0
+        break
+      fi
+      min_event_id= $current_event_id
+    elif [ $current_event_id -gt $min_event_id ];then
+      if [ `expr $current_event_id - $min_event_id` -ge 50 ];then
+        _force_assemble=0
+        break
+      fi
+    fi
+  done
+
+  return $_force_assemble
+}
+
+get_rpm_device() {
+    	local _dev
+	local _model
+	
+	if [ ! -f /proc/thecus_io ]; then
+		_dev="mmcblk0p2"
+	else
+		_model=`cat /proc/thecus_io | awk '/MODELNAME/{print $2}'`
+
+		case "${_model}" in
+			N2800|N4800)
+				_dev="sdaaa2"
+				;;
+			N2520|N4520)
+				_dev="mmcblk0p2"
+				;;
+			N2200XXX)
+				_dev="hda2"
+				;;
+			N2310)
+				_dev="mtdblock8"
+				;;
+			*)
+				_dev="mmcblk0p2"
+				;;
+		esac
+	fi
+	
+	echo "${_dev}"
+}
+
+set_config() {
+	[ -d $NEWROOT/etc ] || mkdir -p $NEWROOT/etc
+
+	if [ -f $NEWROOT/etc/selinux/config ]; then
+		sed 's/^SELINUX=.*$/SELINUX=disabled/' $NEWROOT/etc/selinux/config > $NEWROOT/etc/selinux/config.tmp
+		rm -f $NEWROOT/etc/selinux/config
+		mv $NEWROOT/etc/selinux/config.tmp $NEWROOT/etc/selinux/config
+		chmod 644 $NEWROOT/etc/selinux/config
+	fi
+
+	rm -f $NEWROOT/etc/systemd/system/default.target
+	ln -fs /lib/systemd/system/runlevel3.target $NEWROOT/etc/systemd/system/default.target
+
+	[ ! -f $NEWROOT/etc/systemd/system/basic.target.wants/iptables.service ] || rm -f $NEWROOT/etc/systemd/system/basic.target.wants/iptables.service
+	[ ! -f $NEWROOT/etc/systemd/system/basic.target.wants/ip6tables.service ] || rm -f $NEWROOT/etc/systemd/system/basic.target.wants/ip6tables.service
+
+	if [ -f $NEWROOT/etc/shadow ]; then
+		sed 's/^root:.*$/root:\$6\$3RexcKM5\$t1Sl2RHEU3cmVmI7eDEn6XCDKV8A1JMnQf9IIkg1ijuLFMq3TUSegiJmyYUbKjyUor88YgK9\/RAdLR3JDrx7O\/:15209:0:99999:7:::/' $NEWROOT/etc/shadow > $NEWROOT/etc/shadow_tmp
+		rm -f $NEWROOT/etc/shadow
+		mv $NEWROOT/etc/shadow_tmp $NEWROOT/etc/shadow
+		chmod 644 $NEWROOT/etc/shadow
+	fi
+
+# because network will be started in rc.net, so no need S10network anymore
+#	for i in 2 3 4 5
+#	do
+#		[ -f $NEWROOT/etc/rc${i}.d/S10network ] || ln -fs ../init.d/network $NEWROOT/etc/rc${i}.d/S10network
+#		[ ! -f $NEWROOT/etc/rc${i}.d/K90network ] || rm -f $NEWROOT/etc/rc${i}.d/K90network
+#	done
+
+	if [ -f $NEWROOT/lib/systemd/system/fsck-root.service ]; then
+		grep "^ConditionPathExists=" $NEWROOT/lib/systemd/system/fsck-root.service >/dev/null 2>/dev/null
+		if [ $? -eq 0 ]; then
+			sed "s/^ConditionPathExists=.*$/ConditionNull=false/" $NEWROOT/lib/systemd/system/fsck-root.service > $NEWROOT/lib/systemd/system/fsck-root.service.tmp
+			rm -f $NEWROOT/lib/systemd/system/fsck-root.service
+			mv $NEWROOT/lib/systemd/system/fsck-root.service.tmp $NEWROOT/lib/systemd/system/fsck-root.service
+		fi
+	fi
+
+	if [ -f "$NEWROOT/lib/systemd/system/fsck@.service" ]; then
+		grep "^ConditionNull=" "$NEWROOT/lib/systemd/system/fsck@.service" >/dev/null 2>/dev/null
+		if [ $? -ne 0 ]; then
+			line=`grep -n "\[Service\]" "$NEWROOT/lib/systemd/system/fsck@.service" | awk -F':' '{print $1}'`
+	        	sed -i "${line}i\ConditionNull=false" "$NEWROOT/lib/systemd/system/fsck@.service"
+		fi
+	fi
+
+	if [ -f $NEWROOT/etc/init.d/functions ] ; then
+		grep "^LINKDELAY=" $NEWROOT/etc/init.d/functions >/dev/null 2>/dev/null
+		if [ $? -eq 0 ]; then
+			sed "s/^LINKDELAY=.*$/LINKDELAY=20/" $NEWROOT/etc/init.d/functions > $NEWROOT/etc/init.d/functions.tmp 
+			rm -f $NEWROOT/etc/init.d/functions
+			mv $NEWROOT/etc/init.d/functions.tmp $NEWROOT/etc/init.d/functions
+		else
+			line=`grep -n "TEXTDOMAIN=" $NEWROOT/etc/init.d/functions | awk -F':' '{print $1}'` 
+			sed -i "${line}i\LINKDELAY=20" $NEWROOT/etc/init.d/functions
+		fi
+	fi
+
+	rm -rf $NEWROOT/tmp
+	ln -sf /var/tmp $NEWROOT/tmp
+        touch $NEWROOT/etc/ResetDefault
+
+}
+

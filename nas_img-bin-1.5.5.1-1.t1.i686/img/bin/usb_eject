@@ -1,0 +1,56 @@
+#!/bin/sh
+usb=$1
+. /img/bin/function/libsdcard
+sdlist=`check_sd_card_dev`
+is_sd_dev=`echo " ${sdlist} " | grep " ${usb} "`
+char_handle="/usr/bin/specstr_handle"
+instant=`mount |egrep "^/dev/${usb}[0-9]|^/dev/${usb} " | cut -d"/" -f7 | cut -d" " -f1 | sed -n '1p'`
+
+/bin/sync
+/bin/sync
+/bin/sync
+
+mount_point=`mount |egrep "^/dev/${usb}[0-9]|^/dev/${usb} " | cut -d" " -f1`
+for point in ${mount_point}
+do
+  mount_folder=`mount |egrep "^${point} " | cut -d" " -f3`
+  if [ "$mount_folder" != "" ]; then
+    /sbin/fuser -mk $mount_folder
+  fi
+  cmdstr=`${char_handle} "awk" "/usr/bin/ntfs-3g ${point}"`
+  awkstr="ps www | awk '/${cmdstr} /{print \$1}'"
+  ntfs3g_pid=`eval "${awkstr}"`
+  if [ "$ntfs3g_pid" != "" ]; then
+    kill -9 $ntfs3g_pid
+  fi
+  /bin/umount -l -f ${point}
+  /usr/bin/eject ${point}
+done
+if [ "$is_sd_dev" == "" ];then
+  SCSI_ID=`/usr/bin/lsscsi | egrep "${usb}$|${usb} " | cut -d"]" -f1 | cut -d"[" -f2 | sed 's/:/ /g'`
+  if [ "${SCSI_ID}" != "" ]; then
+    echo "scsi remove-single-device ${SCSI_ID}" > /proc/scsi/scsi
+  fi
+  
+  usb_count=`mount | egrep -c ' /raid[0-9]**/data/USBHDD/usb'`
+  if [ $usb_count -eq 0 ];then
+    echo U_LED 0 > /proc/thecus_io
+    echo UF_LED 0 > /proc/thecus_io
+  fi
+else
+  is_mount=`mount | egrep "^/dev/${usb}[0-9]|^/dev/${usb} "`
+    
+  if [ "$is_mount" == "" ];then
+    echo SD_LED 0 > /proc/thecus_io
+    echo SDF_LED 0 > /proc/thecus_io
+  fi
+fi
+/bin/rm -f /var/run/usb/${usb}*
+
+if [ "${instant}" == "" ]; then
+        exit
+fi
+
+/bin/rmdir /raid/data/USBHDD/${instant}/*
+/bin/rmdir /raid/data/USBHDD/${instant}
+

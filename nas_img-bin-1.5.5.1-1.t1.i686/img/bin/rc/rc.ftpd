@@ -1,0 +1,170 @@
+#!/bin/sh 
+#################################################
+##	Vars defined
+#################################################
+#pwd="/raid/data/NAS_Public/ftp/sbin"
+pwd="/usr/sbin"
+sqlite="/usr/bin/sqlite"
+confdb="/etc/cfg/conf.db"
+default_port_range_begin=30000
+default_port_range_end=32000
+pemfile="/etc/pki/pure-ftpd/pure-ftpd.pem"
+
+#################################################
+##       Check Raid Mount First
+#################################################
+check_raid(){
+  sys_path=`/bin/ls -l /raid/sys | awk -F' ' '{printf $11}'`
+  data_path=`/bin/ls -l /raid/data | awk -F' ' '{printf $11}'`
+  if [ "$sys_path" == "" ] || [ "$data_path" == "" ];
+  then
+    echo "Your Master RAID link is not exist"
+    exit
+  fi
+}
+
+#################################################
+##	Declare subroutine
+#################################################
+
+## simplify to start ftpd process
+start_ftpd() {
+	ftpdport=`${sqlite} ${confdb} "select v from conf where k='ftp_port'"`
+	ftpdencode=`${sqlite} ${confdb} "select v from conf where k='ftp_ftpd_encode'"`
+	ftpd_passive_ip=`${sqlite} /etc/cfg/conf.db "select v from conf where k='ftpd_passive_ip'"`
+	ftpdanon=`${sqlite} ${confdb} "select v from conf where k='ftp_ftpd_anon'"`
+	ftpd_rename=`${sqlite} ${confdb} "select v from conf where k='ftp_ftpd_rename'"`
+	ftpd_upload=`${sqlite} ${confdb} "select v from conf where k='ftp_ftpd_bandwidth_upload'"`
+	ftpd_download=`${sqlite} ${confdb} "select v from conf where k='ftp_ftpd_bandwidth_download'"`
+	ftpd_ssl=`${sqlite} ${confdb} "select v from conf where k='ftp_ssl'"`
+    ftpd_log=`${sqlite} ${confdb} "select v from conf where k='ftp_log'"`
+	
+	
+	ftpd_port_range_begin=`${sqlite} ${confdb} "select v from conf where k='ftp_port_range_begin'"`
+	ftpd_port_range_end=`${sqlite} ${confdb} "select v from conf where k='ftp_port_range_end'"`
+	
+	echo 'auth       sufficient   pam_ldap.so' > /etc/pam.d/pure-ftpd
+  echo 'auth       sufficient   pam_winbind.so' >> /etc/pam.d/pure-ftpd
+  echo 'auth       required     pam_unix.so use_first_pass' >> /etc/pam.d/pure-ftpd
+  echo 'account    sufficient   pam_ldap.so' >> /etc/pam.d/pure-ftpd
+  echo 'account    sufficient   pam_winbind.so' >> /etc/pam.d/pure-ftpd
+  echo 'account    required     pam_unix.so' >> /etc/pam.d/pure-ftpd
+  echo 'session    sufficient   pam_ldap.so' >> /etc/pam.d/pure-ftpd
+  echo 'session    sufficient   pam_winbind.so' >> /etc/pam.d/pure-ftpd
+  echo 'session    required     pam_unix.so' >> /etc/pam.d/pure-ftpd
+	
+	if [ "${ftpd_port_range_begin}" = "" ];then
+	  ftpd_port_range_begin=${default_port_range_begin}
+	fi
+	
+	if [ "${ftpd_port_range_end}" = "" ];then
+	  ftpd_port_range_end=${default_port_range_end}
+	fi
+	
+	auto_rename=""
+	if [ ${ftpd_rename} -eq 1 ]; then
+		auto_rename="-r"
+	fi
+	bandwidth=""
+	if [ "${ftpd_upload}" == "" ]; then
+		if [ "${ftpd_download}" != "" ]; then
+			bandwidth="-T :${ftpd_download}"
+		fi
+	else
+		bandwidth="-T ${ftpd_upload}:${ftpd_download}"
+	fi
+	ssl=""
+	if [ "${ftpd_ssl}" == "" ]; then
+		ssl=""
+	else
+		ssl="-Y ${ftpd_ssl}"
+	fi
+	
+	if [ "${ftpd_passive_ip}" != "" ]; then
+		passive_ip="-P ${ftpd_passive_ip}"
+	else
+	  passive_ip=""
+  fi
+
+    if [ "${ftpd_log}" == "1" ]; then
+        open_log="ftp"    
+    else
+        open_log="none"
+    fi
+  
+	#sh -c "${pwd}/pure-authd -s /var/run/ftpd.sock -r /usr/bin/ftp-auth-handler & "
+	case "$ftpdanon"
+	in
+		0)
+		sh -c "${pwd}/pure-ftpd -w -f ${open_log} -B -lpam -ADHEb -S ${ftpdport} -8 UTF-8 -9 ${ftpdencode} -U 0000 ${auto_rename} ${bandwidth} ${passive_ip} $ssl -p ${ftpd_port_range_begin}:${ftpd_port_range_end}"
+		echo "FTPD works in Anonymous No Access mode !!"
+		;;
+		1)
+		sh -c "${pwd}/pure-ftpd -w -f ${open_log} -B -lpam -ADHib -S ${ftpdport} -8 UTF-8 -9 ${ftpdencode} -U 0000 ${auto_rename} ${bandwidth} ${passive_ip} $ssl -p ${ftpd_port_range_begin}:${ftpd_port_range_end}"
+		echo "FTPD works in Anonymous Download mode !!"
+		;;
+		2)
+        	sh -c "${pwd}/pure-ftpd -w -f ${open_log} -B -lpam -ADHMb -S ${ftpdport} -8 UTF-8 -9 ${ftpdencode} -U 0000 ${auto_rename} ${bandwidth} ${passive_ip} $ssl -p ${ftpd_port_range_begin}:${ftpd_port_range_end}"		
+		echo "FTPD works in Anonymous Upload/Download mode !!"
+		;;
+		3)
+	    	sh -c "${pwd}/pure-ftpd -w -f ${open_log} -B -lpam -ADHMJb -S ${ftpdport} -8 UTF-8 -9 ${ftpdencode} -U 0000 ${auto_rename} ${bandwidth} ${passive_ip} $ssl -p ${ftpd_port_range_begin}:${ftpd_port_range_end}"	
+ 		echo "FTPD works in Anonymous Upload only mode !!"
+		;;
+	esac
+
+}
+
+## simplify to stop ftpd process
+stop_ftpd() {
+	killall pure-authd
+	killall pure-ftpd
+	echo "FTPD stops."
+}
+
+## simplify to restart ftpd process
+restart_ftpd() {
+	stop_ftpd
+	start_ftpd
+	echo "FTPD restarted."
+}
+
+bootup_ftpd(){
+	if [ ! -f "${pemfile}" ] || [ "`du -b ${pemfile} | awk '{print $1}'`" -lt "1000" ];then
+	    /etc/pki/tls/certs/make-dummy-cert ${pemfile}
+	fi
+
+	able=`${sqlite} ${confdb} "select v from conf where k='ftp_ftpd'"`
+	if [ ${able} -ne 1 ]; then
+	  stop_ftpd
+	  echo "FTPD is disable, not running ..."
+	else 
+	  start_ftpd
+	  echo "FTPD is now working.."
+	fi
+}
+#################################################
+##	Main code
+#################################################
+case "$1"
+in
+	start)
+		check_raid
+		stop_ftpd
+		start_ftpd
+		;;
+	stop)			
+		stop_ftpd
+		;;
+	restart)
+		check_raid
+		restart_ftpd
+		;;
+	boot)
+		check_raid
+		bootup_ftpd
+		;;
+	*)			
+		echo "Usage: $0 {start|stop|restart|boot}"
+		;;
+esac

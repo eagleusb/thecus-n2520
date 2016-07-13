@@ -1,0 +1,24 @@
+<?
+//session_start();
+//require_once("/var/www/html/htdocs/gallery/functions.html");
+//check_auth($_SESSION);
+$cmd = empty($HTTP_GET_VARS['cmd']) ? '' : $HTTP_GET_VARS['cmd'];
+switch ($cmd){
+	case 'add_picture' :
+		require_once("process.tpl");
+		break;
+	case 'publish' :
+		require_once("header.tpl");
+       		require_once("publish.tpl");
+        	break;
+	case 'send_reg' :
+       		require_once("send_reg.tpl");
+        	break;
+	case 'identify' :
+		require_once("identify.tpl");
+		break;
+	default:
+       		require_once("display.tpl");
+		break;
+}
+?>

@@ -1,0 +1,16 @@
+#!/bin/sh
+. /img/bin/ha/script/conf.ha
+confdb="/etc/cfg/conf.db"
+
+enable=`${sqlite} ${confdb} "select v from conf where k = 'ha_enable'"`
+if [ "${enable}" = "1" ];then
+  role=`${sqlite} ${confdb} "select v from conf where k = 'ha_role'"`
+  if [ "$role" = "0" ];then
+    hb_ip=`${sqlite} ${confdb} "select v from conf where k = 'ha_primary_ip3'"`
+  else
+    hb_ip=`${sqlite} ${confdb} "select v from conf where k = 'ha_standy_ip3'"`
+  fi
+  ifconfig ${HB_LINE} ${hb_ip}
+
+  /usr/sbin/ifplugd -fwI -u1 -d5 -p -i ${HB_LINE}
+fi

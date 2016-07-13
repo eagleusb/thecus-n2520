@@ -1,0 +1,190 @@
+#!/bin/sh
+#
+# ldap client
+#
+# To make ldap client configuration
+# /etc/openldap/ldap.conf for tools
+# /etc/ldap.conf for Application
+#
+# /etc/ldap.conf is used for authentication and is required to be configured when you add ldap to /etc/nsswitch.conf.
+# /etc/openldap/ldap.conf is used by the client tools like ldapsearch.
+#
+ldap_tool_path="/etc/openldap"
+ldap_tool_conf="/etc/openldap/ldap.conf"
+ldap_app_path="/etc/nss_ldap.conf"
+test_tool_path="/usr/bin"
+samba_path="/img/bin/rc/rc.samba"
+samba_tool_path="/usr/bin/smbpasswd"
+sql="/usr/bin/sqlite"
+conf_db="/etc/cfg/conf.db"
+get_ldap_passwd="/raid/sys/ldap.txt"
+get_ldap_passwd_diff="/tmp/ldap_diff.txt"
+get_ldap_group="/raid/sys/ldap_g.txt"
+get_ldap_group_diff="/tmp/ldap_g_diff.txt"
+CHECKPASSWORD_PAM="/etc/pam.d/checkpassword"
+
+if [ ! -d "${ldap_tool_path}" ];then
+    mkdir -p "${ldap_tool_path}"
+fi
+
+check_nsswitch=`cat /etc/nsswitch.conf|grep ldap`
+if [ "${check_nsswitch}" == "" ];then
+  sed -i "/^passwd\|^group/s/$/\ winbind\ ldap/g" /etc/nsswitch.conf
+fi
+
+ldap_start() {
+ ldap_enable=`$sql $conf_db "select v from conf where k='ldap_enabled'"`
+ if [ "${ldap_enable}" == "1" ];then
+  echo 'auth       sufficient   pam_ldap.so'    > ${CHECKPASSWORD_PAM}
+  echo 'auth       sufficient   pam_winbind.so' >> ${CHECKPASSWORD_PAM}
+  echo 'auth       required     pam_unix.so use_first_pass' >> ${CHECKPASSWORD_PAM}
+  echo 'account    sufficient   pam_ldap.so'    >> ${CHECKPASSWORD_PAM}
+  echo 'account    sufficient   pam_winbind.so' >> ${CHECKPASSWORD_PAM}
+  echo 'account    required     pam_unix.so'    >> ${CHECKPASSWORD_PAM}
+  echo 'session    sufficient   pam_ldap.so'    >> ${CHECKPASSWORD_PAM}
+  echo 'session    sufficient   pam_winbind.so' >> ${CHECKPASSWORD_PAM}
+  echo 'session    required     pam_unix.so'    >> ${CHECKPASSWORD_PAM}
+
+   ldap_ip=`$sql $conf_db "select v from conf where k='ldap_ip'"`
+   ldap_base_dn=`$sql $conf_db "select v from conf where k='ldap_dmname'"`
+   ldap_id=`$sql $conf_db "select v from conf where k='ldap_id'"`
+   ldap_passwd=`$sql $conf_db "select v from conf where k='ldap_passwd'"`
+   ldap_tls=`$sql $conf_db "select v from conf where k='ldap_tls'"`
+   
+   if [ `echo "${ldap_id}" | grep "," | wc -l` -eq 0 ]; then 
+     ldap_bind_dn="cn=${ldap_id},${ldap_base_dn}"
+   else
+     ldap_bind_dn="${ldap_id}"
+   fi
+   
+   if [ `$sql $conf_db "select * from conf where k='ldap_bind_dn'" | wc -l` -eq 0 ]; then
+     $sql $conf_db "insert into conf (k,v) values ('ldap_bind_dn',\"${ldap_bind_dn}\")"
+   else
+     $sql $conf_db "update conf set v=\"${ldap_bind_dn}\" where k='ldap_bind_dn'"
+   fi
+   
+   echo "HOST ${ldap_ip}" > ${ldap_tool_conf}
+   echo "BASE ${ldap_base_dn}" >> ${ldap_tool_conf}
+   echo "URI ldap://${ldap_ip}" >> ${ldap_tool_conf}
+   echo "TLS_REQCERT never" >> ${ldap_tool_conf}
+   
+   log_file="/dev/null"
+   if [ "${ldap_tls}" == "none" ];then
+      ${test_tool_path}/ldapsearch -D "${ldap_bind_dn}" -w "${ldap_passwd}" -b "${ldap_base_dn}" -h ${ldap_ip} > ${log_file}
+      ret=$?
+   elif [ "${ldap_tls}" == "TLS" ];then
+      ${test_tool_path}/ldapsearch -x -ZZ -D "${ldap_bind_dn}" -w "${ldap_passwd}" -b "${ldap_base_dn}" -h ${ldap_ip} > ${log_file}
+      ret=$?
+   elif [ "${ldap_tls}" == "SSL" ];then
+      ${test_tool_path}/ldapsearch -x -D "${ldap_bind_dn}" -w "${ldap_passwd}" -b "${ldap_base_dn}" -H "ldaps://${ldap_ip}" > ${log_file}
+      ret=$?
+   fi
+   case "$ret"
+   in
+     255)
+       echo "255"
+       exit
+     ;;
+     49)
+       echo "49" 
+       exit
+     ;;
+     34)
+       echo "34"
+       exit
+     ;;
+     1)
+       echo "1"
+       exit
+     ;;
+     *)
+       echo "0"
+     ;;
+   esac
+
+#   echo "ldap_version 3" > ${ldap_app_path}
+#   echo "scope sub" >> ${ldap_app_path}
+   echo "host ${ldap_ip}" > ${ldap_app_path}
+   echo "base ${ldap_base_dn}" >> ${ldap_app_path}   
+   echo "uri ldap://${ldap_ip}" >> ${ldap_app_path}
+   echo "bind_policy soft" >> ${ldap_app_path}
+   if [ "${ldap_tls}" == "TLS" ];then
+      echo "ssl start_tls" >> ${ldap_app_path}
+   elif [ "${ldap_tls}" == "SSL" ];then
+      echo "tls_cacertdir /etc/openldap/cacerts" >> ${ldap_app_path}
+      echo "ssl on" >> ${ldap_app_path}
+   fi
+   echo "tls_checkpeer no" >> ${ldap_app_path}
+   echo "tls_reqcert never" >> ${ldap_app_path}
+ 
+   ${samba_path} restart
+   ${samba_tool_path} -w ${ldap_passwd}
+   
+   getent passwd > ${get_ldap_passwd}
+   diff /etc/passwd ${get_ldap_passwd} > ${get_ldap_passwd_diff}
+   cat ${get_ldap_passwd_diff} |awk -F' ' 'NR>=2{print $2}' > ${get_ldap_passwd}
+   
+   getent group > ${get_ldap_group}
+   diff /etc/group ${get_ldap_group} > ${get_ldap_group_diff}
+   cat ${get_ldap_group_diff} |awk -F' ' 'NR>=2{print $2}' > ${get_ldap_group}
+ fi    
+}
+
+ldap_stop() {
+    service_stop=$1
+    if [ -f "${ldap_app_path}" ] || [ -f "${get_ldap_passwd}" ] || [ -f "${get_ldap_group}" ];then
+        rm -rf ${ldap_app_path}
+        rm -rf ${get_ldap_passwd}
+        rm -rf ${get_ldap_group}
+        
+        if [ "${service_stop}" == "" ];then
+            ${samba_path} restart
+        fi
+    fi
+}
+
+ldap_restart() {
+ ldap_stop
+ sleep 2
+ ldap_start
+}
+
+ldap_boot() {
+ ldap_start
+}
+
+get_sambasid(){
+    sid=`/usr/bin/net getlocalsid | awk -F':' '{print $2}'`
+    echo ${sid}
+}
+check_ldap_conf(){
+  # config setting for OS6
+  if [ ! -L "/etc/pam_ldap.conf" ];then
+    rm -rf /etc/pam_ldap.conf
+    ln -s ${ldap_app_path} /etc/pam_ldap.conf
+  fi
+  rm -rf ${ldap_app_path}
+}
+
+case "$1" in
+'boot')
+  check_ldap_conf
+  ldap_boot
+  ;;
+'start')
+  ldap_start
+  ;;
+'stop')
+  ldap_stop "$2"
+  ;;
+'restart')
+  ldap_restart
+  ;;
+'get_sambasid')
+  get_sambasid
+  ;;
+*)
+    echo $"Usage: $0 {start|stop|boot|restart|get_sambasid}"
+    exit 1
+esac
+

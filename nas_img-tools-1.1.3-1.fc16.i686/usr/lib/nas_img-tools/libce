@@ -1,0 +1,260 @@
+#!/bin/sh
+
+# MFH table
+# DWORD offset|
+#      1      | Version
+#      2      | Flags
+#      3      | Next Header Block
+#      4      | Flash Item Count (m)
+#      5      | Boot Priority List Count (n)
+#      6      | Boot Index 0
+#   6+(n-1)   | Boot Index n-1
+#     6+n     | Flash Item 0
+#    6+n+8    | Flash Item 1
+#  6+n+8(m-1) | Flash Item m-1
+# BlockSize - |
+# Signature   | Signature
+# length      |
+
+# Flash Item Type
+host_fw_stage1="00000000"        # Host Firmware Stage 1
+host_fw_stage1_header="00000001" # Host Firmware Stage 1 Authentication
+host_fw_stage2="00000002"        # Host Firmware Stage 2
+host_fw_stage2_header="00000003" # Host Firmware Stage 2 Authentication
+host_fw_parameters="00000004"    # Host Firmware Parameters
+platform_parameters="00000005"   # Platform Parameters
+bootloader="00000006"            # Bootloader
+kernel="00000007"                # Kernel
+splash_screen="00000008"         # Splash Screen
+manifest_table="00000009"        # Security Manifest Table
+sec_fw_module="0000000A"         # Loadable Security Firmware Module
+ramdisk="0000000B"               # RAM Disk
+ilp="0000000C"                   # Loadable Program
+cefdk_commands="0000000D"        # Host Firmware Commands
+bootloader_parameters="0000000E" # Bootloader Parameters
+auto_sec_fw_module="0000000F"    # Auto-loaded Security Firmware Module
+uc8051_fw="00000010"             # 8051 Firmware
+epid_tcb_rec_psvn="00000011"     # EPID TCB Recovery PSVN
+ip_params="00000012"             # IP Parameters
+kernel_parameters="00000013"     # Kernel Parameters
+arm_test="00000014"              # ARM Test
+script="00000015"                # Script
+host_fw_stage3="00000016"        # Host Firmware Stage 3
+host_fw_stage3_header="00000017" # Host Firmware Stage 3 Authentication
+# special reserved types
+all="80000000"
+cefdk="8000000F"
+illegal="DEADD00D"
+mfh="FFFFFFFE"
+user_flash="FFFFFFFF"
+
+MFH=0x080000
+MFH_LEN=0x800
+MFH_BLOCK_SIZE=512
+MFH_BLOCK_COUNT=4                          # We only use block0
+SIG_SIZE=32                                # Signature size
+SIG_OFFSET=$((MFH + MFH_BLOCK_SIZE - SIG_SIZE))
+CEFDK_LEN=$((0x080000))
+VERSION_LEN=$((0x200))
+TKERNEL_SIZE=$((0x500000))
+TRAMDISK_SIZE=$((0x3000000))
+
+MFH_TBL="/dev/shm/mfh.tmp"
+
+source libimg-tools
+
+get_mfh(){
+	hexdump $DEVICE -s $MFH -n 512 -v | \
+	awk '{
+			for (n=2; n<NF; n++){
+				printf("%s%s\n", $((n+1)), $n);
+				n++;
+			};
+		}'> $MFH_TBL
+	ITEM_CNT="0x`sed -n '4p;' $MFH_TBL`"
+	[ "$ITEM_CNT" = "0xffffffff" ] && echo "No MFH table found." && return
+	BOOT_CNT="0x`sed -n '5p;' $MFH_TBL`"
+	# get each flash item
+	FITEM_SEC=$((6+BOOT_CNT))
+	for x in `seq 0 $((ITEM_CNT-1))`;do
+		local ITEM_START=$((FITEM_SEC+8*x))
+		local FTYPE_ID=`sed -n $ITEM_START'p;' $MFH_TBL | tr 'a-z' 'A-Z'`
+		local OFFSET="0x`sed -n $((ITEM_START+3))'p;' $MFH_TBL`"
+		local LENGTH="0x`sed -n $((ITEM_START+4))'p;' $MFH_TBL`"
+		local FTYPE=""
+		case $FTYPE_ID in
+		$host_fw_stage1)
+			FTYPE="CEFDK_S1"
+			;;
+		$host_fw_stage2)
+			FTYPE="CEFDK_S2"
+			;;
+		$host_fw_stage1_header)
+			FTYPE="CEFDK_S1H"
+			;;
+		$host_fw_stage2_header)
+			FTYPE="CEFDK_S2H"
+			;;
+		$host_fw_parameters)
+			FTYPE="CEFDK_PARAM"
+			;;
+		$platform_parameters)
+			FTYPE="PLAT_PARAM"
+			;;
+		$kernel)
+			FTYPE="KERNEL"
+			;;
+		$splash_screen)
+			FTYPE="SPLASH"
+			;;
+		$ramdisk)
+			FTYPE="RAMDISK"
+			;;
+		$uc8051_fw)
+			FTYPE="FW8051"
+			;;
+		$script)
+			FTYPE="SCRIPT"
+			;;
+		$user_flash)
+			FTYPE="USER_OFFSET"
+			;;
+		esac
+		if [ -n "$FTYPE" ];then
+			eval "$FTYPE=\`printf \"%#010x\" \$((OFFSET - USER_DATA))\`"
+			eval "${FTYPE}_LEN=\$LENGTH"
+			eval "${FTYPE}_LEN_OFF=\$((ITEM_START-1 + 4))"
+		fi
+	done
+
+	CEFDK=$CEFDK_S1
+	VERSION=$USER_OFFSET
+
+	rm -rf $MFH_TBL
+}
+
+display_mfh(){
+	echo "CEFDK S1            : $CEFDK_S1 $CEFDK_S1_LEN"
+	echo "CEFDK S2            : $CEFDK_S2 $CEFDK_S2_LEN"
+	echo "CEFDK S1H           : $CEFDK_S1H $CEFDK_S1H_LEN"
+	echo "CEFDK S2H           : $CEFDK_S2H $CEFDK_S2H_LEN"
+	echo "UC8051_FW           : $FW8051 $FW8051_LEN"
+	echo "Splash Screen       : $SPLASH $SPLASH_LEN"
+	echo "Script              : $SCRIPT $SCRIPT_LEN"
+	echo "CEFDK Parameters    : $CEFDK_PARAM $CEFDK_PARAM_LEN"
+	echo "Platform Parameters : $PLAT_PARAM $PLAT_PARAM_LEN"
+	echo "Kernel              : $KERNEL $KERNEL_LEN"
+	echo "Ramdisk             : $RAMDISK $RAMDISK_LEN"
+	echo "User Offset         : $USER_OFFSET"
+
+	return 0
+}
+
+display_sig(){
+	SIGNATURE="`hexdump -C $DEVICE -s $SIG_OFFSET -n $SIG_SIZE -v |\
+		awk -F'  ' '{printf("%s%s", $2, $3)}' | sed 's/ //g'`"
+	if [ -n "$SIGNATURE" ];then
+		echo "Signature: $SIGNATURE"
+	else
+		echo "Signature not found!"
+	fi
+
+	return 0
+}
+
+set_mfh_signature(){
+	local MFH_BLK="/dev/shm/mfhblk.tmp"
+	echo "Update MFH signature"
+	dd if=$DEVICE of=$MFH_BLK bs=1 skip=$((MFH)) \
+		count=$((MFH_BLOCK_SIZE-SIG_SIZE))
+	local NEW_SIG="`sha256sum $MFH_BLK | awk '{print $1}'`"
+	# update MFH signature
+	str2bin "$NEW_SIG" "$MFH_BLK"
+	# Erase page before program if target is flash device
+	if [ "`readlink -f $DEVICE | sed 's/[0-9]//g'`" = "/dev/mtdblock" ];then
+		echo "# Erasing ..."
+		tr '\000' '\377' < /dev/zero | dd of=$DEVICE \
+			bs=1 seek=$((SIG_OFFSET)) count=$((SIG_SIZE)) conv=notrunc
+		sync
+	fi
+	echo "# Programming ..."
+	dd if=$MFH_BLK of=$DEVICE \
+		bs=1 seek=$((SIG_OFFSET)) count=$((SIG_SIZE)) conv=notrunc
+	sync
+	rm -rf $MFH_BLK
+	return 0
+}
+
+update_item(){
+	local FTYPE=$1
+	local IMG=$2
+	eval "local TARGET_OFFSET=\$$FTYPE"
+	eval "local TARGET_LEN=\$${FTYPE}_LEN"
+	eval "local TARGET_LEN_OFF=\$${FTYPE}_LEN_OFF"
+
+	[ -z "$TARGET_OFFSET" ] && echo "Invalid item." && return 1
+
+	# check image size, do not allow illegal size for item.
+	local OUTSIZE=0
+	local IMGSIZE="`du -bs $IMG | cut -f1`"
+	case $FTYPE in
+	KERNEL)
+		[ "$IMGSIZE" -gt "$TKERNEL_SIZE" ] && OUTSIZE=1
+		ERASE_SIZE=$((TKERNEL_SIZE/512))
+		BS=512
+		;;
+	RAMDISK)
+		[ "$IMGSIZE" -gt "$TRAMDISK_SIZE" ] && OUTSIZE=1
+		ERASE_SIZE=$((TRAMDISK_SIZE/512))
+		BS=512
+		;;
+	VERSION)
+		[ "$IMGSIZE" -ne "$VERSION_LEN" ] && OUTSIZE=1
+		ERASE_SIZE=$((VERSION_LEN/512))
+		BS=512
+		;;
+	*)
+		[ "$IMGSIZE" -ne "$((TARGET_LEN))" ] && OUTSIZE=1
+		ERASE_SIZE=$((TARGET_LEN/16))
+		[ "$((TARGET_LEN%16))" -ne 0 ] && ERASE_SIZE=$((ERASE_SIZE+1))
+		BS=16
+		;;
+	esac
+	if [ "$OUTSIZE" -ne 0 ];then
+		echo "Image size is illegal for $FTYPE!"
+		echo "Terminate the updating process!"
+		return 1
+	fi
+
+	# update item
+	bin_program "$FTYPE" "$IMG" "$TARGET_OFFSET" "$BS" "$ERASE_SIZE"
+
+	# For MFH table, CEFDK, and VERSION, no need to update signature
+	[ "$FTYPE" = "MFH" -o "$FTYPE" = "CEFDK" -o "$FTYPE" = "VERSION" ] &&\
+		return 0
+
+	if [ "$IMGSIZE" -ne "$((TARGET_LEN))" ];then
+		# update MFH table
+		echo "Update MFH table"
+		local LEN_TMP="/dev/shm/mfhlen.tmp"
+		local MFH_LEN_OFFSET="$((MFH + TARGET_LEN_OFF * 4))"
+		str2bin "`printf "%08x" "$IMGSIZE"`" "$LEN_TMP" "l"
+		# Erase page before program if target is flash device
+		if [ "`readlink -f $DEVICE | sed 's/[0-9]//g'`" = "/dev/mtdblock" ];then
+			echo "# Erasing ..."
+			tr '\000' '\377' < /dev/zero | dd of=$DEVICE \
+				bs=1 seek=$MFH_LEN_OFFSET count=4 conv=notrunc
+			sync
+		fi
+		echo "# Programming ..."
+		dd if=$LEN_TMP of=$DEVICE \
+			bs=1 seek=$MFH_LEN_OFFSET count=4 conv=notrunc
+		sync
+		rm -rf 0$LEN_TMP
+		# recalculate Signature
+		set_mfh_signature
+	fi
+
+	return 0
+}
+
