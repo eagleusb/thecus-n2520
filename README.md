@@ -48,6 +48,28 @@ For example the default boot cmdline generation **rpms/nas_img-bin-1.5.5.1-1.t1.
         fi
     fi
 
+At the end it contains the address of the ramdisk into the emmc memory and calls **nandbootkernel -id 0 "..."**
+
+    ramdisk 0x8000000 0x8000000mfh list nandbootkernel -id 0 "biosdevname=0 console=ttyS0,115200 memmap=exactmap memmap=128K@128K memmap=1019M@1M vmalloc=586M max_loop=210 quiet"
+
+MFH default table details
+
+    /usr/local/sbin/imgtool emmc /dev/mmcblk0 -s
+    img-tools Ver 1.1.3
+
+    CEFDK S1            : 0x00080800 0x00010000
+    CEFDK S2            : 0x00090800 0x0006f000
+    CEFDK S1H           : 0x000ff800 0x00000800
+    CEFDK S2H           : 0x00100000 0x00000800
+    UC8051_FW           :
+    Splash Screen       :
+    Script              :
+    CEFDK Parameters    :
+    Platform Parameters :
+    Kernel              : 0x00100800 0x003b5e60
+    Ramdisk             : 0x00600800 0x01068c9f
+    User Offset         : 0x03e00000
+
 # Upstream Fedora compliance
 
 ## Fedora 16
