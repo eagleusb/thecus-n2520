@@ -1,0 +1,106 @@
+postinstall scriptlet (using /bin/sh):
+
+I18N_DIFF=`diff /img/bin/default_cfg/default/etc/sysconfig/i18n /etc/sysconfig/i18n 2>/dev/null`
+if [ ! -f /etc/sysconfig/i18n -o -n "${I18N_DIFF}" ]; then
+	#Install and enable i18n
+	cp /img/bin/default_cfg/default/etc/sysconfig/i18n /etc/sysconfig/i18n
+fi
+
+if [ -f /etc/udev/rules.d/99-thecus.rules ]; then
+	rm /etc/udev/rules.d/99-thecus.rules
+fi
+
+#html files passed to php handler
+if [ "`diff /img/bin/default_cfg/default/etc/httpd/conf.d/php.conf /etc/httpd/conf.d/php.conf`" != "" ];then
+	cp /img/bin/default_cfg/default/etc/httpd/conf.d/php.conf /etc/httpd/conf.d/php.conf
+fi
+
+## Check and create link of adduser to busybox
+if [ "`readlink /usr/sbin/adduser`" != "/sbin/busybox" ];then
+    ln -sf /sbin/busybox /usr/sbin/adduser
+fi
+
+## Check and create link of addgroup to busybox
+if [ "`readlink /usr/sbin/addgroup`" != "/sbin/busybox" ];then
+    ln -sf /sbin/busybox /usr/sbin/addgroup
+fi
+
+# To delete the "allocatioin roundup size" in conf.db (issue 4256)
+DB="/etc/cfg/conf.db"
+if [ -f "$DB" ];then 
+    ROUNDUP_COUNT=`sqlite ${DB} "SELECT COUNT(v) FROM conf WHERE k='advance_smb_roundup'"`
+    if [ $ROUNDUP_COUNT != "0" ];then
+        sqlite ${DB} "DELETE FROM conf WHERE k='advance_smb_roundup'"
+    fi
+fi
+
+# If this rpm is initial installation, the following code couldn't be run.
+[ ! -e /proc/thecus_io ] && exit $?
+
+/img/bin/rc/rc.router remove >/dev/null 2>&1 || :
+/img/bin/rc/rc.router boot >/dev/null 2>&1 || :
+rm -rf /etc/NetworkManager/dispatcher.d/30_GW_DNS_HANDLE
+
+# Do recover acl and permission issue #3528
+ls -d /raid[0-9]* 2>/dev/null | grep -o "[0-9]*[0-9]" | while read md_num;do
+	RAID_DIR=/raid${md_num}/data
+	SYS_DIR="_SYS_TMP ftproot module tmp"
+	SYS_DIR=`echo $SYS_DIR |sed "s/ \|^/ \/raid${md_num}\/data\//g"`
+
+	# If the permission of SYS_DIR is be changed, then start to recover, or skip
+	if [ `ls -ald $SYS_DIR | grep '^drwxr-xr-x' | wc -l` -eq 4 ];then
+		chmod 755 $RAID_DIR
+		setfacl -P -b $RAID_DIR
+		continue
+	fi
+
+	setfacl -R -P -b $RAID_DIR #clean acl
+	chmod -R 755 $RAID_DIR # clean permission
+	# Recover system dir's acl and permission setting
+	[ -d "$RAID_DIR/stackable" ] && SYS_DIR="$SYS_DIR $RAID_DIR/stackable"
+	find $SYS_DIR -type f -print0 | xargs -0 chmod 644
+
+	# Restore user dir's permission setting, and set acl setting to default
+	SEP=':;'
+	USER_SHARE=`sqlite -separator $SEP $RAID_DIR/sys/smb.db '\
+		SELECT share,"guest only" FROM smb_userfd ; \
+		SELECT share,"guest only" FROM smb_specfd '`
+	echo "$USER_SHARE" | while read line;do
+		SHARE=$RAID_DIR/`echo $line | awk -F"$SEP" '{print $1}'`
+		GUEST_ONLY=`echo $line | awk -F"$SEP" '{print $2}'`
+		case $GUEST_ONLY in
+			'yes')
+				setfacl -R -P -b $SHARE
+				setfacl -R -P -m other::rwx $SHARE
+				chmod -R 777 $SHARE
+				;;
+			'no')
+				setfacl -R -P -m other::--- $SHARE
+				chmod -R 700 $SHARE
+				;;
+		esac
+		setfacl -R -P -d -m other::rwx $SHARE
+	done
+done
+
+# [issue 4749] Migrate the passdb.tdb and secrets.tdb to /etc/cfg/samba
+TARGET_PATH="/etc/cfg/samba/"
+OLDER_PATH_ETC="/etc/samba/"
+OLDER_PATH_VAR="/var/lib/samba/private/"
+PASSDB="passdb.tdb"
+SECRETS="secrets.tdb"
+move_to_target(){
+    SOURCE_FILE=$1
+    TARGET_FILE=$2
+
+    if [ -e $SOURCE_FILE ];then
+       mv $SOURCE_FILE $TARGET_FILE
+    fi
+}
+if [ ! -e "${TARGET_PATH}${PASSDB}" ] || [ ! -e "${TARGET_PATH}${SECRETS}" ];then
+    move_to_target "$OLDER_PATH_ETC$PASSDB" "$TARGET_PATH"
+    move_to_target "$OLDER_PATH_ETC$SECRETS" "$TARGET_PATH"
+    move_to_target "$OLDER_PATH_VAR$PASSDB" "$TARGET_PATH"
+    move_to_target "$OLDER_PATH_VAR$SECRETS" "$TARGET_PATH"
+fi
+postuninstall program: /bin/sh
