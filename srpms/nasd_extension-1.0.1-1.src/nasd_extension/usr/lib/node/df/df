@@ -1,0 +1,73 @@
+#!/usr/bin/env node
+var util = require('util'),
+    popen = require('child_process').popen,
+    print = console.info.bind(console),
+    format = util.format.bind(util);
+
+function df() {
+    var data = popen('df'),
+        result = [];
+    
+    data = data.split(/\n/);
+    data.shift();
+    data.pop();
+    
+    for (var i = 0 ; i < data.length ; ++i) {
+        data[i] = data[i].match(/^([^ ]*) +(\d+) +(\d+) +(\d+) +(\d+)% (.*)/);
+        result.push({
+            filesystem: data[i][1],
+            blocks: +data[i][2],
+            used: +data[i][3],
+            available: +data[i][4],
+            use: +data[i][5],
+            on: data[i][6]
+        });
+    }
+    
+    return result;
+}
+
+function mount() {
+    var data = popen('mount'),
+        result = [];
+    
+    data = data.split(/\n/);
+    data.pop();
+    
+    for (var i = 0 ; i < data.length ; ++i) {
+        data[i] = data[i].match(/^(.*) on (.*) type (.*) \((.*)\)/);
+        var tmp = data[i][4] = data[i][4].split(/,/g),
+            attr = {};
+        
+        for ( var j = 0 ; j < tmp.length ; ++j) {
+            tmp[j] = tmp[j].split('=');
+            attr[tmp[j][0]] = tmp[j][1];
+        }
+        
+        result.push({
+            filesystem: data[i][1],
+            on: data[i][2],
+            fs: data[i][3],
+            attr: attr
+        });
+    }
+    
+    return result;
+}
+
+function mdadm() {
+    
+}
+
+mdadm.prototype.examine = function(dev) {
+    var data = popen(format('mdadm -E %s', dev));
+    print(data.match(/.*:\n(.*\n)+(!?\/dev.*:\n)/g))
+}
+
+//module.exports = df;
+//df();
+//mount();
+//console.info();
+
+m = new mdadm();
+m.examine('/dev/sd*');
