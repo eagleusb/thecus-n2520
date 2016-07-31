@@ -181,10 +181,10 @@ Main repositories validated (yum upgrade +x kernel*,httpd*,mod_* && /img/bin/sys
 ## Development
 
 /img/bin/rc/rc.local
+/img/bin/rc/rc.ntp
+/img/bin/ntp_cfg
 /img/bin/service
 /img/bin/sys_reboot
-/img/bin/ntp_cfg
-/rc/rc.ntp
 
 Installation via new RPM or cp -Ruvf img/bin/* /img/bin/
 
@@ -200,4 +200,6 @@ Installation via new RPM or cp -Ruvf img/bin/* /img/bin/
 * [Reset Thecus OS via USB](http://thecus.kayako.com/Knowledgebase/Article/View/633/0/n2520-n2560-n4520-n4560-os61-build-latest-usb-upgrad)e
 * [Thecus 2520 official forum](http://forum.thecus.com/viewforum.php?f=74)
 * [Fedora 16 to 17 upgrade](http://forums.fedoraforum.org/showthread.php?t=279057)
+* [Fedora custom Kernel](https://fedoraproject.org/wiki/Building_a_custom_kernel)
 * [CentOS rebuild SRPM](https://wiki.centos.org/HowTos/RebuildSRPM)
+* [loop-AES](http://loop-aes.sourceforge.net/)
