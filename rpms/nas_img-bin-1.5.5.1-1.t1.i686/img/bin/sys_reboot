@@ -7,7 +7,7 @@ PIC_MSG=/img/bin/pic.sh
 
 shutdown_para=""
 if [ "`/sbin/reboot --help 2>&1 | grep BusyBox`" == "" ];then
-    shutdown_para="-n -d --no-wall"
+  shutdown_para="-n -d --no-wall"
 fi
 
 if [ "`/img/bin/check_service.sh warning_led`" = "1" ];then
@@ -29,7 +29,6 @@ ${save_log} "system_down" "start"
 /usr/bin/lockfile /var/lock/upgrade.lock
 echo "OSD_MODE 0" > /proc/thecus_io
 /img/bin/lcm_animate.sh "System" "Reboot" "sys_reboot" &
-host_name=`hostname`
 
 MAX_TRAY=`awk '/^MAX_TRAY/{print $2}' /proc/thecus_io`
 
@@ -45,24 +44,26 @@ echo "Busy 2" > /proc/thecus_io
 /img/bin/ctrl_thecus_io.sh "`/img/bin/check_service.sh sys_reboot_led`"
 critical_prog_wait
 
-killall -9 ifplugd
+pkill ifplugd
 sleep 5
 
-/img/bin/rc/rc.samba logout_ad
+# /img/bin/rc/rc.samba logout_ad
 /img/bin/check_shutdown.sh "reboot" > /dev/null 2>&1 &
 SYS_ACTION="REBOOT" /img/bin/service stop
-/img/bin/logevent/event 997 101 "info" "email" "${host_name}"
+/img/bin/logevent/event 997 101 "info" "email" "$HOSTNAME"
 #/img/bin/chk_power.sh
+
 if [ -f /tmp/ha_role ];then
-    /img/bin/ha/script/stop_ha.sh
+  /img/bin/ha/script/stop_ha.sh
 fi
+
 /img/bin/setfan.sh unload
 sync
-sync
-sync
+
 rm -f /etc/boot.flag
 #/img/bin/rc/rc.net shutdown_network
 #disable warning led
+
 if [ "`/img/bin/check_service.sh warning_led`" = "1" ];then
   echo 0 0 SLED 1 0 > /var/tmp/oled/pipecmd
   echo 0 0 SLED 1 1 > /var/tmp/oled/pipecmd
@@ -77,4 +78,3 @@ sync
 
 /img/bin/stop_raid.sh
 /sbin/reboot -f ${shutdown_para}
-

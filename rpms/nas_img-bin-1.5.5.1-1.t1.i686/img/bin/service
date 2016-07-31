@@ -74,7 +74,7 @@ if [ "$1" = "stop" ]; then
     cd -
   fi
 
-  killall mp3_ripper
+  # killall mp3_ripper
   sync;
   sleep 3
 
