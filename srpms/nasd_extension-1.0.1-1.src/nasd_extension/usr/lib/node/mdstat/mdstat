@@ -1,0 +1,87 @@
+#!/usr/bin/env node
+
+function mdstat() {
+    var MDSTAT = '/proc/mdstat';
+    
+    var fs = require('fs'),
+        data = fs.readFileSync(MDSTAT, 'utf8'),
+        result = {};
+    
+    data = data.match(/md\d+ :(.*\n){2,4}      \n/g);
+    
+    for (var i = 0 ; i < data.length ; ++i) {
+        var base = data[i].match(/(md.*) : (.*) (raid\d+|linear|multipath) (.*\[\d\])*\n/),
+            md = base[1],
+            chunk,
+            level,
+            online,
+            recovery,
+            rounding,
+            algorithm;
+        
+        result[md] = {};
+        result[md].status = base[2];
+        result[md].raid = base[3];
+        result[md].disks = {};
+        
+        var disks = base[4].match(/\w+\d+\[\d+\](\(.\))?/g);
+        for (var j = 0 ; j < disks.length ; ++j) {
+            disks[j] = disks[j].match(/(\w+\d+)\[(\d+)\](\((.)\))?/);
+            result[md].disks[disks[j][1]] = {
+                index: +disks[j][2],
+                spare: disks[j][4]
+            }
+        }
+        
+        // Parse blocks
+        result[md].blocks = +data[i].match(/(\d+) blocks/)[1];
+        
+        // Parse super
+        result[md].super = +data[i].match(/super (\d+.?\d*) /)[1];
+        
+        rounding = data[i].match(/ (\d+.) rounding/);
+        result[md].rounding = rounding ? rounding[1] : rounding;
+        
+        // Parse level
+        level = data[i].match(/level (\d+)/);
+        result[md].level = level ? +level[1] : level;
+        
+        // Parse chunk
+        chunk = data[i].match(/(\d+k) chunk/);
+        result[md].chunk = chunk ? chunk[1] : chunk;
+        
+        // Parse algorithm
+        algorithm = data[i].match(/algorithm (\d+)/);
+        result[md].algorithm = algorithm ? +algorithm[1] : algorithm;
+        
+        // Parse online
+        online = data[i].match(/\[(\d+)\/(\d+)\] \[([U_]*)\]/);
+        result[md].online = online ? {
+            total: +online[1],
+            online: +online[2],
+            map: online[3]
+        } : online ;
+        
+        // Parse recovery
+        progress = data[i].match(/(resync|recovery) = (.*)% \((\d+)\/(\d+)\) finish=(.*)min speed=(.*)/);
+        result[md].progress = progress ? {
+            action: progress[1],
+            percent: +progress[2],
+            block_finished: +progress[3],
+            block_total: +progress[4],
+            time: progress[5],
+            speed: progress[6]
+        } : progress;
+    }
+    
+    return result;
+}
+//console.info(process.mainModule.filename);
+
+if (/mdstat$/.test(process.mainModule.filename)) {
+    var util = require('util');
+    console.info(util.inspect(mdstat(), false, 3));
+} else {
+    module.exports = mdstat;
+}
+

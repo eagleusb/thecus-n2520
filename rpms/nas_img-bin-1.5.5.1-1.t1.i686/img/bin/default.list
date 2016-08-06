@@ -17,7 +17,6 @@ etc/shadow
 etc/ssh/id_dsa.new
 etc/ssh/id_dsa.pub.new
 etc/sysconfig/network-scripts/ifcfg-eth0
-etc/sysconfig/network-scripts/ifcfg-eth1
 etc/version
 etc/yum.repos.d/pkg.repo
 etc/cfg/samba/passdb.tdb

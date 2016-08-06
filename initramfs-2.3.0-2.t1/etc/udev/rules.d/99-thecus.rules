@@ -1,0 +1,11 @@
+# for N2200XXX network
+#ACTION=="add", SUBSYSTEM=="net", BUS=="pci", ID=="0000:01:00.0", NAME="eth1"
+#ACTION=="add", SUBSYSTEM=="net", BUS=="pci", ID=="0000:02:00.0", NAME="eth0"
+
+# for N2800 network
+#ACTION=="add", SUBSYSTEM=="net", SUBSYSTEMS=="pci", KERNELS=="0000:00:1c.1", NAME="eth1"
+#ACTION=="add", SUBSYSTEM=="net", SUBSYSTEMS=="pci", KERNELS=="0000:00:1c.0", NAME="eth0"
+
+# for disk hotplug
+ACTION=="add", KERNEL=="sd[ab]", RUN+="/img/bin/raid_monitor.sh add $env{DEVNAME}"
+ACTION=="remove", KERNEL=="sd[ab]", RUN+="/img/bin/raid_monitor.sh remove $env{DEVNAME}"

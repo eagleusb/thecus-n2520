@@ -1,0 +1,61 @@
+#!/bin/sh
+
+is_running(){
+	kill -0 `cat /tmp/mnid.pid 2>/dev/null` >/dev/null 2>&1
+	if [ $? -eq 0 ]; then
+		return 1
+	else
+		return 0
+	fi
+}
+
+start(){
+	if [ -x "/opt/udpr/bin/udpr" ];then
+		mkfifo /tmp/mnid.agent.in
+		mkfifo /tmp/mnid.agent.out
+		/opt/udpr/bin/udpr &
+	elif [ -x "/usr/bin/node" ];then
+		node /opt/nas_nasd/mnid.js
+	fi
+}
+
+stop(){
+	kill `cat /tmp/mnid.pid`
+}
+
+case "$1" in
+	start)
+			is_running
+			if [ $? -eq 0 ]; then
+				# clean old files
+				rm -f /tmp/mnid.*
+
+				# start mni daemon
+				start
+
+				# wait 10 sec until the daemon is running
+				is_running
+				ret=$?	
+				i=1
+				while [ ${ret} -eq 0 ]
+				do
+					if [ $i -gt 10 ]; then
+						break
+					fi
+					sleep 1
+					is_running
+					ret=$?
+					i=$(($i+1))
+				done
+			fi
+		;;
+	stop)
+		stop
+		;;
+	restart)
+		stop
+		start
+		;;
+	*)
+		;;
+esac

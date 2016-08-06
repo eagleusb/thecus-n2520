@@ -8,10 +8,10 @@ else
   ntp_server=`sqlite /etc/cfg/conf.db "select v from conf where k='ntp_server'"`
   if [ $ntp_server != "" ];then
     echo "Set NTP Server to : ${ntp_server}"
-    /img/bin/ntpdate.sh "${ntp_server}" 
+    /img/bin/ntpdate.sh "${ntp_server}"
   else
-    echo "Set NTP Server to Default : clock1.unc.edu , ntp-1.mcs.anl.gov"
-    /img/bin/ntpdate.sh ntp-1.mcs.anl.gov 
-    /img/bin/ntpdate.sh clock1.unc.edu 
+    echo "Set NTP Server to Default : European pool NTP servers"
+    /img/bin/ntpdate.sh 0.europe.pool.ntp.org
+    /img/bin/ntpdate.sh 1.europe.pool.ntp.org
   fi
 fi

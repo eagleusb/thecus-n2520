@@ -1,0 +1,75 @@
+#!/bin/sh
+
+WORK_ROOT=`dirname $0`
+PATH=$PATH:/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin:$WORK_ROOT
+
+show_usage(){
+	echo "Usage:"
+	echo " `basename $0` <Type> <Device> <options> [<file>]"
+	echo "Image update utility for boot device."
+	echo
+	echo "  Type could be:"
+	echo "   dom               Target device is DOM"
+	echo "   emmc              Target device is 2G eMMC (for Evansport)"
+	echo "   emmc4             Target device is 4G eMMC (for Evansport)"
+	echo "   flash             Target device is SPI Flash (for Evansport)"
+	echo "   apm               Target device is NAND Flash (for APM)"
+	echo
+	echo "  Device:            Target device, for Evanport type, it could be"
+	echo "                     a bin file."
+	echo 
+	echo "  Options:"
+	echo "   -k | --kernel <file>         Update kernel by file"
+	echo "   -i | --initrd <file>         Update initramfs by file"
+	echo "   -v | --info                  Display version information"
+	echo
+	echo "  Options for Evansport device only:"
+	echo "   -s | --show                  Display MFH table"
+	echo "   -g | --signature             Display MFH Signature"
+	echo 
+	echo "  Options for APM device only:"
+	echo "   -d | --dtb <file>            Update device tree by file"
+	echo "   -p | --printenv              Print u-boot environment"
+	echo
+
+	exit $RET
+}
+
+init_env(){
+	TYPE="$1"
+	DEVICE="$2"
+	COMMANDS="$3 $4"
+	RET=0
+}
+
+[ -z "$1" ] && show_usage
+
+init_env "$@"
+
+case "$TYPE" in
+dom)
+	dom_util "$DEVICE" $COMMANDS
+	RET=$?
+	;;
+emmc)
+	ceflash "emmc" "$DEVICE" $COMMANDS
+	RET=$?
+	;;
+emmc4)
+	ceflash "emmc4" "$DEVICE" $COMMANDS
+	RET=$?
+	;;
+flash)
+	ceflash "flash" "$DEVICE" $COMMANDS
+	RET=$?
+	;;
+apm)
+	apm_util "$DEVICE" $COMMANDS
+	RET=$?
+	;;
+*)
+	show_usage
+	;;
+esac
+
+exit $RET

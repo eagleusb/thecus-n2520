@@ -1,0 +1,71 @@
+#!/bin/sh
+
+PATH=$PATH:/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin:/usr/lib/nas_img-tools
+
+show_usage(){
+	echo "Usage:"
+	echo " `basename $0` <option> <parameter1> [parameter2]..."
+	echo "CE image generated tool"
+	echo 
+	echo "  Options:"
+	echo "   -e | --env <file>          create uboot environment image by file"
+	echo "             output file would be uenv.bin"
+	echo "   -v | --version <string>    create version image by input string"
+	echo "             output file would be fver.bin"
+	echo "   -u | --update <device> <item> <file>"
+	echo "                              Update specified item by file on"
+	echo "                              specified device."
+	echo 
+	echo "  Device:            Target device, could be a bin file."
+	echo 
+	echo "  Item could be:"
+	echo 
+	echo "   UBOOT             U-Boot image"
+	echo "   ENV               U-boot environment settings"
+	echo "   KERNEL            Kernel image"
+	echo "   DTD               Device tree image"
+	echo "   RAMDISK           Linux Ram disk"
+	echo "   VERSION           Image version"
+
+	exit $RET
+}
+
+init_env(){
+	OPT="$1"
+	PARAM1="$2"
+	PARAM2="$3"
+	PARAM3="$4"
+
+	RET=0
+}
+
+if [ -z "$1" ];then
+	[ -z"$2" ] && RET=1
+	show_usage
+fi
+
+init_env "$@"
+source libapm
+
+case "$OPT" in
+-e|--env)
+	gen_uenv "$PARAM1"
+	;;
+-v|--version)
+	gen_fver "$PARAM1"
+	;;
+-u|--update)
+	DEVICE="$PARAM1"
+	[ ! -e "$DEVICE" ] && echo "${DEVICE}: file not found!" && exit 1
+
+	update_item "$PARAM2" "$PARAM3"
+	;;
+*)
+	RET=1
+	show_usage
+	;;
+esac
+RET=$?
+
+exit $RET
+

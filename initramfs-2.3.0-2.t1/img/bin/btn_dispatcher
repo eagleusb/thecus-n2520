@@ -1,0 +1,26 @@
+#!/bin/sh 
+sleep_secs=1
+
+while true
+do
+  tmp_event=`cat /proc/thecus_event | awk '(/ON||OFF/) {print $0}'`
+  btn_on=`echo ${tmp_event} | grep ON | cut -d" " -f1`
+
+  if [ "$btn_on" != "" ]; then
+    case "$btn_on" in
+      "PWR" ) 
+	echo "Buzzer 1" > /proc/thecus_io
+	sleep 3
+	echo "Buzzer 0" > /proc/thecus_io
+	sh -c "poweroff -f"
+        ;;
+      "Copy" )
+	touch /run/Copy_ON.flag
+	sleep 5
+	rm -f /run/Copy_ON.flag
+	;;
+    esac
+  fi
+
+  sleep ${sleep_secs}
+done

@@ -1,0 +1,132 @@
+#!/bin/sh
+
+echo -e "img-tools Ver 1.1.3\n"
+
+gen_fver(){
+	local INPUT="$1"
+	[ -n "$2" ] && local OFILE="$2" || local OFILE="fver.bin"
+	local TMPFILE="/dev/shm/fver.tmp"
+	local VLEN="`printf "%08x" ${#INPUT}`"
+	# transfer length to little endian binary
+	str2bin "`printf "%08x" ${#INPUT}`" "$TMPFILE" "l"
+	echo "$INPUT" >> $TMPFILE
+	# create a flash type image (filled with 0xff)
+	tr "\000" "\377" < /dev/zero |\
+		dd of=$OFILE bs=512 count=$((VERSION_LEN/512)) iflag=fullblock
+	dd if=$TMPFILE of=$OFILE conv=notrunc
+	rm -rf $TMPFILE
+
+	return 0
+}
+
+display_info(){
+	local TMPVER="/dev/shm/imgver"
+	# Be careful that we store version length in little endian, therefore
+	# we have to read byte-by-byte to assemble this 4-bytes value back
+	# correctly to remove the effect caused by different processors.
+	local VLEN="0x`hexdump -C $DEVICE -s $VERSION -n 4 |\
+	       awk '{if(NR==1){print $5$4$3$2}}'`"
+	dd if=$DEVICE of=$TMPVER bs=1 skip=$((VERSION + 4)) count=$((VLEN)) \
+		> /dev/null 2>&1
+	echo "$TYPE version : `cat $TMPVER`"
+	rm -rf $TMPVER
+
+	return 0
+}
+
+str2bin(){
+	local STRING="$1"
+	local HEX2BIN="$2"
+	local REVERT="$3"
+	local SIG2HEX=""
+	# generate binary write
+	if [ "$REVERT" = "l" ];then
+		# transfer to little endian
+		for x in `seq ${#STRING} -2 1`;do
+			SIG2HEX="${SIG2HEX}\x`expr substr $STRING $((x-1)) 2`"
+		done
+	else
+		for x in `seq 1 2 ${#STRING}`;do
+			SIG2HEX="${SIG2HEX}\x`expr substr $STRING $x 2`"
+		done
+	fi
+	eval printf \"$SIG2HEX\" > $HEX2BIN
+}
+
+bin_program(){
+	local ITEM="$1"
+	local FILE="$2"
+	local OFFSET="$3"
+	local BSIZE="$4"
+	local ESIZE="$5"
+	local EFORCE="$6"
+
+	echo "Update entry : $ITEM"
+	# do not use 'losetup -f --show' instead to have compatibility with
+	# busybox losetup which has no --show option.
+	local LODEV=`losetup -f`
+	[ "$?" -ne 0 ] && echo "No available loop device found." && return 1
+	losetup -o $OFFSET $LODEV $DEVICE
+	[ "$?" -ne 0 ] && echo "Loop device setup failed." && return 1
+
+	if [ "`readlink -f $DEVICE | sed 's/[0-9]//g'`" = "/dev/mtdblock" ];then
+		local IS_MTDBLK=1
+	else
+		local IS_MTDBLK=0
+	fi
+	local MTDBLK_ALIGN=$((OFFSET%512))
+
+	# Erase page before program if target is flash device or
+	# forcing erase is set.
+	if [ "$IS_MTDBLK" = "1" -o "$EFORCE" = "1" ];then
+		echo "# Erasing ..."
+		# Check if the offset is 512 aligned, since losetup will attach
+		# mtdblock with 512 bytes aligned offset automatically.
+		# Currently it only effects evansport model's boot script update
+		# on flash device, therefore we do not do erasing on non-512 bytes 
+		# aligned offset.
+		# For future models, developer needs be careful to avoid to use
+		# non-512 bytes aligned offset for flash items.
+		if [ "$MTDBLK_ALIGN" -eq 0 ];then
+			tr '\000' '\377' < /dev/zero | dd of=$LODEV \
+				bs=$BSIZE count=$ESIZE iflag=fullblock conv=notrunc
+			sync
+		fi
+	fi
+	# update image
+	echo "# Programming ..."
+	if [ "$MTDBLK_ALIGN" -eq 0 -o "$IS_MTDBLK" = "0" ];then
+		dd if=$FILE of=$LODEV conv=notrunc
+	else
+		local SEEK_BLK=$((MTDBLK_ALIGN/BSIZE))
+		dd if=$FILE of=$LODEV conv=notrunc bs=$BSIZE \
+			seek=$SEEK_BLK count=$((ESIZE-SEEK_BLK))
+	fi
+	# wait for loop device ready to detach.
+	local LORET=1
+	while [ "$LORET" -ne 0 ];do
+		sync
+		losetup -d $LODEV > /dev/null 2>&1
+		LORET=$?
+	done
+}
+
+mtd_program(){
+	local ITEM="$1"
+	local MITEM="$2"
+	local FILE="$3"
+	local MTDDEV=""
+	local RET=1
+
+	echo "Update entry : $ITEM"
+	MTDDEV="/dev/`awk -F':' '/'$MITEM'/ {print $1}' /proc/mtd`"
+	echo "# Programming ..."
+	if [ -c "$MTDDEV" ];then
+		busybox flashcp $FILE $MTDDEV -vf
+		RET=$?
+	else
+		echo "Target MTD device is not found!"
+	fi
+
+	return $RET
+}

@@ -1,0 +1,22 @@
+#!/usr/bin/env node
+
+function Partitions() {
+    var me = this,
+        fs = require('fs'),
+        data = fs.readFileSync('/proc/partitions', 'utf8'),
+        data = data.split(/\n/g);
+    
+    for (var i = 0 ; i < data.length ; ++i) {
+        data[i] = data[i].match(/ +(\d+) +(\d+) +(\d+) (\w+)/);
+        if (!data[i]) {
+            continue;
+        }
+        me[data[i][4]] = {
+            major: +data[i][1],
+            minor: +data[i][2],
+            blocks: +data[i][3]
+        }
+    }
+}
+
+module.exports = Partitions;

@@ -1,0 +1,26 @@
+#!/bin/sh
+##################################################################
+#
+#  First, define some variables globally needed
+#
+##################################################################
+diag_flag_file="diagnostics.flag"
+diag_mpath="/mnt"
+diag_log_file="diagnostics.log"
+back_dir="systemDebug"
+diag_work="/img/bin/diagnostics"
+enckey="ThecusOS6"
+memtester="/usr/bin/memtester"
+smartctl="/usr/sbin/smartctl"
+
+##################################################################
+#
+#  Second, declare sub routines needed
+#
+##################################################################
+diag_log() {
+    if [ $# -ge 1 ]; then
+	time_stamp=`date +'%Y/%m/%d %H:%M:%S'`
+	echo "${time_stamp} : $1" >> ${diag_mpath}/${diag_log_file} 
+    fi
+}

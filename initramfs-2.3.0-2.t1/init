@@ -1,0 +1,336 @@
+#!/bin/sh
+# -*- mode: shell-script; indent-tabs-mode: nil; sh-basic-offset: 4; -*-
+# ex: ts=8 sw=4 sts=4 et filetype=sh
+#
+# Thecus OS6 initramfs
+#
+
+
+# create initramfs rootfs
+/sbin/busybox mkdir -p -m 0755 /dev /proc /run /sys /tmp /var
+/sbin/busybox mkdir -p -m 0755 /run/lock
+# Install busybox
+/sbin/busybox mount -t proc -o nosuid,noexec,nodev proc /proc >/dev/null 2>&1
+/sbin/busybox --install -s
+# setup var folder
+ln -sf /run /var/run
+ln -sf /run/lock /var/lock
+
+export -p > /tmp/export.orig
+
+emergency_shell(){
+		_rdshell_name="os6"
+		export PS1="$_rdshell_name:\${PWD}# "
+	[ -e /.profile ] || echo "exec 0<>/dev/console 1<>/dev/console 2<>/dev/console" > /.profile
+	sh -i -l
+}
+
+NEWROOT="/sysroot"
+[ -d $NEWROOT ] || mkdir -p -m 0755 $NEWROOT
+
+trap "emergency_shell Signal caught!" 0
+OLDPATH=$PATH
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+RD_DEBUG=""
+. /lib/dracut-lib.sh
+
+[ -c /dev/null ] || mknod -m 0666 /dev/null c 1 3
+
+# mount some important things
+[ ! -d /proc/self ] && \
+		mount -t proc -o nosuid,noexec,nodev proc /proc >/dev/null 2>&1
+
+[ ! -d /sys/kernel ] && \
+		mount -t sysfs -o nosuid,noexec,nodev sysfs /sys >/dev/null 2>&1
+
+if ! ismounted /dev; then
+		# try to mount devtmpfs
+		if ! mount -t devtmpfs -o mode=0755,nosuid devtmpfs /dev >/dev/null 2>&1; then
+				# if it failed fall back to normal tmpfs
+				mount -t tmpfs -o mode=0755,nosuid tmpfs /dev >/dev/null 2>&1
+				# Make some basic devices first, let udev handle the rest
+				mknod -m 0666 /dev/null c 1 3
+				mknod -m 0666 /dev/ptmx c 5 2
+				mknod -m 0600 /dev/console c 5 1
+				mknod -m 0660 /dev/kmsg c 1 11
+		fi
+fi
+
+# prepare the /dev directory
+[ ! -h /dev/fd ] && ln -s /proc/self/fd /dev/fd >/dev/null 2>&1
+[ ! -h /dev/stdin ] && ln -s /proc/self/fd/0 /dev/stdin >/dev/null 2>&1
+[ ! -h /dev/stdout ] && ln -s /proc/self/fd/1 /dev/stdout >/dev/null 2>&1
+[ ! -h /dev/stderr ] && ln -s /proc/self/fd/2 /dev/stderr >/dev/null 2>&1
+
+if ! ismounted /dev/pts; then
+		mkdir -m 0755 /dev/pts
+		mount -t devpts -o gid=5,mode=620,noexec,nosuid devpts /dev/pts >/dev/null 2>&1
+fi
+
+if ! ismounted /dev/shm; then
+		mkdir -m 0755 /dev/shm
+		mount -t tmpfs -o mode=1777,nosuid,nodev tmpfs /dev/shm >/dev/null 2>&1
+fi
+
+if ! ismounted /run; then
+		mkdir -m 0755 /newrun
+		mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs /newrun >/dev/null 2>&1
+		cp -a /run/* /newrun >/dev/null 2>&1
+		mount --move /newrun /run
+		rm -fr /newrun
+fi
+
+[ -d /run/initramfs ] || mkdir -p -m 0755 /run/initramfs
+
+/img/bin/pic.sh LCM_MSG "System" "Check MDEV"
+sleep 1
+echo /sbin/mdev > /proc/sys/kernel/hotplug
+mdev -s
+
+## write model name to /var/run/model
+[ -d /var/run ] || mkdir -p /var/run
+cat /proc/thecus_io | awk '/MODELNAME/{print $2}' > /var/run/model
+
+# Attach device if needed
+/img/bin/model_preset.sh dev
+
+# Start Network
+ifconfig lo up
+
+# Configure PHY before setup NIC
+/img/bin/model_preset.sh phy init
+
+# Check link speed
+/img/bin/model_preset.sh link
+
+/img/bin/pic.sh LCM_MSG "System" "Get IP"
+sleep 1
+udhcpc -s /img/udhcpc/default.script -t10 -n -i eth0
+if [ $? -ne 0 ]; then
+	# failed
+	echo "DHCP get IP failed. Use static IP instead of."
+				ifconfig eth0 192.168.1.100 broadcast 192.168.1.255
+fi
+telnetd -l /bin/ash
+# get debug
+TDB="$(getarg TDB=)"
+if [ "$TDB" != "1" ];then
+		TDB=0
+		TO_TRASH=' > /dev/null 2>&1'
+else
+		TO_TRASH=''
+fi
+export TDB TO_TRASH
+
+# get manifest.txt from nas_img-bin rpm 
+eval /img/bin/get_manifest.sh $TO_TRASH
+
+# check if we need to setup MCU control
+/img/bin/model_preset.sh mcu
+
+# start mni daemon to receive message
+[ $TDB -ne 1 ] && /etc/rc.d/mni_daemon start
+
+# reset cdrom polling
+for cdrom in /sys/block/sr*; do
+		[ -e "$cdrom" ] || continue
+		if [ -e "$cdrom"/events_poll_msecs ]; then
+				echo -1 > "$cdrom"/events_poll_msecs
+		fi
+done
+
+# mount scripts actually try to mount the root filesystem, and may
+# be sourced any number of times. As soon as one suceeds, no more are sourced.
+for f in /img/mount/*.sh; do
+		/img/bin/pic.sh LCM_MSG "System" "Check mount"
+		sleep 1
+
+		[ -f "$f" ] && . "$f"
+done
+
+[ ! -d "$NEWROOT/proc" ] \
+	&& {
+		flock -s 9
+		/img/bin/pic.sh LCM_MSG "Please Check" "intelligentNAS"
+		if [ $TDB -ne 1 ]; then
+			echo "[ASSIST][SWITCH_ROOT_FAIL][SHUTDOWN][SHUTDOWN]" > /tmp/mnid.agent.in
+			while [ 1 ];do
+				read line < /tmp/mnid.agent.out
+				if [ "$line" = "[SHUTDOWN]" ]; then
+					/img/bin/pic.sh LCM_MSG "System" "Shutting down"
+					echo "[SHUTTING_DOWN]" > /tmp/mnid.agent.in
+					poweroff -f
+					break
+				fi
+			done
+		fi
+		emergency_shell "Can't mount root filesystem"
+	} 9>/.console_lock
+
+{
+		echo -n "Mounted root filesystem "
+		while read dev mp rest; do [ "$mp" = "$NEWROOT" ] && echo $dev; done < /proc/mounts
+} | vinfo
+
+# by the time we get here, the root filesystem should be mounted.
+# Try to find init and mount /usr, if needed to access init.
+unset __usr_found
+for i in "$(getarg real_init=)" "$(getarg init=)" /sbin/init /etc/init /init /bin/sh; do
+		[ -n "$i" ] || continue
+
+	# use native readlink instead of busybox
+		__p=$(/bin/readlink -m "$NEWROOT$i")
+		if [ -n "$__p" ] \
+				&& [ "x$__usr_found" = "x" ] \
+				&& [ ! -x "$__p" ] \
+				&& strstr "$__p" "$NEWROOT/usr" \
+				; then
+				# we have to mount /usr
+				while read dev mp fs opts rest; do
+						if [ "$mp" = "/usr" ]; then
+								echo "$dev $NEWROOT$mp $fs ${opts},ro $rest"
+								__usr_found="1"
+								break
+						fi
+				done < "$NEWROOT/etc/fstab" >> /etc/fstab
+				if [ "x$__usr_found" != "x" ]; then
+						info "Mounting /usr"
+						mount "$NEWROOT/usr" 2>&1 | vinfo
+				fi
+		fi
+
+		__p=$(/bin/readlink -f "$NEWROOT$i")
+		if [ -x "$__p" ]; then
+				INIT="$i"
+				break
+		fi
+done
+
+[ "$INIT" ] || {
+		echo "Cannot find init!"
+		echo "Please check to make sure you passed a valid root filesystem!"
+		emergency_shell
+}
+
+set +x # Turn off debugging for this section
+# Clean up the environment
+for i in $(export -p); do
+		i=${i#declare -x}
+		i=${i#export}
+		strstr "$i" "=" || continue
+		i=${i%%=*}
+		[ -z "$i" ] && continue
+		case $i in
+				root|PATH|HOME|TERM|PS4|RD_*)
+						:;;
+				*)
+						unset "$i";;
+		esac
+done
+. /tmp/export.orig 2>/dev/null || :
+rm -f /tmp/export.orig
+
+initargs=""
+read CLINE </proc/cmdline
+if getarg init= >/dev/null ; then
+		set +x # Turn off debugging for this section
+		ignoreargs="console BOOT_IMAGE"
+		# only pass arguments after init= to the init
+		CLINE=${CLINE#*init=}
+		set -- $CLINE
+		shift # clear out the rest of the "init=" arg
+		for x in "$@"; do
+				for s in $ignoreargs; do
+						[ "${x%%=*}" = $s ] && continue 2
+				done
+				initargs="$initargs $x"
+		done
+		unset CLINE
+else
+		set +x # Turn off debugging for this section
+		set -- $CLINE
+		for x in "$@"; do
+				case "$x" in
+						[0-9]|s|S|single|emergency|auto ) \
+								initargs="$initargs $x"
+								;;
+				esac
+		done
+fi
+[ "$RD_DEBUG" = "yes" ] && set -x
+
+# setup new root environment
+mount --move /proc $NEWROOT/proc >/dev/null 2>&1
+mount --move /sys $NEWROOT/sys >/dev/null 2>&1
+mount --move /dev $NEWROOT/dev >/dev/null 2>&1
+
+if [ -d "$NEWROOT"/run ]; then
+		NEWRUN="${NEWROOT}/run"
+	cp -a $NEWRUN/* /run
+	mount --move /run $NEWRUN
+		NEWINITRAMFSROOT="$NEWRUN/initramfs"
+
+		if [ "$NEWINITRAMFSROOT/lib" -ef "/lib" ]; then
+				for d in bin etc lib lib64 sbin tmp usr var; do
+						[ -h /$d ] && ln -fsn $NEWINITRAMFSROOT/$d /$d
+				done
+		fi
+else
+		NEWRUN=/dev/.initramfs
+		mkdir -m 0755 "$NEWRUN"
+		mount --bind /run/initramfs "$NEWRUN"
+fi
+
+# remove helper symlink
+[ -h /dev/root ] && rm -f /dev/root
+sync ; sync
+info "Switching root"
+
+unset PS4
+
+SWITCH_ROOT=$(command -v switch_root)
+PATH=$OLDPATH
+export PATH
+
+unset RD_DEBUG
+exec $SWITCH_ROOT "$NEWROOT" "$INIT" $initargs || {
+	PATH=/usr/sbin:/usr/bin:/sbin:/bin
+	export PATH
+	mount --move $NEWROOT/proc /proc >/dev/null 2>&1
+	mount --move $NEWROOT/sys /sys >/dev/null 2>&1
+	mount --move $NEWROOT/dev /dev >/dev/null 2>&1
+	mount --move $NEWRUN /run
+	umount $NEWROOT
+	/img/bin/pic.sh LCM_MSG "Please Check" "intelligentNAS"
+	if [ "$TDB" != "1" ]; then
+		echo "[ASSIST][SWITCH_ROOT_FAIL][SHUTDOWN,RE_INSTALL][SHUTDOWN]" > /tmp/mnid.agent.in
+		while [ 1 ];do
+			read line < /tmp/mnid.agent.out
+			if [ "$line" = "[RE_INSTALL]" ]; then
+				sh /img/bin/init_install.sh
+				PATH=$OLDPATH
+				export PATH
+				mount --move /proc $NEWROOT/proc >/dev/null 2>&1
+				mount --move /sys $NEWROOT/sys >/dev/null 2>&1
+				mount --move /dev $NEWROOT/dev >/dev/null 2>&1
+				mount --move /run $NEWRUN
+				exec $SWITCH_ROOT "$NEWROOT" "$INIT" $initargs || {
+					warn "Something went very badly wrong in the initramfs.	Please "
+					warn "file a bug against dracut."
+					emergency_shell
+				}
+				break
+			elif [ "$line" = "[SHUTDOWN]" ]; then
+				/img/bin/pic.sh LCM_MSG "System" "Shutting down"
+				echo "[SHUTTING_DOWN]" > /tmp/mnid.agent.in
+				poweroff -f
+				break
+			fi
+		done
+	fi
+	warn "Something went very badly wrong in the initramfs.	Please "
+	warn "file a bug against dracut."
+	emergency_shell
+}
